@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run",
     "test:scale": "vitest run --project server-scale",
-    "typecheck": "tsc -p server && npm run check -w web",
+    "typecheck": "tsc -p server && tsc -p tools/fake-xtream && npm run check -w web",
     "dev:server": "npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w web",
