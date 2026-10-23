@@ -1,0 +1,21 @@
+{
+  "name": "iptvnator-lite",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "workspaces": ["shared", "server", "web", "tools/fake-xtream"],
+  "scripts": {
+    "test": "vitest run",
+    "test:scale": "vitest run --project server-scale",
+    "typecheck": "tsc -p server && npm run check -w web",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web",
+    "start": "npm start -w server"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}

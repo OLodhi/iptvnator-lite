@@ -1,0 +1,18 @@
+{
+  "name": "@tv/server",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/main.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "@tv/shared": "*",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
