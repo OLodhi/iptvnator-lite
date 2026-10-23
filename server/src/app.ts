@@ -7,9 +7,11 @@ import type { Config } from './config.ts';
 import type { Db } from './db/db.ts';
 import type { ProviderService } from './providers/service.ts';
 import { healthRoutes } from './routes/health.ts';
+import type { SyncRunner } from './catalogue/syncRunner.ts';
 import { providerRoutes } from './routes/providers.ts';
+import { syncRoutes } from './routes/sync.ts';
 
-export type AppDeps = { config: Config; db: Db; providers: ProviderService };
+export type AppDeps = { config: Config; db: Db; providers: ProviderService; sync: SyncRunner };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
@@ -19,6 +21,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     async (api) => {
       await api.register(healthRoutes);
       await api.register(providerRoutes(deps.providers));
+      await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
     },
     { prefix: '/api' },
   );

@@ -7,6 +7,15 @@ export type ProviderSummary = {
   maxConnections: number | null;
   lastSyncedAt: number | null;
 };
+export type SyncCounts = { categories: number; items: number; removed: number };
+export type SyncResult = Record<Kind, SyncCounts>;
+export type SyncStatus = {
+  state: 'idle' | 'running' | 'failed';
+  startedAt: number | null;
+  finishedAt: number | null;
+  result: SyncResult | null;
+  error: string | null;
+};
 export type AddProviderRequest = {
   kind: 'xtream';
   name?: string;

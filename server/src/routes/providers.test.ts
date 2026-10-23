@@ -5,6 +5,7 @@ import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { buildApp } from '../app.ts';
+import { createSyncRunner } from '../catalogue/syncRunner.ts';
 import { openDb } from '../db/db.ts';
 import { createProviderService } from '../providers/service.ts';
 import { testConfig } from '../testing/config.ts';
@@ -21,7 +22,7 @@ beforeAll(async () => {
   const config = testConfig();
   const db = openDb(':memory:');
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent, onAdded });
-  app = await buildApp({ config, db, providers });
+  app = await buildApp({ config, db, providers, sync: createSyncRunner({ db, providers }) });
 });
 
 afterAll(async () => {

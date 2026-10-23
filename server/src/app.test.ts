@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from 'vitest';
 import { buildApp } from './app.ts';
+import { createSyncRunner } from './catalogue/syncRunner.ts';
 import { openDb } from './db/db.ts';
 import { createProviderService } from './providers/service.ts';
 import { testConfig } from './testing/config.ts';
@@ -10,7 +11,8 @@ import { testConfig } from './testing/config.ts';
 async function appFor(webDir: string) {
   const db = openDb(':memory:');
   const config = testConfig({ webDir });
-  return buildApp({ config, db, providers: createProviderService({ db, userAgent: config.defaultUserAgent }) });
+  const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
+  return buildApp({ config, db, providers, sync: createSyncRunner({ db, providers }) });
 }
 
 function webDirWithIndex(): string {
