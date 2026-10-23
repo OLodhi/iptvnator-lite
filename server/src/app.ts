@@ -4,9 +4,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import type { ApiError } from '@tv/shared';
 import type { Config } from './config.ts';
+import type { Db } from './db/db.ts';
 import { healthRoutes } from './routes/health.ts';
 
-export type AppDeps = { config: Config };
+export type AppDeps = { config: Config; db: Db };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
