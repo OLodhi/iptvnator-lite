@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -17,6 +20,88 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await fake?.close();
+});
+
+async function withServer(
+  handler: Parameters<typeof createServer>[1],
+  run: (url: string) => Promise<void>,
+): Promise<void> {
+  const server: Server = createServer(handler);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    await run(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+}
+
+const clientFor = (serverUrl: string, timeoutMs = 200) =>
+  createXtreamClient({ serverUrl, username: 'u', password: 'p' }, { userAgent, timeoutMs });
+
+async function collect(it: AsyncIterable<{ remoteId: string }>, into: string[]): Promise<void> {
+  for await (const i of it) into.push(i.remoteId);
+}
+
+describe('xtream client streaming and errors', () => {
+  test('malformed body mid-array yields earlier items then PROVIDER_BAD_RESPONSE', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('[{"stream_id":1,"name":"A"},{"stream_id":2,"na}}}');
+      },
+      async (url) => {
+        const got: string[] = [];
+        await expect(collect(clientFor(url).streamItems('live'), got)).rejects.toMatchObject({ code: 'PROVIDER_BAD_RESPONSE' });
+        expect(got).toEqual(['1']);
+      },
+    );
+  });
+
+  test('a slow body that keeps trickling is not cut off by timeoutMs', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        const parts = ['[', '{"stream_id":1,"name":"A"},', '{"stream_id":2,"name":"B"},', '{"stream_id":3,"name":"C"}', ']'];
+        let i = 0;
+        const t = setInterval(() => {
+          res.write(parts[i++]!);
+          if (i === parts.length) {
+            clearInterval(t);
+            res.end();
+          }
+        }, 100);
+        res.on('close', () => clearInterval(t));
+      },
+      async (url) => {
+        const got: string[] = [];
+        await collect(clientFor(url, 250).streamItems('live'), got);
+        expect(got).toEqual(['1', '2', '3']);
+      },
+    );
+  });
+
+  test('a stalled body raises PROVIDER_UNREACHABLE', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('[{"stream_id":1,"name":"A"},');
+      },
+      async (url) => {
+        await expect(collect(clientFor(url).streamItems('live'), [])).rejects.toMatchObject({ code: 'PROVIDER_UNREACHABLE' });
+      },
+    );
+  });
+
+  test.each([401, 403])('HTTP %i maps to PROVIDER_AUTH_FAILED', async (status) => {
+    await withServer(
+      (_req, res) => res.writeHead(status).end(),
+      async (url) => {
+        await expect(clientFor(url).authenticate()).rejects.toMatchObject({ code: 'PROVIDER_AUTH_FAILED' });
+        await expect(collect(clientFor(url).streamItems('live'), [])).rejects.toMatchObject({ code: 'PROVIDER_AUTH_FAILED' });
+      },
+    );
+  });
 });
 
 describe('xtream client', () => {

@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import type { Duplex } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import streamJson from 'stream-json';
@@ -62,7 +62,11 @@ export function createXtreamClient(
   const u = encodeURIComponent(creds.username);
   const p = encodeURIComponent(creds.password);
 
-  async function request(action: string | null, extra: Record<string, string> = {}): Promise<Response> {
+  async function request(
+    action: string | null,
+    extra: Record<string, string> = {},
+    signal: AbortSignal = AbortSignal.timeout(timeoutMs),
+  ): Promise<Response> {
     const qs = new URLSearchParams({ username: creds.username, password: creds.password });
     if (action) qs.set('action', action);
     for (const [k, v] of Object.entries(extra)) qs.set(k, v);
@@ -70,7 +74,7 @@ export function createXtreamClient(
     try {
       res = await fetchFn(`${base}/player_api.php?${qs}`, {
         headers: { 'user-agent': opts.userAgent },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal,
       });
     } catch {
       // Deliberately drop the underlying error: its text can embed the credential-bearing URL.
@@ -129,27 +133,35 @@ export function createXtreamClient(
     },
 
     async *streamItems(kind) {
-      const res = await request(ITEM_ACTION[kind]);
-      if (!res.body) throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an empty response');
-      const source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
-      const items = makeStreamArray();
-      source.on('error', (e) => items.destroy(e));
-      source.pipe(makeParser()).pipe(items);
+      // timeoutMs bounds time-to-headers and body idle time; there is no total body deadline.
+      const ac = new AbortController();
+      let timer = setTimeout(() => ac.abort(), timeoutMs);
+      const touch = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => ac.abort(), timeoutMs);
+      };
+      let source: Readable | undefined;
       try {
+        const res = await request(ITEM_ACTION[kind], {}, ac.signal);
+        if (!res.body) throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an empty response');
+        touch();
+        source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+        source.on('data', touch);
+        const items = makeStreamArray();
+        // pipeline forwards an error from any stage to `items`, so the loop below sees it.
+        pipeline(source, makeParser(), items, () => {});
         for await (const chunk of items as AsyncIterable<{ value: unknown }>) {
           if (!isRecord(chunk.value)) continue;
           const item = normaliseItem(kind, chunk.value);
           if (item) yield item;
         }
       } catch (e) {
-        const name = (e as { name?: string }).name;
-        const timedOut = name === 'TimeoutError' || name === 'AbortError';
-        throw new ProviderError(
-          timedOut ? 'PROVIDER_UNREACHABLE' : 'PROVIDER_BAD_RESPONSE',
-          timedOut ? 'The provider connection timed out' : 'The provider returned an unreadable item list',
-        );
+        if (e instanceof ProviderError) throw e;
+        if (ac.signal.aborted) throw new ProviderError('PROVIDER_UNREACHABLE', 'The provider connection timed out');
+        throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an unreadable item list');
       } finally {
-        source.destroy();
+        clearTimeout(timer);
+        source?.destroy();
       }
     },
 
