@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { smallCatalogue } from './catalogue.ts';
+import { generateCatalogue, smallCatalogue } from './catalogue.ts';
 import type { FakeCatalogue, FakeKind } from './catalogue.ts';
 
 export type FakeXtreamOptions = {
@@ -292,11 +292,16 @@ if (import.meta.main) {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
+  // --generate <live>,<movie>,<series>,<categoriesPerKind> serves a generated catalogue.
+  const gen = flag('--generate')?.split(',').map(Number);
+  const generated = gen
+    ? generateCatalogue({ live: gen[0]!, movie: gen[1]!, series: gen[2]!, categoriesPerKind: gen[3]! })
+    : undefined;
   const defaultMedia = join(dirname(fileURLToPath(import.meta.url)), '..', 'media');
   const fake = await startFakeXtream({
     port: flag('--port') ? Number(flag('--port')) : undefined,
     mediaDir: flag('--media') ?? defaultMedia,
-    catalogue: smallCatalogue(),
+    catalogue: generated ?? smallCatalogue(),
   });
   console.log(`fake xtream listening on ${fake.url} (username u, password p)`);
 }

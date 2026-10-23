@@ -66,6 +66,25 @@ test('a later sync removes items the provider no longer lists', async () => {
   expect(r.movie.removed).toBe(1);
   expect(count("SELECT COUNT(*) FROM items WHERE kind='movie' AND remote_id='3'")).toBe(0);
   expect(count("SELECT COUNT(*) FROM items WHERE kind='movie'")).toBe(2);
+  // links and the FTS entry of the removed item are gone too
+  expect(count('SELECT COUNT(*) FROM item_categories WHERE item_id NOT IN (SELECT id FROM items)')).toBe(0);
+  expect(count('SELECT COUNT(*) FROM item_categories')).toBe(7);
+  const removedName = smallCatalogue().movie.items.find((i) => i.id === 3)!.name;
+  expect(
+    count('SELECT COUNT(*) FROM items_fts JOIN items ON items.id = items_fts.rowid WHERE items_fts MATCH ?', `"${removedName}"`),
+  ).toBe(0);
+  expect(count('SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?', `"${removedName}"`)).toBe(0);
+});
+
+test('a later sync removes categories the provider no longer lists', async () => {
+  await syncCatalogue({ db, client, providerId });
+  const c = smallCatalogue();
+  c.live.categories = c.live.categories.filter((x) => x.id !== '3');
+  c.live.items = c.live.items.filter((i) => i.categoryId !== '3');
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, now: later });
+  expect(count("SELECT COUNT(*) FROM categories WHERE kind='live' AND remote_id='3'")).toBe(0);
+  expect(count("SELECT COUNT(*) FROM categories WHERE kind='live'")).toBe(2);
 });
 
 test('a failed sync deletes nothing', async () => {
