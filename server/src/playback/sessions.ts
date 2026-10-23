@@ -30,10 +30,11 @@ export type SessionManagerDeps = {
   maxConnections: (providerId: number) => number | null;
   isReady: (outDir: string) => Promise<boolean>;
   now: () => number;
-  liveIdleMs: number /* 20_000 */;
-  vodIdleMs: number /* 60_000 */;
-  readyTimeoutMs: number /* 15_000 */;
-  maxRestarts: number /* 3 */;
+  liveIdleMs: number /* 20_000, per viewer */;
+  vodIdleMs: number /* 60_000, per viewer */;
+  readyTimeoutMs: number /* 15_000, covering probe + spawn + first segment */;
+  maxRestarts: number /* 3 consecutive */;
+  stallTimeoutMs: number /* 20_000 without a new live segment */;
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
 };
 
@@ -48,6 +49,7 @@ export type StartRequest = {
   quality: 'original';
 };
 
+/** `url` is `/api/sessions/<sessionId>/<clientId>/index.m3u8` or `/api/sessions/<sessionId>/<clientId>/direct`. */
 export type StartedSession = PlayResponse;
 
 export type PlaybackErrorCode = 'PROVIDER_CONNECTION_LIMIT' | 'STREAM_START_TIMEOUT' | 'UPSTREAM_ERROR';
@@ -65,8 +67,10 @@ export class PlaybackError extends Error {
 }
 
 export interface SessionManager {
+  /** Rejects with a plain Error (not a PlaybackError) if `clientId` doesn't match CLIENT_ID. */
   start(req: StartRequest): Promise<StartedSession>;
-  touch(sessionId: string): boolean;
+  /** Marks a viewer as still watching, re-adding them if needed; false if the session is gone. */
+  touch(sessionId: string, clientId: string): boolean;
   release(sessionId: string, clientId: string): Promise<void>;
   resolveFile(sessionId: string, file: string): string | null;
   directSource(sessionId: string): { url: string; userAgent: string } | null;
@@ -75,12 +79,17 @@ export interface SessionManager {
   stopAll(): Promise<void>;
 }
 
+export const CLIENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const READY_POLL_MS = 200;
-const REAP_INTERVAL_MS = 5_000;
+const HOUSEKEEPING_MS = 5_000;
 // FFmpeg hard-exits after more than three termination signals, so re-signalling a stuck one ends it.
 const KILL_RETRY_MS = 2_000;
+const RESTART_BACKOFF_MS = 1_000; // doubles per consecutive restart: 1 s, 2 s, 4 s
+const HEALTHY_RESET_MS = 60_000; // a live process producing segments this long earns back its restart budget
 // A plain file name: no separators, no drive or stream colons, not '.' or '..'.
 const PLAIN_FILE = /^[\w-][\w.-]*$/;
+// Session dirs are named by randomUUID(); nothing else in transcodeDir is ever removed.
+const SESSION_DIR = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** True once FFmpeg has written a playlist that lists at least one segment. */
 export async function defaultIsReady(outDir: string): Promise<boolean> {
@@ -107,34 +116,66 @@ type Session = {
   outDir: string | null;
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
-  restarts: number;
-  clients: Set<string>;
-  lastSeen: number;
+  probing: Promise<void> | null; // an ffprobe that is still connected
+  restarts: number; // consecutive
+  restartTimer: ReturnType<typeof setTimeout> | null;
+  lastSegment: number; // live watchdog: highest segment seen,
+  advancedAt: number; // when it last went up,
+  healthySince: number | null; // and when the current process first produced one
+  clients: Map<string, number>; // viewer → last seen
   stopped: Promise<void> | null;
 };
 
 const errorText = (err: unknown) => redactUrl(err instanceof Error ? err.message : String(err));
+const stoppedError = () => new PlaybackError('UPSTREAM_ERROR', 'Playback was stopped');
+
+function lastSegment(outDir: string): number {
+  let playlist: string;
+  try {
+    playlist = readFileSync(join(outDir, 'index.m3u8'), 'utf8');
+  } catch {
+    return -1;
+  }
+  let last = -1;
+  for (const m of playlist.matchAll(/seg_(\d+)/g)) last = Math.max(last, Number(m[1]));
+  return last;
+}
+
+/** One start deadline: `expired` rejects with STREAM_START_TIMEOUT unless cleared first. */
+function startDeadline(ms: number): { expired: Promise<never>; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const error = new PlaybackError('STREAM_START_TIMEOUT', `The stream did not start within ${ms} ms`);
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(error), ms);
+  });
+  expired.catch(() => {});
+  return { expired, clear: () => clearTimeout(timer) };
+}
 
 export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const { log } = deps;
   const sessions = new Map<string, Session>(); // running sessions, by id
   const starting = new Map<string, { session: Session; done: Promise<void> }>(); // in-flight starts, by key
-  const dying = new Map<Session, Promise<void>>(); // stopping, until FFmpeg has exited and files are gone
+  const dying = new Map<Session, Promise<void>>(); // until FFmpeg has exited and any probe has ended
   const clientQueues = new Map<string, Promise<void>>();
   let closed = false;
 
-  emptyDir(deps.transcodeDir);
-  const reapTimer = setInterval(() => void reap(), REAP_INTERVAL_MS);
-  reapTimer.unref();
+  removeSessionDirs();
+  const housekeeping = setInterval(() => {
+    void reap(); // first, so the watchdog doesn't restart what nobody watches
+    watchdog();
+  }, HOUSEKEEPING_MS);
+  housekeeping.unref();
 
-  function emptyDir(dir: string): void {
+  function removeSessionDirs(): void {
     try {
-      mkdirSync(dir, { recursive: true });
-      for (const name of readdirSync(dir)) {
-        rmSync(join(dir, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      mkdirSync(deps.transcodeDir, { recursive: true });
+      for (const entry of readdirSync(deps.transcodeDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !SESSION_DIR.test(entry.name)) continue;
+        rmSync(join(deps.transcodeDir, entry.name), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       }
     } catch (err) {
-      log.warn({ dir, err: errorText(err) }, 'could not empty transcode dir');
+      log.warn({ dir: deps.transcodeDir, err: errorText(err) }, 'could not clear old session dirs');
     }
   }
 
@@ -148,13 +189,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   }
 
   const startingSessions = () => [...starting.values()].map((e) => e.session);
+  const holdsUpstream = (s: Session) =>
+    s.state === 'starting' || s.mode === 'direct' || s.child !== null || s.probing !== null || s.restartTimer !== null;
 
-  /** Sessions that hold (or are about to open) a provider connection. */
+  /** Sessions that hold (or are about to reopen) a provider connection. */
   function upstreamHolders(providerId: number): Session[] {
     const all = new Set<Session>([...sessions.values(), ...startingSessions(), ...dying.keys()]);
-    return [...all].filter(
-      (s) => s.providerId === providerId && (s.state === 'starting' || s.mode === 'direct' || s.child !== null),
-    );
+    return [...all].filter((s) => s.providerId === providerId && holdsUpstream(s));
   }
 
   function connectionLimit(providerId: number): number | null {
@@ -162,10 +203,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return limit !== null && limit > 0 ? limit : null; // a reported 0 is treated as "no limit"
   }
 
-  function toResponse(s: Session): StartedSession {
+  function toResponse(s: Session, clientId: string): StartedSession {
     const file = s.mode === 'hls' ? 'index.m3u8' : 'direct';
     const { id: sessionId, mode, durationSec, startAtSec } = s;
-    return { sessionId, mode, url: `/api/sessions/${sessionId}/${file}`, durationSec, startAtSec };
+    return { sessionId, mode, url: `/api/sessions/${sessionId}/${clientId}/${file}`, durationSec, startAtSec };
   }
 
   function stopSession(s: Session, reason: string): Promise<void> {
@@ -173,14 +214,22 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     s.state = 'stopping';
     sessions.delete(s.id);
     s.clients.clear();
-    s.stopped = (async () => {
+    clearTimeout(s.restartTimer ?? undefined);
+    s.restartTimer = null;
+    const stopped = (async () => {
       await killAndWait(s);
       if (s.outDir) await removeDir(s.outDir);
-      dying.delete(s);
       log.info({ sessionId: s.id, reason }, 'session stopped');
     })();
-    dying.set(s, s.stopped);
-    return s.stopped;
+    s.stopped = stopped;
+    // It counts against the provider's limit until FFmpeg has exited and any probe has ended.
+    dying.set(
+      s,
+      Promise.all([stopped, s.probing]).then(() => {
+        dying.delete(s);
+      }),
+    );
+    return stopped;
   }
 
   async function killAndWait(s: Session): Promise<void> {
@@ -217,6 +266,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         : new Promise<number | null>((resolve) => child.once('exit', resolve));
     s.child = child;
     s.exit = exit;
+    s.advancedAt = deps.now();
+    s.healthySince = null;
     if (child.stderr) {
       const lines = createInterface({ input: child.stderr, crlfDelay: Infinity });
       lines.on('line', (line) => {
@@ -244,43 +295,54 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return;
     }
     s.restarts++;
-    const startNumber = lastSegment(s.outDir!) + 1;
-    log.warn({ sessionId: s.id, code, restart: s.restarts, startNumber }, 'ffmpeg exited; restarting');
-    try {
-      launch(s, startNumber);
-    } catch (err) {
-      log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg restart failed');
-      void stopSession(s, 'upstream failed');
+    const delayMs = RESTART_BACKOFF_MS * 2 ** (s.restarts - 1);
+    log.warn({ sessionId: s.id, code, restart: s.restarts, delayMs }, 'ffmpeg exited; restarting');
+    s.restartTimer = setTimeout(() => {
+      s.restartTimer = null;
+      if (s.state !== 'running') return;
+      try {
+        launch(s, Math.max(s.lastSegment, lastSegment(s.outDir!)) + 1);
+      } catch (err) {
+        log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg restart failed');
+        void stopSession(s, 'upstream failed');
+      }
+    }, delayMs);
+    s.restartTimer.unref();
+  }
+
+  /** Kills a live FFmpeg that is alive but no longer producing segments; the restart path takes over. */
+  function watchdog(): void {
+    const now = deps.now();
+    for (const s of sessions.values()) {
+      if (s.kind !== 'live' || !s.child) continue;
+      const last = lastSegment(s.outDir!);
+      if (last > s.lastSegment) {
+        s.lastSegment = last;
+        s.advancedAt = now;
+        s.healthySince ??= now;
+      }
+      if (s.restarts > 0 && s.healthySince !== null && now - s.healthySince >= HEALTHY_RESET_MS) {
+        log.info({ sessionId: s.id, restarts: s.restarts }, 'live stream healthy again');
+        s.restarts = 0;
+      }
+      if (now - s.advancedAt >= deps.stallTimeoutMs) {
+        const url = redactUrl(s.sourceUrl);
+        log.warn({ sessionId: s.id, url, lastSegment: s.lastSegment }, 'live stream stalled; restarting ffmpeg');
+        s.advancedAt = now;
+        void killAndWait(s);
+      }
     }
   }
 
-  function lastSegment(outDir: string): number {
-    let playlist: string;
-    try {
-      playlist = readFileSync(join(outDir, 'index.m3u8'), 'utf8');
-    } catch {
-      return -1;
-    }
-    let last = -1;
-    for (const m of playlist.matchAll(/seg_(\d+)/g)) last = Math.max(last, Number(m[1]));
-    return last;
-  }
-
-  function waitUntilReady(s: Session): Promise<void> {
+  function waitUntilReady(s: Session, expired: Promise<never>): Promise<void> {
     const outDir = s.outDir!;
     const ready = () => deps.isReady(outDir).catch(() => false);
     return new Promise((resolve, reject) => {
       let settled = false;
       let poll: ReturnType<typeof setTimeout> | undefined;
-      const timeoutMs = deps.readyTimeoutMs;
-      const deadline = setTimeout(
-        () => settle(new PlaybackError('STREAM_START_TIMEOUT', `The stream did not start within ${timeoutMs} ms`)),
-        timeoutMs,
-      );
-      function settle(err: PlaybackError | null): void {
+      function settle(err: unknown): void {
         if (settled) return;
         settled = true;
-        clearTimeout(deadline);
         clearTimeout(poll);
         if (err) reject(err);
         else resolve();
@@ -291,6 +353,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (ok) settle(null);
         else poll = setTimeout(check, READY_POLL_MS);
       }
+      expired.catch(settle);
       // A short VOD remux can finish between polls, so look once more before calling it a failure.
       void s.exit!.then(async () => {
         if (settled) return;
@@ -301,38 +364,55 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     });
   }
 
-  async function open(s: Session): Promise<void> {
-    let probe: ProbeResult;
+  async function probeWithin(s: Session, expired: Promise<never>): Promise<ProbeResult> {
+    const probing = deps.probe(s.sourceUrl, s.userAgent);
+    s.probing = probing.then(
+      () => {
+        s.probing = null;
+      },
+      () => {
+        s.probing = null;
+      },
+    );
     try {
-      probe = await deps.probe(s.sourceUrl, s.userAgent);
+      return await Promise.race([probing, expired]);
     } catch (err) {
+      if (err instanceof PlaybackError) throw err; // the deadline
       log.warn({ url: redactUrl(s.sourceUrl), err: errorText(err) }, 'probe failed');
       throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be opened');
     }
-    if (s.state !== 'starting') throw new PlaybackError('UPSTREAM_ERROR', 'Playback was stopped');
+  }
 
-    const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
-    s.durationSec = s.kind === 'live' ? null : probe.durationSec;
-    if (plan.mode === 'direct') {
-      s.mode = 'direct';
-    } else {
-      s.plan = plan;
-      s.outDir = join(deps.transcodeDir, s.id);
-      try {
+  async function open(s: Session): Promise<void> {
+    const deadline = startDeadline(deps.readyTimeoutMs); // probe + spawn + ready, all together
+    try {
+      const probe = await probeWithin(s, deadline.expired);
+      if (s.state !== 'starting') throw stoppedError();
+      const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
+      s.durationSec = s.kind === 'live' ? null : probe.durationSec;
+      if (plan.mode === 'direct') {
+        s.mode = 'direct';
+      } else {
+        s.plan = plan;
+        s.outDir = join(deps.transcodeDir, s.id);
         mkdirSync(s.outDir, { recursive: true });
         launch(s, 0);
-        await waitUntilReady(s);
-      } catch (err) {
-        await stopSession(s, 'failed to start');
-        if (err instanceof PlaybackError) throw err;
-        log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg could not be started');
-        throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be started');
+        await waitUntilReady(s, deadline.expired);
       }
-      if (s.state !== 'starting') throw new PlaybackError('UPSTREAM_ERROR', 'Playback was stopped');
+      if (s.state !== 'starting') throw stoppedError();
+    } catch (err) {
+      await stopSession(s, 'failed to start');
+      if (err instanceof PlaybackError) throw err;
+      log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg could not be started');
+      throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be started');
+    } finally {
+      deadline.clear();
     }
 
+    const now = deps.now();
     s.state = 'running';
-    s.lastSeen = deps.now();
+    s.advancedAt = now;
+    for (const clientId of s.clients.keys()) s.clients.set(clientId, now);
     sessions.set(s.id, s);
     const { id: sessionId, providerId, kind, mode } = s;
     log.info({ sessionId, providerId, kind, mode, url: redactUrl(s.sourceUrl) }, 'session started');
@@ -368,9 +448,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (live) {
         const existing = [...sessions.values()].find((s) => s.kind === 'live' && s.key === key);
         if (existing) {
-          existing.clients.add(req.clientId);
-          existing.lastSeen = deps.now();
-          return toResponse(existing);
+          existing.clients.set(req.clientId, deps.now());
+          return toResponse(existing, req.clientId);
         }
         const inFlight = starting.get(key);
         if (inFlight) {
@@ -383,11 +462,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (limit === null || holders.length < limit) break;
       const leaving = [...dying].filter(([s]) => s.providerId === req.providerId).map(([, done]) => done);
       if (leaving.length === 0) {
-        const watchingClientIds = [...new Set(holders.flatMap((s) => [...s.clients]))];
+        const watchingClientIds = [...new Set(holders.flatMap((s) => [...s.clients.keys()]))];
         const message = `The provider allows ${limit} connection(s)`;
         throw new PlaybackError('PROVIDER_CONNECTION_LIMIT', message, { limit, watchingClientIds });
       }
-      await Promise.all(leaving); // a closing session still holds its connection until FFmpeg exits
+      await Promise.all(leaving); // a closing session holds its connection until FFmpeg (or ffprobe) ends
     }
 
     // Steps 4 and 5.
@@ -406,9 +485,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       outDir: null,
       child: null,
       exit: null,
+      probing: null,
       restarts: 0,
-      clients: new Set([req.clientId]),
-      lastSeen: deps.now(),
+      restartTimer: null,
+      lastSegment: -1,
+      advancedAt: 0,
+      healthySince: null,
+      clients: new Map([[req.clientId, deps.now()]]),
       stopped: null,
     };
     const done = open(s);
@@ -418,19 +501,30 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     } finally {
       starting.delete(key);
     }
-    return toResponse(s);
+    return toResponse(s, req.clientId);
   }
 
+  /** Drops viewers who stopped fetching; a session whose last viewer is dropped is stopped. */
   async function reap(): Promise<void> {
     const now = deps.now();
-    const idle = [...sessions.values()].filter(
-      (s) => now - s.lastSeen >= (s.kind === 'live' ? deps.liveIdleMs : deps.vodIdleMs),
-    );
-    await Promise.all(idle.map((s) => stopSession(s, 'idle')));
+    const stops: Promise<void>[] = [];
+    for (const s of sessions.values()) {
+      const idleMs = s.kind === 'live' ? deps.liveIdleMs : deps.vodIdleMs;
+      for (const [clientId, seen] of s.clients) {
+        if (now - seen < idleMs) continue;
+        s.clients.delete(clientId);
+        log.info({ sessionId: s.id, clientId }, 'viewer timed out');
+      }
+      if (s.clients.size === 0) stops.push(stopSession(s, 'idle'));
+    }
+    await Promise.all(stops);
   }
 
   return {
     start(req) {
+      if (!CLIENT_ID.test(req.clientId)) {
+        return Promise.reject(new Error('clientId must be 1-64 characters of A-Z, a-z, 0-9, "_" or "-"'));
+      }
       // One start at a time per client: a rapid second request waits, then preempts the first.
       const previous = clientQueues.get(req.clientId) ?? Promise.resolve();
       const result = previous.then(() => startNow(req));
@@ -445,10 +539,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return result;
     },
 
-    touch(sessionId) {
-      const s = sessions.get(sessionId);
-      if (!s) return false;
-      s.lastSeen = deps.now();
+    touch(sessionId, clientId) {
+      const s = sessions.get(sessionId); // running sessions only: a stopping one is never revived
+      if (!s || !CLIENT_ID.test(clientId)) return false;
+      s.clients.set(clientId, deps.now());
       return true;
     },
 
@@ -477,10 +571,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     async stopAll() {
       closed = true;
-      clearInterval(reapTimer);
+      clearInterval(housekeeping);
       const all = [...sessions.values(), ...startingSessions(), ...dying.keys()];
       await Promise.all(all.map((s) => stopSession(s, 'shutdown')));
-      emptyDir(deps.transcodeDir);
+      removeSessionDirs();
     },
   };
 }
