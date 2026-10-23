@@ -5,9 +5,11 @@ import fastifyStatic from '@fastify/static';
 import type { ApiError } from '@tv/shared';
 import type { Config } from './config.ts';
 import type { Db } from './db/db.ts';
+import type { ProviderService } from './providers/service.ts';
 import { healthRoutes } from './routes/health.ts';
+import { providerRoutes } from './routes/providers.ts';
 
-export type AppDeps = { config: Config; db: Db };
+export type AppDeps = { config: Config; db: Db; providers: ProviderService };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
@@ -16,6 +18,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(
     async (api) => {
       await api.register(healthRoutes);
+      await api.register(providerRoutes(deps.providers));
     },
     { prefix: '/api' },
   );

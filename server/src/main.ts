@@ -3,11 +3,13 @@ import path from 'node:path';
 import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
 import { openDb } from './db/db.ts';
+import { createProviderService } from './providers/service.ts';
 
 const config = loadConfig(process.env);
 fs.mkdirSync(config.dataDir, { recursive: true });
 const db = openDb(path.join(config.dataDir, 'tv.sqlite'));
-const app = await buildApp({ config, db });
+const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
+const app = await buildApp({ config, db, providers });
 
 async function shutdown(): Promise<void> {
   await app.close();
