@@ -1,3 +1,6 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from 'vitest';
 import { buildFfmpegArgs } from './ffmpegArgs.ts';
@@ -37,8 +40,8 @@ test('copy plan for live writes a 300 s sliding window of ts segments', () => {
   has(a, '-hls_list_size', '100');
   has(a, '-hls_flags', 'delete_segments+independent_segments');
   has(a, '-hls_segment_type', 'mpegts');
-  has(a, '-hls_segment_filename', path.join('O', 'seg_%05d.ts'));
-  expect(a.at(-1)).toBe(path.join('O', 'index.m3u8'));
+  has(a, '-hls_segment_filename', 'O/seg_%05d.ts');
+  expect(a.at(-1)).toBe('O/index.m3u8');
   expect(a).not.toContain('-ss');
   expect(a).not.toContain('-start_number');
   expect(a.indexOf('-user_agent')).toBeLessThan(a.indexOf('-i'));
@@ -80,7 +83,7 @@ test('hevc copy uses fmp4 segments and the hvc1 tag', () => {
   has(a, '-tag:v', 'hvc1');
   has(a, '-hls_segment_type', 'fmp4');
   has(a, '-hls_fmp4_init_filename', 'init.mp4');
-  has(a, '-hls_segment_filename', path.join('O', 'seg_%05d.m4s'));
+  has(a, '-hls_segment_filename', 'O/seg_%05d.m4s');
 });
 
 test('aac audio transcode is stereo 160k and maps the chosen stream', () => {
@@ -103,4 +106,27 @@ test('file inputs get no reconnect flags', () => {
   const a = buildFfmpegArgs({ ...base, url: '/tmp/x.ts', plan: copyTs });
   expect(a.some((x) => x.startsWith('-reconnect'))).toBe(false);
   has(a, '-i', '/tmp/x.ts');
+});
+
+const ffmpeg = process.env.TV_FFMPEG_PATH;
+
+test.skipIf(!ffmpeg)('real ffmpeg writes the fmp4 init segment inside outDir and references it relatively', () => {
+  const input = path.resolve(import.meta.dirname, '../../../tools/fake-xtream/media/hevc.mkv');
+  const outDir = mkdtempSync(path.join(tmpdir(), 'tv-ffargs-'));
+  const strayInit = path.join(process.cwd(), 'init.mp4');
+  try {
+    const plan: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, audio: null };
+    const args = buildFfmpegArgs({ ...base, url: input, plan, live: false, outDir });
+    const r = spawnSync(ffmpeg!, args, { encoding: 'utf8' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(path.join(outDir, 'init.mp4'))).toBe(true);
+    expect(existsSync(strayInit)).toBe(false);
+    const playlist = readFileSync(path.join(outDir, 'index.m3u8'), 'utf8');
+    expect(playlist).toContain('#EXT-X-MAP:URI="init.mp4"');
+    const segs = playlist.split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('#'));
+    expect(segs.length).toBeGreaterThan(0);
+    for (const s of segs) expect(s).toMatch(/^seg_\d{5}\.m4s$/);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
 });

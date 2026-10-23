@@ -15,6 +15,14 @@ const SEGMENT_SECONDS = 3;
 // 100 segments x 3 s = the 300 s rewind window for live.
 const LIVE_LIST_SIZE = 100;
 
+// Forward slashes are deliberate. With backslash paths on Windows, FFmpeg 9 writes the
+// bare fMP4 init file into the process cwd (or, given a full path, puts that full path in
+// #EXT-X-MAP). With forward-slash output paths its own directory logic puts init.mp4
+// beside the playlist and keeps the playlist reference relative. Windows accepts '/'.
+function outPath(dir: string, name: string): string {
+  return join(dir, name).replaceAll('\\', '/');
+}
+
 export function buildFfmpegArgs(input: FfmpegInput): string[] {
   const { url, userAgent, plan, live, startAtSec, outDir, startNumber } = input;
   const remote = url.startsWith('http://') || url.startsWith('https://');
@@ -61,7 +69,7 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   if (startNumber > 0) args.push('-start_number', String(startNumber));
   args.push('-hls_segment_type', fmp4 ? 'fmp4' : 'mpegts');
   if (fmp4) args.push('-hls_fmp4_init_filename', 'init.mp4');
-  args.push('-hls_segment_filename', join(outDir, fmp4 ? 'seg_%05d.m4s' : 'seg_%05d.ts'));
-  args.push(join(outDir, 'index.m3u8'));
+  args.push('-hls_segment_filename', outPath(outDir, fmp4 ? 'seg_%05d.m4s' : 'seg_%05d.ts'));
+  args.push(outPath(outDir, 'index.m3u8'));
   return args;
 }
