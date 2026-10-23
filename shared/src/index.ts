@@ -23,3 +23,17 @@ export type AddProviderRequest = {
   username: string;
   password: string;
 };
+export type Category = { id: number; name: string; itemCount: number };
+export type CatalogItem = {
+  id: number;
+  providerId: number;
+  kind: Kind;
+  name: string;
+  logoUrl: string | null;
+  catchupDays: number | null;
+  year: number | null;
+  rating: string | null;
+};
+export type Page<T> = { items: T[]; nextCursor: string | null };
+export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
+export type Season = { season: number; episodes: Episode[] };

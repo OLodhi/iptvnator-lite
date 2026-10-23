@@ -4,6 +4,8 @@ import path from 'node:path';
 import { expect, test } from 'vitest';
 import { buildApp } from './app.ts';
 import { createSyncRunner } from './catalogue/syncRunner.ts';
+import { createCatalogueRepo } from './catalogue/repo.ts';
+import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { openDb } from './db/db.ts';
 import { createProviderService } from './providers/service.ts';
 import { testConfig } from './testing/config.ts';
@@ -12,7 +14,12 @@ async function appFor(webDir: string) {
   const db = openDb(':memory:');
   const config = testConfig({ webDir });
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
-  return buildApp({ config, db, providers, sync: createSyncRunner({ db, providers }) });
+  const catalogue = createCatalogueRepo(db);
+  return buildApp({
+    config, db, providers, catalogue,
+    sync: createSyncRunner({ db, providers }),
+    seriesInfo: createSeriesInfoCache({ providers, catalogue }),
+  });
 }
 
 function webDirWithIndex(): string {

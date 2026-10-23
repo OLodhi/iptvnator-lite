@@ -4,6 +4,8 @@ import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
 import { createSyncRunner } from './catalogue/syncRunner.ts';
 import type { SyncRunner } from './catalogue/syncRunner.ts';
+import { createCatalogueRepo } from './catalogue/repo.ts';
+import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { openDb } from './db/db.ts';
 import { createProviderService } from './providers/service.ts';
 
@@ -18,7 +20,9 @@ const providers = createProviderService({
   onAdded: (id) => sync?.start(id),
 });
 sync = createSyncRunner({ db, providers });
-const app = await buildApp({ config, db, providers, sync });
+const catalogue = createCatalogueRepo(db);
+const seriesInfo = createSeriesInfoCache({ providers, catalogue });
+const app = await buildApp({ config, db, providers, sync, catalogue, seriesInfo });
 
 async function shutdown(): Promise<void> {
   await app.close();

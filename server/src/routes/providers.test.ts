@@ -6,6 +6,8 @@ import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { buildApp } from '../app.ts';
 import { createSyncRunner } from '../catalogue/syncRunner.ts';
+import { createCatalogueRepo } from '../catalogue/repo.ts';
+import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { openDb } from '../db/db.ts';
 import { createProviderService } from '../providers/service.ts';
 import { testConfig } from '../testing/config.ts';
@@ -22,7 +24,12 @@ beforeAll(async () => {
   const config = testConfig();
   const db = openDb(':memory:');
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent, onAdded });
-  app = await buildApp({ config, db, providers, sync: createSyncRunner({ db, providers }) });
+  const catalogue = createCatalogueRepo(db);
+  app = await buildApp({
+    config, db, providers, catalogue,
+    sync: createSyncRunner({ db, providers }),
+    seriesInfo: createSeriesInfoCache({ providers, catalogue }),
+  });
 });
 
 afterAll(async () => {
