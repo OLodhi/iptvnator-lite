@@ -1,0 +1,24 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "h264",
+      "codec_tag_string": "avc1",
+      "width": 640,
+      "height": 360,
+      "field_order": "progressive"
+    },
+    {
+      "index": 1,
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "codec_tag_string": "mp4a",
+      "channels": 1
+    }
+  ],
+  "format": {
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration": "60.000000"
+  }
+}

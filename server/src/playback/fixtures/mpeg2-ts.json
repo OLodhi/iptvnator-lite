@@ -1,0 +1,24 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "mpeg2video",
+      "codec_tag_string": "[2][0][0][0]",
+      "width": 640,
+      "height": 360,
+      "field_order": "progressive"
+    },
+    {
+      "index": 1,
+      "codec_type": "audio",
+      "codec_name": "mp2",
+      "codec_tag_string": "[3][0][0][0]",
+      "channels": 1
+    }
+  ],
+  "format": {
+    "format_name": "mpegts",
+    "duration": "30.010022"
+  }
+}
