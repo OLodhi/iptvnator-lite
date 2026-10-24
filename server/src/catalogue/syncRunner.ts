@@ -25,7 +25,7 @@ export function createSyncRunner(deps: { db: Db; providers: ProviderService; log
       void (async () => {
         try {
           const client = deps.providers.clientFor(providerId);
-          const result = await syncCatalogue({ db: deps.db, client, providerId });
+          const result = await syncCatalogue({ db: deps.db, client, providerId, log });
           const finishedAt = Date.now();
           deps.providers.markSynced(providerId, finishedAt);
           statuses.set(providerId, { state: 'idle', startedAt, finishedAt, result, error: null });

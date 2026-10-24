@@ -7,7 +7,7 @@ export type ProviderSummary = {
   maxConnections: number | null;
   lastSyncedAt: number | null;
 };
-export type SyncCounts = { categories: number; items: number; removed: number };
+export type SyncCounts = { categories: number; items: number; removed: number; skippedPrune: boolean };
 export type SyncResult = Record<Kind, SyncCounts>;
 export type SyncStatus = {
   state: 'idle' | 'running' | 'failed';
@@ -35,7 +35,7 @@ export type CatalogItem = {
   rating: string | null;
 };
 export type TagStyle = 'tagged' | 'mixed' | 'untagged';
-export type Page<T> ={ items: T[]; nextCursor: string | null };
+export type Page<T> = { items: T[]; nextCursor: string | null };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
 export type PlayRequest = { itemId: number; episodeRemoteId?: string; startAtSec?: number; clientId: string };

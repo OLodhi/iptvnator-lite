@@ -1,7 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
-import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
+import { generateCatalogue, smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { createCatalogueRepo } from './repo.ts';
@@ -43,9 +43,9 @@ const later = () => Date.now() + 10;
 
 test('stores categories, items and links for every kind', async () => {
   const r = await syncCatalogue({ db, client, providerId });
-  expect(r.live).toEqual({ categories: 3, items: 4, removed: 0 });
-  expect(r.movie).toEqual({ categories: 2, items: 3, removed: 0 });
-  expect(r.series).toEqual({ categories: 1, items: 1, removed: 0 });
+  expect(r.live).toEqual({ categories: 3, items: 4, removed: 0, skippedPrune: false });
+  expect(r.movie).toEqual({ categories: 2, items: 3, removed: 0, skippedPrune: false });
+  expect(r.series).toEqual({ categories: 1, items: 1, removed: 0, skippedPrune: false });
   expect(count('SELECT COUNT(*) FROM items')).toBe(8);
   expect(count('SELECT COUNT(*) FROM item_categories')).toBe(8);
   expect(count("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH 'Channel'")).toBeGreaterThan(0);
@@ -108,6 +108,130 @@ test('a failed sync deletes nothing', async () => {
   expect(count('SELECT COUNT(*) FROM categories')).toBe(6);
 });
 
+type LogLine = { level: 'info' | 'warn'; m: string; o: object };
+const collectingLog = (lines: LogLine[]) => ({
+  info: (o: object, m: string) => void lines.push({ level: 'info', m, o }),
+  warn: (o: object, m: string) => void lines.push({ level: 'warn', m, o }),
+});
+
+const tagsOf = () =>
+  (db.prepare("SELECT tag FROM categories WHERE kind = 'live' ORDER BY position").all() as { tag: string | null }[]).map((r) => r.tag);
+const linksOf = (kind: string, remoteId: string) =>
+  db
+    .prepare(
+      `SELECT c.remote_id FROM item_categories ic JOIN categories c ON c.id = ic.category_id
+       JOIN items i ON i.id = ic.item_id WHERE i.kind = ? AND i.remote_id = ? ORDER BY c.remote_id`,
+    )
+    .pluck()
+    .all(kind, remoteId);
+
+test('stores the detected style and each category tag', async () => {
+  fake.setCatalogue(generateCatalogue({ live: 40, movie: 0, series: 0, categoriesPerKind: 20 }));
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  expect(db.prepare("SELECT style, pattern FROM catalogue_styles WHERE kind = 'live'").get()).toEqual({ style: 'tagged', pattern: 'pipe' });
+  const rows = db.prepare("SELECT name, tag FROM categories WHERE kind = 'live'").all() as { name: string; tag: string | null }[];
+  const uk = rows.filter((r) => r.name.startsWith('UK| '));
+  expect(uk.length).toBeGreaterThan(1);
+  expect(uk.every((r) => r.tag === 'UK')).toBe(true);
+  const untagged = rows.filter((r) => !/^\w\w\| /.test(r.name));
+  expect(untagged.length).toBe(1);
+  expect(untagged[0]!.tag).toBeNull();
+  // a repeat sync restates the style row rather than duplicating it
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(count("SELECT COUNT(*) FROM catalogue_styles WHERE kind = 'live'")).toBe(1);
+});
+
+test('a tag shared by only one category is stored as NULL', async () => {
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  expect(tagsOf()).toEqual([null, null, null]); // UK and US each occur once
+  const c = smallCatalogue();
+  c.live.categories.push({ id: '4', name: 'UK| Sports' });
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(tagsOf()).toEqual(['UK', null, null, 'UK']);
+});
+
+test('a stream listed once per category keeps every category', async () => {
+  const c = smallCatalogue();
+  c.live.items.push({ id: 7, name: 'UK| Twice', categoryId: '1' }, { id: 7, name: 'UK| Twice', categoryId: '2' });
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  expect(linksOf('live', '7')).toEqual(['1', '2']);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(linksOf('live', '7')).toEqual(['1', '2']);
+});
+
+test('refresh with an empty kind prunes nothing', async () => {
+  await syncCatalogue({ db, client, providerId });
+  db.prepare("INSERT INTO favourites (user_id, provider_id, kind, remote_id, added_at) VALUES (1, ?, 'live', '1', 0)").run(providerId);
+  db.prepare(
+    "INSERT INTO category_rules (provider_id, user_id, kind, target_type, target, visible) VALUES (?, NULL, 'live', 'category', '3', 0)",
+  ).run(providerId);
+  const c = smallCatalogue();
+  c.live.items = [];
+  fake.setCatalogue(c);
+  const lines: LogLine[] = [];
+  const r = await syncCatalogue({ db, client, providerId, now: later, log: collectingLog(lines) });
+  expect(r.live).toMatchObject({ items: 0, removed: 0, skippedPrune: true });
+  expect(r.movie.skippedPrune).toBe(false);
+  expect(count("SELECT COUNT(*) FROM items WHERE kind = 'live'")).toBe(4);
+  expect(count("SELECT COUNT(*) FROM categories WHERE kind = 'live'")).toBe(3);
+  expect(count("SELECT COUNT(*) FROM item_categories ic JOIN categories c ON c.id = ic.category_id WHERE c.kind = 'live'")).toBe(4);
+  expect(count('SELECT COUNT(*) FROM favourites')).toBe(1);
+  expect(count('SELECT COUNT(*) FROM category_rules')).toBe(1);
+  expect(lines).toEqual([
+    { level: 'warn', m: 'provider returned an empty list; pruning skipped', o: expect.objectContaining({ providerId, kind: 'live', itemsBefore: 4 }) },
+  ]);
+});
+
+test('refresh that fails mid-stream prunes nothing', async () => {
+  await syncCatalogue({ db, client, providerId });
+  const links = count('SELECT COUNT(*) FROM item_categories');
+  const failing: XtreamClient = {
+    ...client,
+    async *streamItems(kind) {
+      let n = 0;
+      for await (const it of client.streamItems(kind)) {
+        if (n++ === 2) throw new Error('boom');
+        yield it;
+      }
+    },
+  };
+  await expect(syncCatalogue({ db, client: failing, providerId, now: later })).rejects.toThrow('boom');
+  expect(count('SELECT COUNT(*) FROM items')).toBe(8);
+  expect(count('SELECT COUNT(*) FROM categories')).toBe(6);
+  expect(count('SELECT COUNT(*) FROM item_categories')).toBe(links);
+  expect(count("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH 'Channel'")).toBeGreaterThan(0);
+});
+
+test('first_seen_at is set once and never moves', async () => {
+  const t1 = 1_000_000;
+  const t2 = 2_000_000;
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t1 });
+  const c = smallCatalogue();
+  c.live.categories.push({ id: '4', name: 'New' });
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t2 });
+  const rows = db.prepare("SELECT remote_id, first_seen_at, seen_at FROM categories WHERE kind = 'live' ORDER BY remote_id").all();
+  expect(rows).toEqual([
+    { remote_id: '1', first_seen_at: t1, seen_at: t2 },
+    { remote_id: '2', first_seen_at: t1, seen_at: t2 },
+    { remote_id: '3', first_seen_at: t1, seen_at: t2 },
+    { remote_id: '4', first_seen_at: t2, seen_at: t2 },
+  ]);
+});
+
+test('a removed link is pruned after a full stream', async () => {
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  expect(linksOf('live', '1')).toEqual(['1']);
+  const c = smallCatalogue();
+  c.live.items.find((i) => i.id === 1)!.categoryId = '2';
+  fake.setCatalogue(c);
+  const r = await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(r.live.removed).toBe(0);
+  expect(linksOf('live', '1')).toEqual(['2']);
+});
+
 test('items whose category is unknown land in Uncategorised', async () => {
   const c = smallCatalogue();
   c.live.items.push({ id: 50, name: 'Orphan', categoryId: 'nope' });
@@ -120,12 +244,6 @@ test('items whose category is unknown land in Uncategorised', async () => {
     )
     .get();
   expect(row).toEqual({ remote_id: '__none__', name: 'Uncategorised' });
-});
-
-type LogLine = { level: 'info' | 'warn'; m: string; o: object };
-const collectingLog = (lines: LogLine[]) => ({
-  info: (o: object, m: string) => void lines.push({ level: 'info', m, o }),
-  warn: (o: object, m: string) => void lines.push({ level: 'warn', m, o }),
 });
 
 test('runner reports running then idle with the result', async () => {
