@@ -14,6 +14,8 @@ export type SearchState = {
 type Deps = {
   search: (q: string, signal?: AbortSignal) => Promise<SearchResults>;
   debounceMs?: number;
+  /** Called once per settled query (trimmed): when its debounced search runs, or at once when it is cleared. */
+  onSettled?: (q: string) => void;
 };
 
 /** Debounced search with stale-response protection: only the latest query may update the state. */
@@ -59,10 +61,14 @@ export function createSearchModel(deps: Deps) {
     const q = query.trim();
     if (q === '') {
       set({ query, results: null, loading: false, error: null });
+      deps.onSettled?.(q);
       return;
     }
     set({ query, loading: true, error: null });
-    timer = setTimeout(() => void run(q), debounceMs);
+    timer = setTimeout(() => {
+      void run(q);
+      deps.onSettled?.(q);
+    }, debounceMs);
   }
 
   /** Re-runs the current query immediately. */

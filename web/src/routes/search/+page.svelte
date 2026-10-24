@@ -12,7 +12,7 @@
   import ChannelRow from '$lib/components/ChannelRow.svelte';
   import PosterCell from '$lib/components/PosterCell.svelte';
 
-  const model = createSearchModel({ search: (q, signal) => search(q, 20, signal) });
+  const model = createSearchModel({ search: (q, signal) => search(q, 20, signal), onSettled: keepInUrl });
   let input: HTMLInputElement | undefined = $state();
   let favOverride = $state<Record<number, boolean>>({});
   let actionError = $state('');
@@ -30,13 +30,20 @@
     return () => model.destroy();
   });
 
-  function onInput(e: Event & { currentTarget: HTMLInputElement }) {
-    const q = e.currentTarget.value;
-    model.setQuery(q);
+  /** Once per settled query, not per keystroke: WebKit throws SecurityError past about 100 history calls in a short window. */
+  function keepInUrl(q: string) {
     const url = new URL(page.url);
-    if (q.trim()) url.searchParams.set('q', q);
+    if (q) url.searchParams.set('q', q);
     else url.searchParams.delete('q');
-    replaceState(url, page.state);
+    try {
+      replaceState(url, page.state);
+    } catch {
+      // The URL is a convenience; search goes on without it.
+    }
+  }
+
+  function onInput(e: Event & { currentTarget: HTMLInputElement }) {
+    model.setQuery(e.currentTarget.value);
   }
 
   const withFav = (item: CatalogItem): CatalogItem => ({ ...item, favourite: favOverride[item.id] ?? item.favourite });

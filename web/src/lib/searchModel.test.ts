@@ -27,6 +27,20 @@ test('debounces typing into one request', async () => {
   expect(get(model).results?.live[0]?.name).toBe('bbc');
 });
 
+test('onSettled hears each settled query once: when its search runs, or at once when cleared', async () => {
+  const onSettled = vi.fn();
+  const model = createSearchModel({ search: async (q) => results(q), onSettled });
+  model.setQuery('b');
+  model.setQuery('bb');
+  model.setQuery(' bbc ');
+  await vi.advanceTimersByTimeAsync(249);
+  expect(onSettled).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(onSettled.mock.calls).toEqual([['bbc']]);
+  model.setQuery('');
+  expect(onSettled.mock.calls).toEqual([['bbc'], ['']]);
+});
+
 test('drops a slow earlier response that arrives after a newer one', async () => {
   const resolvers: Record<string, (r: SearchResults) => void> = {};
   const search = vi.fn((q: string) => new Promise<SearchResults>((res) => (resolvers[q] = res)));
