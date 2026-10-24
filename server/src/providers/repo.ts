@@ -38,6 +38,7 @@ export interface ProviderRepo {
   list(): ProviderRow[];
   get(id: number): ProviderRow | undefined;
   markSynced(id: number, at: number): void;
+  updateAccount(id: number, account: XtreamAccount): void;
 }
 
 export function createProviderRepo(db: Db): ProviderRepo {
@@ -57,6 +58,9 @@ export function createProviderRepo(db: Db): ProviderRepo {
     },
     markSynced(id, at) {
       db.prepare('UPDATE providers SET last_synced_at = ? WHERE id = ?').run(at, id);
+    },
+    updateAccount(id, account) {
+      db.prepare('UPDATE providers SET account = ? WHERE id = ?').run(JSON.stringify(account), id);
     },
   };
 }

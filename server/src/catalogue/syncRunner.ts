@@ -24,6 +24,13 @@ export function createSyncRunner(deps: { db: Db; providers: ProviderService; log
       statuses.set(providerId, { state: 'running', startedAt, finishedAt: null, result: null, error: null });
       void (async () => {
         try {
+          try {
+            await deps.providers.refreshAccount(providerId);
+          } catch (err) {
+            // The stored account is good enough to sync with.
+            const error = redactUrl(err instanceof Error ? err.message : 'Refresh failed');
+            log.warn({ providerId, err: error }, 'account refresh failed');
+          }
           const client = deps.providers.clientFor(providerId);
           const result = await syncCatalogue({ db: deps.db, client, providerId, log });
           const finishedAt = Date.now();

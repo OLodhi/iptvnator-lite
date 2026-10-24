@@ -1,5 +1,19 @@
 import { expect, test } from 'vitest';
-import { normaliseItem, normaliseServerUrl } from './normalise.ts';
+import { decodeListing, normaliseItem, normaliseServerUrl } from './normalise.ts';
+
+test('decodeListing handles numeric stamps, wall-clock fallback, plain text and bad spans', () => {
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+  expect(decodeListing({ title: b64('Café News'), description: '', start_timestamp: 1000, stop_timestamp: '1600' }, null)).toEqual({
+    title: 'Café News',
+    description: null,
+    start: 1000,
+    stop: 1600,
+  });
+  const wall = decodeListing({ title: 'Plain title here', start: '2026-07-01 19:00:00', end: '2026-07-01 20:00:00' }, 'Europe/London');
+  expect(wall).toMatchObject({ title: 'Plain title here', start: Date.UTC(2026, 6, 1, 18) / 1000, stop: Date.UTC(2026, 6, 1, 19) / 1000 });
+  expect(decodeListing({ title: 'x', start_timestamp: 5, stop_timestamp: 5 }, null)).toBeNull();
+  expect(decodeListing({ title: 'x' }, null)).toBeNull();
+});
 
 test('normalises messy item fields', () => {
   expect(

@@ -5,8 +5,9 @@ import streamJson from 'stream-json';
 import streamArrayMod from 'stream-json/streamers/StreamArray.js';
 import type { Kind } from '@tv/shared';
 import { ProviderError } from '../errors.ts';
-import { normaliseItem, normaliseServerUrl } from './normalise.ts';
-import type { RawItem } from './normalise.ts';
+import { formatCatchupStart, resolveProviderTimezone } from '../../guide/clock.ts';
+import { decodeListing, normaliseItem, normaliseServerUrl } from './normalise.ts';
+import type { Listing, RawItem } from './normalise.ts';
 
 export type { RawItem } from './normalise.ts';
 
@@ -16,6 +17,8 @@ export type XtreamAccount = {
   maxConnections: number | null;
   expiresAt: number | null;
   allowedOutputFormats: string[];
+  /** The provider's timezone (an IANA name, or 'UTC±HH:MM'); null when it cannot be told. */
+  timezone: string | null;
 };
 export type RawCategory = { remoteId: string; name: string };
 type Episode = { remoteId: string; title: string; episodeNum: number; containerExt: string; durationSec: number | null };
@@ -29,6 +32,12 @@ export interface XtreamClient {
   liveUrl(remoteId: string, format: 'm3u8' | 'ts'): string;
   movieUrl(remoteId: string, ext: string): string;
   episodeUrl(episodeRemoteId: string, ext: string): string;
+  /** The provider's XMLTV guide as a byte stream, destroyed with PROVIDER_UNREACHABLE after idleTimeoutMs without data. */
+  xmltv(opts?: { signal?: AbortSignal; idleTimeoutMs?: number }): Promise<Readable>;
+  /** One channel's listings, soonest first. tz (the provider's) reads wall-clock times when a listing has no epoch stamp. */
+  epgTable(streamId: string, opts?: { signal?: AbortSignal; tz?: string | null }): Promise<Listing[]>;
+  /** An Xtream timeshift (catch-up) URL in IPTVnator's REST form; tz is the provider's timezone. */
+  timeshiftUrl(streamId: string, startSec: number, stopSec: number, tz: string | null, ext: 'ts' | 'm3u8'): string;
 }
 
 const ITEM_ACTION: Record<Kind, string> = { live: 'get_live_streams', movie: 'get_vod_streams', series: 'get_series' };
@@ -62,17 +71,10 @@ export function createXtreamClient(
   const u = encodeURIComponent(creds.username);
   const p = encodeURIComponent(creds.password);
 
-  async function request(
-    action: string | null,
-    extra: Record<string, string> = {},
-    signal: AbortSignal = AbortSignal.timeout(timeoutMs),
-  ): Promise<Response> {
-    const qs = new URLSearchParams({ username: creds.username, password: creds.password });
-    if (action) qs.set('action', action);
-    for (const [k, v] of Object.entries(extra)) qs.set(k, v);
+  async function get(path: string, qs: URLSearchParams, signal: AbortSignal): Promise<Response> {
     let res: Response;
     try {
-      res = await fetchFn(`${base}/player_api.php?${qs}`, {
+      res = await fetchFn(`${base}/${path}?${qs}`, {
         headers: { 'user-agent': opts.userAgent },
         signal,
       });
@@ -90,8 +92,19 @@ export function createXtreamClient(
     return res;
   }
 
-  async function json(action: string | null, extra?: Record<string, string>): Promise<unknown> {
-    const res = await request(action, extra);
+  function request(
+    action: string | null,
+    extra: Record<string, string> = {},
+    signal: AbortSignal = AbortSignal.timeout(timeoutMs),
+  ): Promise<Response> {
+    const qs = new URLSearchParams({ username: creds.username, password: creds.password });
+    if (action) qs.set('action', action);
+    for (const [k, v] of Object.entries(extra)) qs.set(k, v);
+    return get('player_api.php', qs, signal);
+  }
+
+  async function json(action: string | null, extra?: Record<string, string>, signal?: AbortSignal): Promise<unknown> {
+    const res = await request(action, extra, signal);
     let text: string;
     try {
       text = await res.text();
@@ -109,6 +122,7 @@ export function createXtreamClient(
     async authenticate() {
       const body = await json(null);
       const info = isRecord(body) ? body.user_info : undefined;
+      const server = isRecord(body) ? body.server_info : undefined;
       if (!isRecord(info)) {
         throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider response had no account information');
       }
@@ -118,6 +132,7 @@ export function createXtreamClient(
         maxConnections: toNumber(info.max_connections),
         expiresAt: toNumber(info.exp_date),
         allowedOutputFormats: Array.isArray(info.allowed_output_formats) ? info.allowed_output_formats.map(String) : [],
+        timezone: resolveProviderTimezone(isRecord(server) ? server : {}),
       };
     },
 
@@ -199,6 +214,88 @@ export function createXtreamClient(
           .sort((a, b) => a[0] - b[0])
           .map(([season, episodes]) => ({ season, episodes: episodes.sort((a, b) => a.episodeNum - b.episodeNum) })),
       };
+    },
+
+    async xmltv(o = {}) {
+      const idleMs = o.idleTimeoutMs ?? 120_000;
+      const ac = new AbortController();
+      const onCallerAbort = () => ac.abort();
+      o.signal?.addEventListener('abort', onCallerAbort, { once: true });
+      if (o.signal?.aborted) ac.abort();
+      let idle = false;
+      let timer = setTimeout(() => ac.abort(), timeoutMs); // time to headers
+      const touch = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          idle = true;
+          ac.abort();
+        }, idleMs);
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        o.signal?.removeEventListener('abort', onCallerAbort);
+      };
+      let res: Response;
+      try {
+        res = await get('xmltv.php', new URLSearchParams({ username: creds.username, password: creds.password }), ac.signal);
+      } catch (e) {
+        cleanup();
+        throw e;
+      }
+      if (!res.body) {
+        cleanup();
+        throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an empty response');
+      }
+      const source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+      touch();
+      async function* body() {
+        try {
+          for await (const chunk of source) {
+            touch();
+            yield chunk;
+          }
+        } catch {
+          // Drop the underlying error: its text can embed the credential-bearing URL.
+          throw new ProviderError(
+            'PROVIDER_UNREACHABLE',
+            idle ? 'The provider connection timed out' : 'The connection to the provider was lost',
+          );
+        } finally {
+          cleanup();
+          ac.abort();
+          source.destroy();
+        }
+      }
+      return Readable.from(body(), { objectMode: false });
+    },
+
+    async epgTable(streamId, o: { signal?: AbortSignal; tz?: string | null } = {}) {
+      const signal = o.signal ? AbortSignal.any([o.signal, AbortSignal.timeout(timeoutMs)]) : undefined;
+      const attempt = async (action: string): Promise<unknown[] | null> => {
+        const body = await json(action, { stream_id: streamId }, signal);
+        const raw = isRecord(body) ? body.epg_listings : undefined;
+        if (Array.isArray(raw)) return raw;
+        if (isRecord(raw)) return Object.values(raw).flatMap((v) => (Array.isArray(v) ? v : []));
+        return null;
+      };
+      let raw: unknown[] | null = null;
+      try {
+        raw = await attempt('get_simple_data_table');
+      } catch (e) {
+        if (o.signal?.aborted) throw e;
+      }
+      // The provider's own typo for the same action.
+      raw ??= await attempt('get_simple_date_table');
+      if (raw === null) throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned no listings');
+      return raw
+        .map((l) => decodeListing(l, o.tz ?? null))
+        .filter((l): l is Listing => l !== null)
+        .sort((a, b) => a.start - b.start);
+    },
+
+    timeshiftUrl(streamId, startSec, stopSec, tz, ext) {
+      const minutes = Math.max(1, Math.round((stopSec - startSec) / 60));
+      return `${base}/timeshift/${u}/${p}/${minutes}/${formatCatchupStart(startSec, tz)}/${streamId}.${ext}`;
     },
 
     liveUrl: (id, format) => `${base}/live/${u}/${p}/${id}.${format}`,

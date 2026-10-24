@@ -13,6 +13,8 @@ export interface ProviderService {
   clientFor(id: number): XtreamClient;
   account(id: number): XtreamAccount | null;
   markSynced(id: number, at: number): void;
+  /** Re-reads the account from the provider and stores it. */
+  refreshAccount(id: number): Promise<XtreamAccount>;
 }
 
 export function createProviderService(deps: {
@@ -56,5 +58,10 @@ export function createProviderService(deps: {
     clientFor: (id) => makeClient(require(id).config, { userAgent: deps.userAgent }),
     account: (id) => require(id).account,
     markSynced: (id, at) => repo.markSynced(id, at),
+    async refreshAccount(id) {
+      const account = await makeClient(require(id).config, { userAgent: deps.userAgent }).authenticate();
+      repo.updateAccount(id, account);
+      return account;
+    },
   };
 }
