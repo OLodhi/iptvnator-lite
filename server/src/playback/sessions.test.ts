@@ -555,12 +555,9 @@ describe('session manager', () => {
 
   test('non-HLS VOD reads the provider through the relay; live and HLS inputs do not', async () => {
     const relay = stubRelay(() => {});
-    const HLS_MOVIE: ProbeResult = { ...MKV_MOVIE, formatName: 'hls' };
-    const h = harness({
-      relay,
-      probe: async (url) =>
-        fresh(url.endsWith('.mkv') ? MKV_MOVIE : url.endsWith('.ts') ? LIVE_TS : url.includes('/movie/') ? HLS_MOVIE : LIVE_HLS),
-    });
+    // What ffprobe finds behind each extension: an .m3u8 URL serving Matroska, HLS behind a .php URL.
+    const probes: Record<string, ProbeResult> = { mkv: MKV_MOVIE, ts: LIVE_TS, m3u8: MKV_MOVIE, php: { ...MKV_MOVIE, formatName: 'hls' } };
+    const h = harness({ relay, probe: async (url) => fresh(probes[url.split('.').pop()!]!) });
     const input = (n: number) => argAfter(h.children[n]!.args, '-i');
 
     const mkv = movie(1, 'A');
@@ -573,7 +570,7 @@ describe('session manager', () => {
     await h.m.start(liveTs);
     expect(input(1)).toBe(liveTs.sourceUrl);
 
-    // HLS by its URL, or behind another extension as ffprobe found: FFmpeg reads it over one connection already.
+    // HLS by its URL alone, or by ffprobe's format alone: either way it is not read through the relay.
     const hlsByUrl = { ...movie(3, 'C'), sourceUrl: 'http://provider.test/movie/user/secret/3.m3u8' };
     const hlsByFormat = { ...movie(4, 'D'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
     await h.m.start(hlsByUrl);
@@ -610,6 +607,18 @@ describe('session manager', () => {
     expect(h.events).toEqual(['relay:register', 'spawn:2', 'exit:2', 'relay:unregister']);
     expect(relay.register).toHaveBeenCalledTimes(2);
     expect(relay.unregister).toHaveBeenCalledTimes(2);
+  });
+
+  test('a start that fails after registering with the relay releases the registration', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    h = harness({ relay });
+    h.setReady(() => false);
+    const outcome = expect(h.m.start(movie(1, 'A'))).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+    await flush();
+    h.children[0]!.exit(1); // FFmpeg gives up before the stream is ready
+    await outcome;
+    expect(h.events).toEqual(['relay:register', 'spawn:1', 'exit:1', 'relay:unregister']);
   });
 
   test('logs ffmpeg stderr and urls with credentials redacted', async () => {

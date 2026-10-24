@@ -8,6 +8,12 @@ export const RETRY_DELAYS_MS: readonly number[] = [250, 500, 1000, 2000, 2000];
 /** What a proxy passes on from the provider's response. Everything else (cookies, server names, ...) stays on the server. */
 export const MIRRORED_HEADERS: readonly string[] = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
 
+/** Headers for a provider request: never compressed, so ranges are byte ranges of the file. */
+export function providerHeaders(userAgent: string, range?: string): Record<string, string> {
+  // fetch() adds `accept-encoding: identity` to a range request itself; sending it too would double it.
+  return range ? { 'user-agent': userAgent, range } : { 'user-agent': userAgent, 'accept-encoding': 'identity' };
+}
+
 /**
  * fetch() that, while the provider answers with a LIMIT_STATUSES status, cancels that body, waits the next delay and tries again.
  * Returns the first other response, or the last refusal once the delays run out. Aborting init.signal stops it (rejects).

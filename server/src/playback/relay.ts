@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
-import { fetchWithLimitRetry, MIRRORED_HEADERS } from './upstream.ts';
+import { fetchWithLimitRetry, MIRRORED_HEADERS, providerHeaders } from './upstream.ts';
 
 /**
  * FFmpeg's HTTP seek opens the new range request before it closes the old one (keeping it as a fallback),
@@ -22,8 +22,8 @@ export type UpstreamRelay = {
   close(): Promise<void>;
 };
 
-/** One provider request. `closed` resolves once it, and every request before it, is closed. */
-type ProviderRequest = { abort: AbortController; closed: Promise<void> };
+/** One provider request and the local response it feeds. `closed` resolves once it, and every request before it, is closed. */
+type ProviderRequest = { abort: AbortController; res: ServerResponse; closed: Promise<void> };
 
 type Registration = {
   source: { url: string; userAgent: string };
@@ -32,6 +32,16 @@ type Registration = {
 };
 
 const PASSED_STATUSES = new Set([200, 206, 416]);
+
+/**
+ * Takes a request's connection away: aborts the provider request and cuts its local response. The abort alone is
+ * not enough: once the provider's whole answer is inside the relay, only the local response holds it, and FFmpeg
+ * does not read the connection it is seeking away from. (Cutting a response that has finished does nothing.)
+ */
+function cut(r: ProviderRequest): void {
+  r.abort.abort();
+  r.res.destroy();
+}
 
 export async function startUpstreamRelay(deps: { log: Log; retryDelaysMs?: readonly number[] }): Promise<UpstreamRelay> {
   const { log } = deps;
@@ -63,15 +73,17 @@ export async function startUpstreamRelay(deps: { log: Log; retryDelaysMs?: reado
       markClosed = ok;
     });
     const previous = reg.current;
-    const mine: ProviderRequest = { abort, closed };
+    const mine: ProviderRequest = { abort, res, closed };
     reg.current = mine;
     res.once('close', () => abort.abort()); // FFmpeg hung up, or has what it asked for
-    previous?.abort.abort();
+    if (previous) cut(previous);
     try {
       await previous?.closed;
       await forward(reg.source, req, res, abort.signal);
     } finally {
-      abort.abort(); // a no-op once the provider request is over; if forward() threw, it drops it
+      // A no-op once the provider request is over; if forward() threw, it drops it. The response is left to
+      // finish: it may still be flushing an answer forward() gave (a refusal, a HEAD).
+      abort.abort();
       if (reg.current === mine) reg.current = null;
       markClosed();
     }
@@ -84,8 +96,7 @@ export async function startUpstreamRelay(deps: { log: Log; retryDelaysMs?: reado
     res: ServerResponse,
     signal: AbortSignal,
   ): Promise<void> {
-    const headers: Record<string, string> = { 'user-agent': source.userAgent, 'accept-encoding': 'identity' };
-    if (req.headers.range) headers.range = req.headers.range;
+    const headers = providerHeaders(source.userAgent, req.headers.range);
     let upstream: Response;
     try {
       signal.throwIfAborted(); // taken over, or FFmpeg left, while waiting for its turn
@@ -116,11 +127,12 @@ export async function startUpstreamRelay(deps: { log: Log; retryDelaysMs?: reado
     await bodyClosed;
   }
 
-  /** Aborts the registration's newest request and waits until it, and so every one before it, is closed. */
+  /** Cuts the registration's newest request and waits until it, and so every one before it, is closed. */
   async function release(reg: Registration): Promise<void> {
     const last = reg.current;
-    last?.abort.abort();
-    await last?.closed;
+    if (!last) return;
+    cut(last);
+    await last.closed;
   }
 
   return {

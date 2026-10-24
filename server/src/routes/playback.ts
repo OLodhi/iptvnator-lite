@@ -9,7 +9,7 @@ import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { CLIENT_ID, PlaybackError } from '../playback/sessions.ts';
 import type { SessionManager } from '../playback/sessions.ts';
 import { resolveSourceUrl, SourceError } from '../playback/sourceUrl.ts';
-import { fetchWithLimitRetry, MIRRORED_HEADERS } from '../playback/upstream.ts';
+import { fetchWithLimitRetry, MIRRORED_HEADERS, providerHeaders } from '../playback/upstream.ts';
 import { ProviderError } from '../providers/errors.ts';
 import type { PersonalService } from '../personal/service.ts';
 import { currentUserId } from '../users.ts';
@@ -248,8 +248,7 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         return reply.code(502).send({ code: 'UPSTREAM_ERROR', message } satisfies ApiError);
       };
 
-      const headers: Record<string, string> = { 'user-agent': source.userAgent, 'accept-encoding': 'identity' };
-      if (req.headers.range) headers.range = req.headers.range;
+      const headers = providerHeaders(source.userAgent, req.headers.range);
       // Safari overlaps range requests when it seeks, and a one-connection provider refuses the second while
       // the first is open: the newer request takes the session's connection over.
       await endProxies((p) => p !== proxy && p.sessionId === viewer.sessionId, 'preempt');
@@ -267,7 +266,9 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         clearTimeout(headersTimer);
       }
 
-      if (stopped || viewerGone || (res.status !== 200 && res.status !== 206 && res.status !== 416)) {
+      // Aborted: stopped, preempted or left by the viewer while the provider answered. (A preemption in that gap
+      // has already destroyed the viewer's connection, though its 'close' has not marked the viewer gone yet.)
+      if (upstream.signal.aborted || (res.status !== 200 && res.status !== 206 && res.status !== 416)) {
         await discard(res);
         return endEarly(`The provider answered ${res.status}`, () =>
           deps.log.warn({ url: redactUrl(source.url), status: res.status }, 'direct stream: provider refused'),

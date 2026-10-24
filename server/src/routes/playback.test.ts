@@ -413,6 +413,36 @@ describe('playback routes', () => {
       await upstream.close();
     }
   });
+
+  test('a direct request still waiting to retry a refusal is cut by the next one, not answered', async () => {
+    let requests = 0;
+    const upstream = createServer((_req, res) => {
+      // The first is refused, as if the provider had not yet noticed the previous connection close.
+      if (++requests === 1) return void res.writeHead(403).end();
+      res.writeHead(206, { 'content-type': 'video/mp4', 'content-length': 4, 'content-range': 'bytes 0-3/100' });
+      res.end('abcd');
+    });
+    await new Promise<void>((ok) => upstream.listen(0, '127.0.0.1', ok));
+    const origin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+    vi.spyOn(sessions, 'touch').mockReturnValue(true);
+    vi.spyOn(sessions, 'directSource').mockReturnValue({ url: `${origin}/movie/user/secret/5.mp4`, userAgent: UA });
+    try {
+      const a = viewer(`${w.origin}/api/sessions/sess/A/direct`);
+      await vi.waitFor(() => expect(requests).toBe(1)); // A was refused and waits 250 ms before trying again
+      const b = await getAll(`${w.origin}/api/sessions/sess/A/direct`, { range: 'bytes=0-3' });
+      expect(b.status).toBe(206);
+      expect(b.body.toString()).toBe('abcd');
+      // A's connection was cut: not answered 404 (its session is still there) or 502 (the provider did nothing wrong).
+      expect(await a.status).toBe(-1);
+      expect(requests).toBe(2); // and A never tried again
+      expect(routeLogs.filter((l) => l.m.startsWith('direct stream:'))).toEqual([]);
+    } finally {
+      await new Promise<void>((ok) => {
+        upstream.closeAllConnections();
+        upstream.close(() => ok());
+      });
+    }
+  });
 });
 
 /** A viewer's GET that stays open until answered; `status` is -1 if the connection fails instead. */
@@ -789,6 +819,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   });
 
   test('a second range request on a direct movie takes over the provider connection', async () => {
+    const logsBefore = logs.length;
     const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
     expect(movie.mode).toBe('direct');
     const media = readFileSync(join(mediaDir, 'movie.mp4'));
@@ -804,6 +835,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     expect(await drain(a.res)).toBeLessThan(media.length);
     expect(a.res.complete).toBe(false); // A was cut off
     await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(0), { timeout: 2_000 });
+    expect(logs.slice(logsBefore).filter((l) => l.startsWith('{"m":"direct stream:'))).toEqual([]);
   });
 
   test('dead channel fails cleanly', async () => {
