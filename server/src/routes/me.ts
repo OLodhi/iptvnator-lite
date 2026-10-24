@@ -71,10 +71,13 @@ export const meRoutes = (deps: {
           message: 'Positions are kept for movies, and for episodes of a series',
         } satisfies ApiError);
       }
-      if (episodeRemoteId !== undefined && !(await deps.seriesInfo.getEpisode(itemId, episodeRemoteId))) {
-        return reply.code(404).send(notFound('Episode', episodeRemoteId));
+      let label: string | undefined;
+      if (episodeRemoteId !== undefined) {
+        const episode = await deps.seriesInfo.getEpisode(itemId, episodeRemoteId);
+        if (!episode) return reply.code(404).send(notFound('Episode', episodeRemoteId));
+        label = `S${episode.season} E${episode.episodeNum}`;
       }
-      personal.savePosition(currentUserId(req), req.body);
+      personal.savePosition(currentUserId(req), req.body, label);
       return reply.code(204).send();
     });
     app.get<{ Params: { itemId: number } }>(

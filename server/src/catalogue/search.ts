@@ -33,14 +33,21 @@ export function createSearch(db: Db): Search {
 
   return {
     items(providerId, kind, query, visibleCategoryIds, limit) {
-      const q = query.trim();
+      // FTS5 reads the match string as a C string, so control characters (NUL above all) are dropped first.
+      const q = query.replace(/\p{Cc}/gu, '').trim();
       if (q === '' || visibleCategoryIds.size === 0) return [];
       const common = { providerId, kind, limit, visible: JSON.stringify([...visibleCategoryIds]) };
-      const rows =
-        [...q].length < MIN_FTS_CHARS
-          ? prefix.all({ ...common, pattern: `${escapeLike(q)}%` })
-          : fts.all({ ...common, match: asPhrase(q) });
-      return rows as StoredItem[];
+      try {
+        const rows =
+          [...q].length < MIN_FTS_CHARS
+            ? prefix.all({ ...common, pattern: `${escapeLike(q)}%` })
+            : fts.all({ ...common, match: asPhrase(q) });
+        return rows as StoredItem[];
+      } catch (err) {
+        // A query FTS cannot parse is a query with no matches, never a server error.
+        if (err instanceof Error && err.name === 'SqliteError') return [];
+        throw err;
+      }
     },
   };
 }

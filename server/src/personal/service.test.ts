@@ -146,7 +146,7 @@ describe('positions', () => {
     personal.savePosition(USER, { itemId: movie, positionSec: 1900, durationSec: 2000 });
     expect(personal.positions(USER, movie)[0]).toMatchObject({ positionSec: 1900, finished: true });
     expect(personal.continueWatching(USER, providerId, 'movie', 10)).toEqual([
-      { itemId: other, episodeRemoteId: null, positionSec: 100, durationSec: 2000 },
+      { itemId: other, episodeRemoteId: null, episodeLabel: null, positionSec: 100, durationSec: 2000 },
     ]);
   });
 
@@ -160,13 +160,13 @@ describe('positions', () => {
     const a = addItem('series', '10');
     const b = addItem('series', '20');
     personal.savePosition(USER, { itemId: a, episodeRemoteId: '101', positionSec: 100, durationSec: 1000 });
-    personal.savePosition(USER, { itemId: a, episodeRemoteId: '102', positionSec: 200, durationSec: 1000 });
+    personal.savePosition(USER, { itemId: a, episodeRemoteId: '102', positionSec: 200, durationSec: 1000 }, 'S1 E2');
     personal.savePosition(USER, { itemId: b, episodeRemoteId: '201', positionSec: 300, durationSec: 1000 });
     personal.savePosition(USER, { itemId: a, episodeRemoteId: '103', positionSec: 990, durationSec: 1000 }); // finished
 
     expect(personal.continueWatching(USER, providerId, 'series', 10)).toEqual([
-      { itemId: b, episodeRemoteId: '201', positionSec: 300, durationSec: 1000 },
-      { itemId: a, episodeRemoteId: '102', positionSec: 200, durationSec: 1000 },
+      { itemId: b, episodeRemoteId: '201', episodeLabel: null, positionSec: 300, durationSec: 1000 },
+      { itemId: a, episodeRemoteId: '102', episodeLabel: 'S1 E2', positionSec: 200, durationSec: 1000 },
     ]);
     expect(personal.continueWatching(USER, providerId, 'series', 1)).toHaveLength(1);
     expect(personal.continueWatching(USER, providerId, 'movie', 10)).toEqual([]);

@@ -150,7 +150,7 @@ test('the series cache resolves episodes for stream building', async () => {
   await syncCatalogue({ db, client: providers.clientFor(id), providerId: id });
   const series = catalogue.listItems(catalogue.listCategories(id, 'series')[0]!.id, null, 10)!.items[0]!;
   const cache = createSeriesInfoCache({ providers, catalogue });
-  expect(await cache.getEpisode(series.id, '201')).toMatchObject({ remoteId: '201', containerExt: expect.any(String) });
+  expect(await cache.getEpisode(series.id, '201')).toMatchObject({ remoteId: '201', containerExt: expect.any(String), season: 2, episodeNum: 1 });
   expect(await cache.getEpisode(series.id, 'nope')).toBeUndefined();
   expect(catalogue.getItem(series.id)).toMatchObject({ remoteId: '10' });
 });

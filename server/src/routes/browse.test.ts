@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { BrowseView } from '@tv/shared';
 import { startBrowseApp } from '../testing/browseApp.ts';
 import { browseCatalogue } from '../testing/browseCatalogue.ts';
@@ -50,28 +50,34 @@ test('browse rows resolve personal ids to items and skip ones pruned from the ca
   expect(view.recent.map((i) => [i.id, i.favourite])).toEqual([[bbc, true]]);
 });
 
-test('continue watching names the episode and survives a missing series info', async () => {
+test('continue watching shows the saved episode label without asking the provider', async () => {
   const movie = itemId('|EN| Sporting Chance');
   const series = itemId('|EN| Sport Series');
-  h.personal.savePosition(USER, { itemId: movie, positionSec: 60, durationSec: 600 });
-  h.personal.savePosition(USER, { itemId: series, episodeRemoteId: '201', positionSec: 100, durationSec: 1000 });
+  const put = (payload: object) => h.app.inject({ method: 'PUT', url: '/api/me/positions', payload });
+  expect((await put({ itemId: movie, positionSec: 60, durationSec: 600 })).statusCode).toBe(204);
+  expect((await put({ itemId: series, episodeRemoteId: '102', positionSec: 100, durationSec: 1000 })).statusCode).toBe(204);
+  const getSeasons = vi.spyOn(h.seriesInfo, 'getSeasons');
+
   const movies = await browse('movie');
   expect(movies.continueWatching).toMatchObject([
     { item: { id: movie, displayName: 'Sporting Chance' }, episodeRemoteId: null, episodeLabel: null, positionSec: 60, durationSec: 600 },
   ]);
   const shows = await browse('series');
   expect(shows.continueWatching).toMatchObject([
-    { item: { id: series }, episodeRemoteId: '201', episodeLabel: 'S2 E3', positionSec: 100, durationSec: 1000 },
+    { item: { id: series }, episodeRemoteId: '102', episodeLabel: 'S1 E2', positionSec: 100, durationSec: 1000 },
   ]);
+  expect(getSeasons).not.toHaveBeenCalled();
+});
 
-  const original = h.seriesInfo.getSeasons;
-  h.seriesInfo.getSeasons = () => Promise.reject(new Error('provider down'));
-  try {
-    const degraded = await browse('series');
-    expect(degraded.continueWatching).toMatchObject([{ episodeRemoteId: '201', episodeLabel: null }]);
-  } finally {
-    h.seriesInfo.getSeasons = original;
-  }
+test('resolution runs once per request per kind', async () => {
+  const resolution = vi.spyOn(h.curation, 'resolution');
+  await browse('live');
+  expect(resolution).toHaveBeenCalledTimes(1);
+  resolution.mockClear();
+  const res = await h.app.inject('/api/search?q=spor');
+  expect(res.statusCode).toBe(200);
+  expect(resolution.mock.calls.map((c) => c[1]).sort()).toEqual(['live', 'movie', 'series']);
+  resolution.mockRestore();
 });
 
 test('unknown kinds are rejected', async () => {

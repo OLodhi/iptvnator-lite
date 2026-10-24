@@ -3,7 +3,13 @@ import type { ProviderService } from '../providers/service.ts';
 import type { SeriesInfo } from '../providers/xtream/client.ts';
 import type { CatalogueRepo } from './repo.ts';
 
-export type EpisodeSource = { remoteId: string; containerExt: string; durationSec: number | null };
+export type EpisodeSource = {
+  remoteId: string;
+  containerExt: string;
+  durationSec: number | null;
+  season: number;
+  episodeNum: number;
+};
 
 export interface SeriesInfoCache {
   getSeasons(itemId: number): Promise<Season[]>;
@@ -48,7 +54,7 @@ export function createSeriesInfoCache(deps: {
       const info = await load(itemId);
       for (const s of info?.seasons ?? []) {
         const e = s.episodes.find((x) => x.remoteId === episodeRemoteId);
-        if (e) return { remoteId: e.remoteId, containerExt: e.containerExt, durationSec: e.durationSec };
+        if (e) return { remoteId: e.remoteId, containerExt: e.containerExt, durationSec: e.durationSec, season: s.season, episodeNum: e.episodeNum };
       }
       return undefined;
     },

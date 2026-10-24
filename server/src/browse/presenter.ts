@@ -1,7 +1,6 @@
 import type { BrowseCategory, BrowseView, CatalogItem, ContinueItem, Kind } from '@tv/shared';
 import type { CatalogueRepo, ItemDetail, StoredItem } from '../catalogue/repo.ts';
-import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
-import type { CurationService } from '../curation/service.ts';
+import type { CurationService, Resolution } from '../curation/service.ts';
 import type { PersonalService } from '../personal/service.ts';
 
 export const RECENT_LIMIT = 20;
@@ -9,8 +8,10 @@ export const FAVOURITES_LIMIT = 50;
 export const CONTINUE_LIMIT = 20;
 
 export interface Presenter {
-  /** Adds `displayName` and `favourite` for the user; anything the repo stores beyond a stored item's public fields is dropped. */
+  /** Resolves each kind once and adds `displayName` and `favourite` for the user; internal fields are dropped. */
   items(stored: StoredItem[], userId: number): CatalogItem[];
+  /** The same for a caller that has already resolved the kind (and loaded the user's favourites for it). */
+  itemsWith(resolution: Pick<Resolution, 'displayName'>, favourites: Set<number>, stored: StoredItem[]): CatalogItem[];
   browse(userId: number, providerId: number, kind: Kind): Promise<BrowseView>;
 }
 
@@ -18,15 +19,12 @@ export function createPresenter(deps: {
   curation: CurationService;
   personal: PersonalService;
   catalogue: CatalogueRepo;
-  seriesInfo: SeriesInfoCache;
 }): Presenter {
   const { curation, personal, catalogue } = deps;
 
-  /** One kind's resolution and favourites, worked out once and applied to many items. */
-  function presenterFor(userId: number, providerId: number, kind: Kind) {
-    const { displayName } = curation.resolution(providerId, kind, userId);
-    const favourites = new Set(personal.favouriteItemIds(userId, providerId, kind));
-    return (i: StoredItem): CatalogItem => ({
+  const present =
+    (displayName: (name: string) => string, favourites: Set<number>) =>
+    (i: StoredItem): CatalogItem => ({
       id: i.id,
       providerId: i.providerId,
       kind: i.kind,
@@ -38,14 +36,19 @@ export function createPresenter(deps: {
       displayName: displayName(i.name),
       favourite: favourites.has(i.id),
     });
-  }
+
+  const itemsWith: Presenter['itemsWith'] = (resolution, favourites, stored) =>
+    stored.map(present(resolution.displayName, favourites));
 
   function items(stored: StoredItem[], userId: number): CatalogItem[] {
-    const present = new Map<string, (i: StoredItem) => CatalogItem>();
+    const fns = new Map<string, (i: StoredItem) => CatalogItem>();
     return stored.map((i) => {
       const key = `${i.providerId}:${i.kind}`;
-      let fn = present.get(key);
-      if (!fn) present.set(key, (fn = presenterFor(userId, i.providerId, i.kind)));
+      let fn = fns.get(key);
+      if (!fn) {
+        const { displayName } = curation.resolution(i.providerId, i.kind, userId);
+        fns.set(key, (fn = present(displayName, new Set(personal.favouriteItemIds(userId, i.providerId, i.kind)))));
+      }
       return fn(i);
     });
   }
@@ -53,57 +56,42 @@ export function createPresenter(deps: {
   const resolveItems = (ids: number[]): ItemDetail[] =>
     ids.map((id) => catalogue.getItem(id)).filter((i): i is ItemDetail => i !== undefined);
 
-  /** "S<season> E<num>"; null when the series info is unavailable or no longer lists the episode. */
-  async function episodeLabel(itemId: number, episodeRemoteId: string): Promise<string | null> {
-    try {
-      for (const s of await deps.seriesInfo.getSeasons(itemId)) {
-        const e = s.episodes.find((x) => x.remoteId === episodeRemoteId);
-        if (e) return `S${s.season} E${e.episodeNum}`;
-      }
-    } catch {
-      // A provider hiccup must not fail the browse view.
-    }
-    return null;
-  }
-
   return {
     items,
+    itemsWith,
     async browse(userId, providerId, kind) {
-      const { visibleIds, displayName, newCount } = curation.resolution(providerId, kind, userId);
-      const pinnedIds = new Set(personal.pinnedCategoryIds(userId, providerId, kind));
+      const resolution = curation.resolution(providerId, kind, userId);
+      const { visibleIds, displayName, newCount } = resolution;
+      const pinnedIds = personal.pinnedCategoryIds(userId, providerId, kind);
+      const pinnedSet = new Set(pinnedIds);
       const categories: BrowseCategory[] = catalogue
         .listCategories(providerId, kind)
         .filter((c) => visibleIds.has(c.id))
-        .map((c) => ({ id: c.id, displayName: displayName(c.name), itemCount: c.itemCount, pinned: pinnedIds.has(c.id) }));
+        .map((c) => ({ id: c.id, displayName: displayName(c.name), itemCount: c.itemCount, pinned: pinnedSet.has(c.id) }));
       const byId = new Map(categories.map((c) => [c.id, c]));
-      const present = presenterFor(userId, providerId, kind);
+      const favouriteIds = personal.favouriteItemIds(userId, providerId, kind);
+      const show = present(displayName, new Set(favouriteIds));
 
       const continuing = kind === 'live' ? [] : personal.continueWatching(userId, providerId, kind, CONTINUE_LIMIT);
-      const continueWatching = (
-        await Promise.all(
-          continuing.map(async (entry): Promise<ContinueItem | undefined> => {
-            const stored = catalogue.getItem(entry.itemId);
-            if (!stored) return undefined;
-            return {
-              item: present(stored),
-              episodeRemoteId: entry.episodeRemoteId,
-              episodeLabel: entry.episodeRemoteId === null ? null : await episodeLabel(stored.id, entry.episodeRemoteId),
-              positionSec: entry.positionSec,
-              durationSec: entry.durationSec,
-            };
-          }),
-        )
-      ).filter((c): c is ContinueItem => c !== undefined);
+      const continueWatching: ContinueItem[] = [];
+      for (const entry of continuing) {
+        const stored = catalogue.getItem(entry.itemId);
+        if (!stored) continue;
+        continueWatching.push({
+          item: show(stored),
+          episodeRemoteId: entry.episodeRemoteId,
+          episodeLabel: entry.episodeLabel,
+          positionSec: entry.positionSec,
+          durationSec: entry.durationSec,
+        });
+      }
       return {
         providerId,
         kind,
         categories,
-        pinned: personal
-          .pinnedCategoryIds(userId, providerId, kind)
-          .map((id) => byId.get(id))
-          .filter((c): c is BrowseCategory => c !== undefined),
-        recent: resolveItems(personal.recentItemIds(userId, providerId, kind, RECENT_LIMIT)).map(present),
-        favourites: resolveItems(personal.favouriteItemIds(userId, providerId, kind).slice(0, FAVOURITES_LIMIT)).map(present),
+        pinned: pinnedIds.map((id) => byId.get(id)).filter((c): c is BrowseCategory => c !== undefined),
+        recent: resolveItems(personal.recentItemIds(userId, providerId, kind, RECENT_LIMIT)).map((i) => show(i)),
+        favourites: resolveItems(favouriteIds.slice(0, FAVOURITES_LIMIT)).map((i) => show(i)),
         continueWatching,
         newCategories: newCount,
       };

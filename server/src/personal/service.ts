@@ -8,7 +8,14 @@ export const FINISHED_RATIO = 0.95;
 /** Reports earlier than this are ignored so an accidental start never overwrites a real resume point. */
 export const MIN_POSITION_SEC = 5;
 
-export type ContinueEntry = { itemId: number; episodeRemoteId: string | null; positionSec: number; durationSec: number | null };
+export type ContinueEntry = {
+  itemId: number;
+  episodeRemoteId: string | null;
+  /** "S<season> E<num>" as saved with the position; null for a movie. */
+  episodeLabel: string | null;
+  positionSec: number;
+  durationSec: number | null;
+};
 
 /**
  * Personal data keys on provider remote ids, not row ids, so it survives a resync that prunes and re-creates
@@ -27,7 +34,8 @@ export interface PersonalService {
   /** Episodes are recorded under their series. */
   recordPlay(userId: number, itemId: number, episodeRemoteId: string | null): boolean;
   recentItemIds(userId: number, providerId: number, kind: Kind, limit: number): number[];
-  savePosition(userId: number, report: PositionReport): boolean;
+  /** `episodeLabel` is kept with an episode's position so browsing never has to ask the provider. */
+  savePosition(userId: number, report: PositionReport, episodeLabel?: string): boolean;
   positions(userId: number, itemId: number): SavedPosition[];
   continueWatching(userId: number, providerId: number, kind: 'movie' | 'series', limit: number): ContinueEntry[];
 }
@@ -46,7 +54,7 @@ const EPISODE_PREFIX = 'episode:';
 const MOVIE_PREFIX = 'movie:';
 
 /** The expression sits on the positions side so the join can search items by its unique (provider, kind, remote id) index. */
-export const CONTINUE_MOVIES_SQL = `SELECT i.id AS itemId, NULL AS episodeRemoteId, p.position_sec AS positionSec, p.duration_sec AS durationSec
+export const CONTINUE_MOVIES_SQL = `SELECT i.id AS itemId, NULL AS episodeRemoteId, NULL AS episodeLabel, p.position_sec AS positionSec, p.duration_sec AS durationSec
      FROM positions p JOIN items i
        ON i.provider_id = p.provider_id AND i.kind = 'movie' AND i.remote_id = substr(p.content_key, ${MOVIE_PREFIX.length + 1})
      WHERE p.user_id = ? AND p.provider_id = ? AND p.finished = 0 AND p.content_key LIKE '${MOVIE_PREFIX}%'
@@ -105,10 +113,10 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
     .pluck();
 
   const upsertPosition = db.prepare(
-    `INSERT INTO positions (user_id, provider_id, content_key, series_remote_id, position_sec, duration_sec, finished, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO positions (user_id, provider_id, content_key, series_remote_id, episode_label, position_sec, duration_sec, finished, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (user_id, provider_id, content_key) DO UPDATE SET
-       series_remote_id = excluded.series_remote_id, position_sec = excluded.position_sec,
+       series_remote_id = excluded.series_remote_id, episode_label = excluded.episode_label, position_sec = excluded.position_sec,
        duration_sec = excluded.duration_sec, finished = excluded.finished, updated_at = excluded.updated_at`,
   );
   const POSITION_COLUMNS = `content_key AS contentKey, position_sec AS positionSec, duration_sec AS durationSec,
@@ -123,7 +131,7 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
   const continueMovies = db.prepare(CONTINUE_MOVIES_SQL);
   const continueSeries = db.prepare(
     `SELECT i.id AS itemId, substr(p.content_key, ${EPISODE_PREFIX.length + 1}) AS episodeRemoteId,
-            p.position_sec AS positionSec, p.duration_sec AS durationSec
+            p.episode_label AS episodeLabel, p.position_sec AS positionSec, p.duration_sec AS durationSec
      FROM (SELECT *, rowid AS rid, ROW_NUMBER() OVER (PARTITION BY series_remote_id ORDER BY updated_at DESC, rowid DESC) AS n
            FROM positions
            WHERE user_id = ? AND provider_id = ? AND finished = 0 AND series_remote_id IS NOT NULL) p
@@ -172,7 +180,7 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
       return true;
     },
     recentItemIds: (userId, providerId, kind, limit) => recent.all(userId, providerId, kind, limit) as number[],
-    savePosition(userId, report) {
+    savePosition(userId, report, episodeLabel) {
       const i = ref(item, report.itemId);
       if (!i) return false;
       if (report.positionSec < MIN_POSITION_SEC) return true;
@@ -184,6 +192,7 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
         i.providerId,
         episode === undefined ? `movie:${i.remoteId}` : `${EPISODE_PREFIX}${episode}`,
         episode === undefined ? null : i.remoteId,
+        episode === undefined ? null : (episodeLabel ?? null),
         report.positionSec,
         durationSec,
         finished ? 1 : 0,

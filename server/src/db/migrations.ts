@@ -108,6 +108,7 @@ export const migrations: string[] = [
     provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
     content_key TEXT NOT NULL,          -- 'movie:<remoteId>' | 'episode:<episodeRemoteId>'
     series_remote_id TEXT,              -- set for episodes
+    episode_label TEXT,                 -- 'S<season> E<num>' for episodes, kept so browsing never asks the provider
     position_sec REAL NOT NULL, duration_sec REAL, finished INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, provider_id, content_key));
   CREATE INDEX positions_recent ON positions (user_id, provider_id, finished, updated_at DESC);
