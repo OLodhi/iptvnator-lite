@@ -1,5 +1,5 @@
 export type FakeCategory = { id: string; name: string };
-export type FakeItem = { id: number; name: string; categoryId: string };
+export type FakeItem = { id: number; name: string; categoryId: string; epgChannelId?: string; archiveDays?: number };
 export type FakeKind = { categories: FakeCategory[]; items: FakeItem[] };
 export type FakeEpisode = { id: number; season: number; num: number; title: string };
 export type FakeCatalogue = {
@@ -10,7 +10,16 @@ export type FakeCatalogue = {
   episodes: Record<string, FakeEpisode[]>;
 };
 
-export type CatalogueCounts = { live: number; movie: number; series: number; categoriesPerKind: number };
+export type CatalogueCounts = {
+  live: number;
+  movie: number;
+  series: number;
+  categoriesPerKind: number;
+  /** The first N live items get epgChannelId `ch<id>.gen`. */
+  guideChannels?: number;
+  /** This percentage of those guide channels also get 7 days of archive. */
+  archivePercent?: number;
+};
 
 const LIVE_TAGS = ['UK| ', 'US| ', 'AR| '];
 const VOD_TAGS = ['|EN| ', '|FR| '];
@@ -40,8 +49,17 @@ function makeKind(count: number, categories: number, tags: string[], label: stri
 }
 
 export function generateCatalogue(counts: CatalogueCounts): FakeCatalogue {
+  const live = makeKind(counts.live, counts.categoriesPerKind, LIVE_TAGS, 'Channel');
+  const guided = Math.min(counts.guideChannels ?? 0, live.items.length);
+  const archived = counts.archivePercent ?? 0;
+  for (let i = 0; i < guided; i++) {
+    const item = live.items[i]!;
+    item.epgChannelId = `ch${item.id}.gen`;
+    // Spread evenly: exactly archivePercent of every 100 guide channels.
+    if (Math.floor(((i + 1) * archived) / 100) > Math.floor((i * archived) / 100)) item.archiveDays = 7;
+  }
   return {
-    live: makeKind(counts.live, counts.categoriesPerKind, LIVE_TAGS, 'Channel'),
+    live,
     movie: makeKind(counts.movie, counts.categoriesPerKind, VOD_TAGS, 'Movie'),
     series: makeKind(counts.series, counts.categoriesPerKind, VOD_TAGS, 'Series'),
     episodes: {},
@@ -57,8 +75,8 @@ export function smallCatalogue(): FakeCatalogue {
         { id: '3', name: 'Misc' },
       ],
       items: [
-        { id: 1, name: 'UK| HLS Channel', categoryId: '1' },
-        { id: 2, name: 'UK| Raw TS Channel', categoryId: '1' },
+        { id: 1, name: 'UK| HLS Channel', categoryId: '1', epgChannelId: 'hls.uk', archiveDays: 2 },
+        { id: 2, name: 'UK| Raw TS Channel', categoryId: '1', epgChannelId: 'raw.uk' },
         { id: 3, name: 'US| MPEG-2 Channel', categoryId: '2' },
         { id: 999, name: 'Misc Dead Channel', categoryId: '3' },
       ],

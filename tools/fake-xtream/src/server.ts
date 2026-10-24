@@ -4,10 +4,15 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { basename, dirname, join, resolve } from 'node:path';
-import { pipeline } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { createGzip } from 'node:zlib';
 import { generateCatalogue, smallCatalogue } from './catalogue.ts';
 import type { FakeCatalogue, FakeKind } from './catalogue.ts';
+import { DEFAULT_WINDOW, formatInZone, listings, xmltvChunks } from './guide.ts';
+import type { GuideWindow } from './guide.ts';
+
+export type GuideMode = 'xmltv' | 'gzip' | 'none' | 'error' | 'truncated' | 'stall';
 
 export type FakeXtreamOptions = {
   port?: number;
@@ -20,7 +25,21 @@ export type FakeXtreamOptions = {
   paced?: boolean;
   /** Paced only: how long the live TS files play for, which sets their bitrate (size / seconds). Default 30 (make-media). */
   pacedMediaSeconds?: number;
+  /** How /xmltv.php answers. Default 'xmltv'. */
+  guide?: GuideMode;
+  /** false makes both listing table actions return []. Default true. */
+  listings?: boolean;
+  /** 'typo' makes get_simple_data_table answer an error object, and only get_simple_date_table return listings. Default 'simple'. */
+  tableAction?: 'simple' | 'typo';
+  /** The provider's timezone, for server_info and listing times. Default Europe/London. */
+  timezone?: string;
+  /** Clock for the guide and server_info, in ms. Default Date.now. */
+  now?: () => number;
+  /** The span of generated programmes. Default 3 days back, 2 ahead, 60 minutes each. */
+  guideWindow?: GuideWindow;
 };
+
+export type TimeshiftRequest = { id: string; start: string; durationMin: number; ext: string };
 
 export type FakeXtream = {
   url: string;
@@ -29,6 +48,7 @@ export type FakeXtream = {
   /** Media requests refused because the connection limit was reached (oldest first), with the paths holding it. */
   refusedMediaRequests(): RefusedRequest[];
   setCatalogue(c: FakeCatalogue): void;
+  timeshiftRequests(): TimeshiftRequest[];
 };
 
 export type RefusedRequest = { path: string; heldBy: string[] };
@@ -67,6 +87,11 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
   const open = new Map<ServerResponse, string>(); // open media responses → request path
   const refused: RefusedRequest[] = [];
   const startedAt = Date.now();
+  const guideMode = opts.guide ?? 'xmltv';
+  const timezone = opts.timezone ?? 'Europe/London';
+  const window = opts.guideWindow ?? DEFAULT_WINDOW;
+  const now = opts.now ?? (() => Date.now());
+  const timeshifts: TimeshiftRequest[] = [];
   let baseUrl = '';
 
   const server: Server = createServer((req, res) => {
@@ -80,6 +105,15 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     const url = new URL(req.url ?? '/', 'http://fake');
     const path = url.pathname;
     if (path === '/player_api.php') return api(url, res);
+    if (path === '/xmltv.php') return xmltv(url, res);
+    const shift = /^\/timeshift\/([^/]+)\/([^/]+)\/(\d+)\/(\d{4}-\d{2}-\d{2}:\d{2}-\d{2})\/(\d+)\.(\w+)$/.exec(path);
+    if (shift) {
+      const [, user, pass, minutes, start, id, ext] = shift as unknown as string[];
+      if (decodeURIComponent(user!) !== username || decodeURIComponent(pass!) !== password) return status(res, 403);
+      if (!catalogue.live.items.some((i) => String(i.id) === id)) return status(res, 404);
+      timeshifts.push({ id: id!, start: start!, durationMin: Number(minutes), ext: ext! });
+      return serveMedia(req, res, join(mediaDir, 'raw.ts'), 'file');
+    }
     const media = /^\/(live|movie|series)\/([^/]+)\/([^/]+)\/(\d+)(?:\.\w+)?$/.exec(path);
     if (media) {
       const [, kind, user, pass, id] = media as unknown as [string, 'live' | 'movie' | 'series', string, string, string];
@@ -232,6 +266,45 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     return lines.join('\n') + '\n';
   }
 
+  /** The XMLTV guide, streamed chunk by chunk (gzip piped through zlib) so a huge guide is never one string. */
+  async function xmltv(url: URL, res: ServerResponse): Promise<void> {
+    const q = url.searchParams;
+    if (q.get('username') !== username || q.get('password') !== password) return status(res, 403);
+    if (guideMode === 'none') return status(res, 404);
+    if (guideMode === 'error') return status(res, 500);
+    const body = Readable.from(xmltvChunks(catalogue.live.items, now(), window));
+    res.writeHead(200, { 'content-type': 'application/xml' });
+    if (guideMode === 'gzip') {
+      pipeline(body, createGzip(), res, () => body.destroy());
+      return;
+    }
+    if (guideMode === 'xmltv') {
+      pipeline(body, res, () => body.destroy());
+      return;
+    }
+    // truncated and stall: send the first 300 bytes, stopping mid-element.
+    let sent = 0;
+    for await (const chunk of body as AsyncIterable<string>) {
+      const part = chunk.slice(0, 300 - sent);
+      res.write(part);
+      sent += part.length;
+      if (sent >= 300) break;
+    }
+    body.destroy();
+    if (guideMode === 'truncated') {
+      res.end();
+      return;
+    }
+    await new Promise<void>((ok) => res.once('close', () => ok())); // stall: nothing more until the client goes
+  }
+
+  function tableListings(q: URLSearchParams, mode: 'short' | 'table'): unknown {
+    const item = catalogue.live.items.find((i) => String(i.id) === q.get('stream_id'));
+    if (!item?.epgChannelId) return { epg_listings: [] };
+    const limit = Number(q.get('limit') ?? 4);
+    return { epg_listings: listings(item, now(), window, timezone, mode === 'short' ? { limit } : undefined) };
+  }
+
   async function api(url: URL, res: ServerResponse): Promise<void> {
     const q = url.searchParams;
     const good = q.get('username') === username && q.get('password') === password;
@@ -258,7 +331,9 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
             port: String(new URL(baseUrl).port),
             https_port: '',
             server_protocol: 'http',
-            time_now: new Date().toISOString().slice(0, 19).replace('T', ' '),
+            timezone,
+            timestamp_now: Math.floor(now() / 1000),
+            time_now: formatInZone(now(), timezone),
           },
         });
       case 'get_live_categories':
@@ -274,12 +349,12 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
           stream_type: 'live',
           stream_id: String(it.id),
           stream_icon: '',
-          epg_channel_id: '',
+          epg_channel_id: it.epgChannelId ?? '',
           added: '1600000000',
           category_id: it.categoryId,
           category_ids: [Number(it.categoryId)],
-          tv_archive: 0,
-          tv_archive_duration: 0,
+          tv_archive: it.archiveDays ? 1 : 0,
+          tv_archive_duration: it.archiveDays ?? 0,
         }));
       case 'get_vod_streams':
         return streamArray(res, catalogue.movie, (it, i) => ({
@@ -320,6 +395,13 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
         }
         return json(res, { info: { name: item.name, cover: '', rating: '7.0', category_id: item.categoryId }, episodes });
       }
+      case 'get_short_epg':
+        return json(res, tableListings(q, 'short'));
+      case 'get_simple_data_table':
+        if (opts.tableAction === 'typo') return json(res, { error: 'unknown action' });
+        return json(res, opts.listings === false ? [] : tableListings(q, 'table'));
+      case 'get_simple_date_table':
+        return json(res, opts.listings === false || opts.tableAction !== 'typo' ? [] : tableListings(q, 'table'));
       default:
         return json(res, []);
     }
@@ -380,6 +462,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     setCatalogue: (c) => {
       catalogue = c;
     },
+    timeshiftRequests: () => timeshifts.map((t) => ({ ...t })),
   };
 }
 
@@ -391,8 +474,17 @@ if (import.meta.main) {
   };
   // --generate <live>,<movie>,<series>,<categoriesPerKind> serves a generated catalogue.
   const gen = flag('--generate')?.split(',').map(Number);
+  // --guide <channels>,<archivePercent>,<pastDays>,<futureDays>,<programmeMinutes> links the first channels to a guide.
+  const guide = flag('--guide')?.split(',').map(Number);
   const generated = gen
-    ? generateCatalogue({ live: gen[0]!, movie: gen[1]!, series: gen[2]!, categoriesPerKind: gen[3]! })
+    ? generateCatalogue({
+        live: gen[0]!,
+        movie: gen[1]!,
+        series: gen[2]!,
+        categoriesPerKind: gen[3]!,
+        guideChannels: guide?.[0],
+        archivePercent: guide?.[1],
+      })
     : undefined;
   const defaultMedia = join(dirname(fileURLToPath(import.meta.url)), '..', 'media');
   const fake = await startFakeXtream({
@@ -400,6 +492,7 @@ if (import.meta.main) {
     mediaDir: flag('--media') ?? defaultMedia,
     catalogue: generated ?? smallCatalogue(),
     paced: args.includes('--paced'),
+    guideWindow: guide ? { pastDays: guide[2]!, futureDays: guide[3]!, programmeMinutes: guide[4]! } : undefined,
   });
   console.log(`fake xtream listening on ${fake.url} (username u, password p)`);
 }

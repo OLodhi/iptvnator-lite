@@ -1,3 +1,4 @@
+import { gunzipSync } from 'node:zlib';
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -42,7 +43,7 @@ describe('fake xtream', () => {
     expect(liveCats[0]).toMatchObject({ category_id: expect.any(String), category_name: expect.any(String) });
     const live = await (await api(fake, '&action=get_live_streams')).json();
     expect(live.map((s: { stream_id: string }) => s.stream_id)).toEqual(['1', '2', '3', '999']);
-    expect(live[0]).toMatchObject({ num: expect.any(Number), stream_type: 'live', tv_archive: 0 });
+    expect(live[0]).toMatchObject({ num: expect.any(Number), stream_type: 'live', tv_archive: 1 });
 
     expect(await (await api(fake, '&action=get_vod_categories')).json()).toHaveLength(2);
     const vod = await (await api(fake, '&action=get_vod_streams')).json();
@@ -281,6 +282,159 @@ describe('paced fake xtream', () => {
       Date.now = realNow;
       await late.close();
     }
+  });
+});
+
+describe('guide, short epg, timeshift and timezone', () => {
+  const NOW = Date.parse('2026-07-01T18:30:00Z');
+  const withFake = async (opts: Partial<Parameters<typeof startFakeXtream>[0]>, fn: (f: FakeXtream) => Promise<void>) => {
+    const f = await startFakeXtream({ mediaDir, catalogue: smallCatalogue(), now: () => NOW, ...opts });
+    try {
+      await fn(f);
+    } finally {
+      await f.close();
+    }
+  };
+  const xml = (f: FakeXtream) => fetch(`${f.url}/xmltv.php?username=u&password=p`);
+  const b64 = (s: string) => Buffer.from(s, 'base64').toString('utf8');
+
+  test('xmltv lists linked channels and an hour grid of programmes', async () => {
+    await withFake({}, async (f) => {
+      const body = await (await xml(f)).text();
+      expect(body).toContain('<channel id="hls.uk">');
+      expect(body).toContain('<channel id="other.uk">');
+      expect(body).toContain('<display-name>HLS Channel</display-name>');
+      expect(body).toMatch(/<programme start="20260701180000 \+0000" stop="20260701190000 \+0000" channel="hls.uk">\s*<title>HLS Channel 18:00<\/title>/);
+      const starts = [...body.matchAll(/<programme start="(\d{14})/g)].map((m) => m[1]!).sort();
+      expect(starts[0]).toBe('20260628180000');
+      expect(body.trimEnd().endsWith('</tv>')).toBe(true);
+    });
+  });
+
+  test('gzip guide is raw gzip without content-encoding', async () => {
+    await withFake({}, async (plain) => {
+      const expected = await (await xml(plain)).text();
+      await withFake({ guide: 'gzip' }, async (f) => {
+        const res = await xml(f);
+        expect(res.headers.get('content-encoding')).toBeNull();
+        expect(res.headers.get('content-type')).toBe('application/xml');
+        const raw = Buffer.from(await res.arrayBuffer());
+        expect([raw[0], raw[1]]).toEqual([0x1f, 0x8b]);
+        expect(gunzipSync(raw).toString('utf8')).toBe(expected);
+      });
+    });
+  });
+
+  test('guide modes none, error and truncated', async () => {
+    await withFake({ guide: 'none' }, async (f) => expect((await xml(f)).status).toBe(404));
+    await withFake({ guide: 'error' }, async (f) => expect((await xml(f)).status).toBe(500));
+    await withFake({ guide: 'truncated' }, async (f) => {
+      const res = await xml(f);
+      expect(res.status).toBe(200);
+      const text = await res.text().catch(() => '');
+      expect(text.length).toBeGreaterThan(0);
+      expect(text.trimEnd().endsWith('</tv>')).toBe(false);
+    });
+  });
+
+  test('stall guide sends half and then nothing until the client leaves', async () => {
+    await withFake({ guide: 'stall' }, async (f) => {
+      const ctl = new AbortController();
+      const res = await fetch(`${f.url}/xmltv.php?username=u&password=p`, { signal: ctl.signal });
+      const reader = res.body!.getReader();
+      const first = await reader.read();
+      expect(first.value!.length).toBeGreaterThan(0);
+      const next = await Promise.race([reader.read().then(() => 'data'), new Promise((r) => setTimeout(() => r('quiet'), 400))]);
+      expect(next).toBe('quiet');
+      ctl.abort();
+    });
+  });
+
+  test('xmltv refuses wrong credentials', async () => {
+    await withFake({}, async (f) => {
+      expect((await fetch(`${f.url}/xmltv.php?username=u&password=bad`)).status).toBe(403);
+    });
+  });
+
+  test('short epg decodes and limits', async () => {
+    await withFake({}, async (f) => {
+      const body = await (await api(f, '&action=get_short_epg&stream_id=1&limit=2')).json();
+      expect(body.epg_listings).toHaveLength(2);
+      const first = body.epg_listings[0];
+      expect(b64(first.title)).toBe('HLS Channel 18:00');
+      expect(b64(first.description)).toEqual(expect.any(String));
+      expect(first.start_timestamp).toBe(String(Date.parse('2026-07-01T18:00:00Z') / 1000));
+      expect(first.stop_timestamp).toBe(String(Date.parse('2026-07-01T19:00:00Z') / 1000));
+      expect(first.start).toBe('2026-07-01 19:00:00'); // BST
+      expect(first.channel_id).toBe('hls.uk');
+      const dflt = await (await api(f, '&action=get_short_epg&stream_id=1')).json();
+      expect(dflt.epg_listings).toHaveLength(4);
+    });
+  });
+
+  test('data table covers the window; listings:false gives none', async () => {
+    await withFake({}, async (f) => {
+      const body = await (await api(f, '&action=get_simple_data_table&stream_id=1')).json();
+      expect(body.epg_listings).toHaveLength(5 * 24 + 1); // 18:00 three days back to 18:00 two days ahead
+      const none = await (await api(f, '&action=get_simple_data_table&stream_id=3')).json();
+      expect(none.epg_listings ?? []).toEqual([]);
+    });
+    await withFake({ listings: false }, async (f) => {
+      expect(await (await api(f, '&action=get_simple_data_table&stream_id=1')).json()).toEqual([]);
+      expect(await (await api(f, '&action=get_simple_date_table&stream_id=1')).json()).toEqual([]);
+    });
+    await withFake({ tableAction: 'typo' }, async (f) => {
+      const bad = await (await api(f, '&action=get_simple_data_table&stream_id=1')).json();
+      expect(bad.epg_listings).toBeUndefined();
+      expect(bad.error).toEqual(expect.any(String));
+      const ok = await (await api(f, '&action=get_simple_date_table&stream_id=1')).json();
+      expect(ok.epg_listings.length).toBeGreaterThan(0);
+    });
+  });
+
+  test('server_info carries the timezone', async () => {
+    await withFake({}, async (f) => {
+      const body = await (await fetch(`${f.url}/player_api.php?username=u&password=p`)).json();
+      expect(body.server_info.timezone).toBe('Europe/London');
+      expect(body.server_info.time_now).toBe('2026-07-01 19:30:00');
+      expect(body.server_info.timestamp_now).toBe(NOW / 1000);
+    });
+  });
+
+  test('timeshift records the request and streams media', async () => {
+    await withFake({}, async (f) => {
+      const res = await fetch(`${f.url}/timeshift/u/p/60/2026-07-01:19-00/1.ts`);
+      expect(res.status).toBe(200);
+      expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+      expect(f.timeshiftRequests()).toEqual([{ id: '1', start: '2026-07-01:19-00', durationMin: 60, ext: 'ts' }]);
+      expect((await fetch(`${f.url}/timeshift/u/bad/60/2026-07-01:19-00/1.ts`)).status).toBe(403);
+      expect((await fetch(`${f.url}/timeshift/u/p/60/2026-07-01:19-00/12345.ts`)).status).toBe(404);
+      await vi_waitFor(() => f.openMediaConnections() === 0);
+    });
+  });
+
+  test('timeshift counts against maxConnections', async () => {
+    await withFake({}, async (f) => {
+      const held = await fetch(`${f.url}/live/u/p/2.ts`);
+      expect((await fetch(`${f.url}/timeshift/u/p/60/2026-07-01:19-00/1.ts`)).status).toBe(403);
+      await held.body?.cancel();
+      await vi_waitFor(() => f.openMediaConnections() === 0);
+    });
+  });
+
+  test('live items carry epg id and archive', async () => {
+    const live = await (await api(fake, '&action=get_live_streams')).json();
+    expect(live[0]).toMatchObject({ epg_channel_id: 'hls.uk', tv_archive: 1, tv_archive_duration: 2 });
+    expect(live[1]).toMatchObject({ epg_channel_id: 'raw.uk', tv_archive: 0, tv_archive_duration: 0 });
+    expect(live[2]).toMatchObject({ epg_channel_id: '' });
+  });
+
+  test('generateCatalogue links guide channels and archive percent', () => {
+    const c = generateCatalogue({ live: 20, movie: 0, series: 0, categoriesPerKind: 2, guideChannels: 10, archivePercent: 50 });
+    expect(c.live.items[0]!.epgChannelId).toBe('ch1.gen');
+    expect(c.live.items.filter((i) => i.epgChannelId)).toHaveLength(10);
+    expect(c.live.items.filter((i) => i.archiveDays === 7)).toHaveLength(5);
+    expect(c.live.items[15]!.epgChannelId).toBeUndefined();
   });
 });
 
