@@ -34,7 +34,8 @@ export type CatalogItem = {
   year: number | null;
   rating: string | null;
 };
-export type Page<T> = { items: T[]; nextCursor: string | null };
+export type TagStyle = 'tagged' | 'mixed' | 'untagged';
+export type Page<T> ={ items: T[]; nextCursor: string | null };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
 export type PlayRequest = { itemId: number; episodeRemoteId?: string; startAtSec?: number; clientId: string };
