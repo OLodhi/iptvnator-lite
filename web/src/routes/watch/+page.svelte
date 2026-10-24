@@ -10,6 +10,7 @@
   import { attachStream } from '$lib/player/attach';
   import { positions, reportPosition } from '$lib/me';
   import { createPlayback } from '$lib/player/playback';
+  import { pickResume } from '$lib/resume';
   import { createProgressReporter } from '$lib/player/progress';
   import { releaseSession, startHeartbeat } from '$lib/session';
 
@@ -67,7 +68,7 @@
   }
 
   function restart() {
-    start(playback.isVod() && video ? Math.floor(video.currentTime) : 0);
+    start(playback.isVod() && video ? playback.absoluteSec(video) : 0);
   }
 
   onMount(() => {
@@ -77,7 +78,7 @@
     const episode = q.get('episode');
     positions(Number(q.get('item'))).then(
       (saved) => {
-        const mine = saved.find((p) => p.episodeRemoteId === episode && !p.finished && p.positionSec >= 5);
+        const mine = pickResume(saved, episode);
         if (mine) resumeAt = mine.positionSec;
         else start(0);
       },

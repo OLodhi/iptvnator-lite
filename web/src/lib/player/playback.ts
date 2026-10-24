@@ -25,7 +25,7 @@ export function createPlayback(deps: PlaybackDeps) {
   let controller: AbortController | undefined;
   let stopHeartbeat: (() => void) | undefined;
   let handle: { destroy(): void } | undefined;
-  let active: { sessionId: string; clientId: string; vod: boolean } | undefined;
+  let active: { sessionId: string; clientId: string; vod: boolean; startAtSec: number } | undefined;
 
   function teardown() {
     if (active) deps.onStopping?.();
@@ -60,11 +60,16 @@ export function createPlayback(deps: PlaybackDeps) {
       void deps.releaseSession(res.sessionId, clientId);
       return;
     }
-    active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null };
+    active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null, startAtSec: res.startAtSec };
     handle = deps.attachStream(video, res.url);
     stopHeartbeat = deps.startHeartbeat(res.sessionId, clientId, { onGone: deps.onGone });
     deps.onStarted?.({ startAtSec: res.startAtSec, durationSec: res.durationSec });
   }
 
-  return { start, teardown, isVod: () => active?.vod ?? false };
+  /** Absolute VOD position: the video's currentTime is relative to the session's start offset. */
+  function absoluteSec(video: HTMLVideoElement): number {
+    return Math.floor((active?.startAtSec ?? 0) + video.currentTime);
+  }
+
+  return { start, teardown, isVod: () => active?.vod ?? false, absoluteSec };
 }

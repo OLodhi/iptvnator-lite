@@ -121,6 +121,15 @@ test('a real failure is reported, and a heartbeat 404 reports gone', async () =>
   expect(deps.onGone).toHaveBeenCalledTimes(1);
 });
 
+test('absoluteSec adds the session start offset, so a restart after a resume stays at the real position', async () => {
+  const { pb, pending, video } = setup();
+  const p = pb.start({ itemId: 1, startAtSec: 610 }, video);
+  pending[0]!.resolve({ ...res('s1', 3000), startAtSec: 610 });
+  await p;
+  video.currentTime = 10;
+  expect(pb.absoluteSec(video)).toBe(620);
+});
+
 test('onStarted gets the server offset and duration; onStopping fires once, before the video is detached', async () => {
   const { deps, pending, video, destroy } = setup();
   const order: string[] = [];

@@ -3,6 +3,7 @@
   import type { CatalogItem, SavedPosition, Season } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
+  import { pickTarget } from '$lib/resume';
   import { favourite, positions as fetchPositions, unfavourite } from '$lib/me';
 
   let itemId = $derived(page.params.itemId ?? '');
@@ -41,17 +42,7 @@
 
   let byEpisode = $derived(new Map(saved.map((p) => [p.episodeRemoteId, p])));
 
-  // The most recently watched unfinished episode, else the very first one.
-  let target = $derived.by(() => {
-    const labelled = seasons.flatMap((s) => s.episodes.map((ep) => ({ ep, label: `S${s.season} E${ep.episodeNum}` })));
-    const latest = saved
-      .filter((p) => !p.finished && p.episodeRemoteId !== null)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((p) => labelled.find((l) => l.ep.remoteId === p.episodeRemoteId))
-      .find((l) => l !== undefined);
-    if (latest) return { ...latest, verb: 'Continue' };
-    return labelled[0] ? { ...labelled[0], verb: 'Play' } : null;
-  });
+  let target = $derived(pickTarget(seasons, saved));
 
   function percent(ep: { remoteId: string; durationSec: number | null }): number {
     const p = byEpisode.get(ep.remoteId);
@@ -86,8 +77,8 @@
 
 {#if target}
   <p>
-    <a class="primary" href={`/watch?item=${itemId}&episode=${encodeURIComponent(target.ep.remoteId)}`}>
-      {target.verb} {target.label}
+    <a class="primary" href={`/watch?item=${itemId}&episode=${encodeURIComponent(target.episodeRemoteId)}`}>
+      {target.mode === 'continue' ? 'Continue' : 'Play'} {target.label}
     </a>
   </p>
 {/if}
