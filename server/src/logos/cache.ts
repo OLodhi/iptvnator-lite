@@ -8,7 +8,10 @@ export interface CachedLogo {
 }
 
 export interface LogoCache {
-  /** The cached image for `url` (fetched if missing or older than the TTL), or null if it is not a usable image. */
+  /**
+   * The cached image for `url` (fetched if missing or older than the TTL), or null if it is not a usable image. A
+   * fetch that failed is remembered for an hour, and null comes back at once until then.
+   */
   get(url: string): Promise<CachedLogo | null>;
   /** Deletes leftovers (.tmp), files older than twice the TTL, then the oldest files while the total is over the cap. */
   sweep(): Promise<{ deleted: number; bytes: number }>;
@@ -21,6 +24,8 @@ export const DEFAULT_MAX_CACHE_BYTES = 500_000_000;
 const SWEEP_INTERVAL_MS = 86_400_000;
 
 const DAY_MS = 86_400_000;
+const FAILURE_TTL_MS = 3_600_000;
+const MAX_FAILURES = 5_000;
 
 const EXTENSIONS: Record<string, string> = {
   'image/png': 'png',
@@ -53,6 +58,8 @@ export function createLogoCache(deps: {
   maxBytes?: number;
   maxCacheBytes?: number;
   timeoutMs?: number;
+  /** How many failed URLs are remembered; past it, the oldest is forgotten. */
+  maxFailures?: number;
 }): LogoCache {
   const { dir, now, userAgent } = deps;
   const fetchFn = deps.fetchFn ?? fetch;
@@ -60,7 +67,23 @@ export function createLogoCache(deps: {
   const maxBytes = deps.maxBytes ?? 2_000_000;
   const maxCacheBytes = deps.maxCacheBytes ?? DEFAULT_MAX_CACHE_BYTES;
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const maxFailures = deps.maxFailures ?? MAX_FAILURES;
   const inFlight = new Map<string, Promise<CachedLogo | null>>();
+  const failedAt = new Map<string, number>(); // url -> when its fetch failed, oldest first
+
+  function recentlyFailed(url: string): boolean {
+    const at = failedAt.get(url);
+    if (at === undefined) return false;
+    if (now() - at < FAILURE_TTL_MS) return true;
+    failedAt.delete(url);
+    return false;
+  }
+
+  function rememberFailure(url: string): void {
+    failedAt.delete(url); // so it goes back in as the newest
+    failedAt.set(url, now());
+    if (failedAt.size > maxFailures) failedAt.delete(failedAt.keys().next().value!);
+  }
 
   async function cached(key: string): Promise<CachedLogo | null> {
     for (const [ext, contentType] of Object.entries(CONTENT_TYPES)) {
@@ -99,7 +122,8 @@ export function createLogoCache(deps: {
     return Buffer.concat(chunks);
   }
 
-  async function fetchAndStore(url: string, key: string): Promise<CachedLogo | null> {
+  /** The image at `url`, or null if the provider has no usable one (a failure, not an image, too big or too slow). */
+  async function download(url: string): Promise<{ body: Buffer; ext: string } | null> {
     try {
       const res = await fetchFn(url, {
         signal: AbortSignal.timeout(timeoutMs),
@@ -111,7 +135,20 @@ export function createLogoCache(deps: {
         return null;
       }
       const body = await readLimited(res);
-      if (!body) return null;
+      return body ? { body, ext } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function fetchAndStore(url: string, key: string): Promise<CachedLogo | null> {
+    const image = await download(url);
+    if (!image) {
+      rememberFailure(url);
+      return null;
+    }
+    const { body, ext } = image;
+    try {
       await fs.mkdir(dir, { recursive: true });
       const file = path.join(dir, `${key}.${ext}`);
       const tmp = `${file}.${process.pid}.${now()}.tmp`;
@@ -187,7 +224,7 @@ export function createLogoCache(deps: {
       timer = undefined;
     },
     async get(url) {
-      if (!/^https?:\/\//i.test(url)) return null;
+      if (!/^https?:\/\//i.test(url) || recentlyFailed(url)) return null;
       const key = createHash('sha256').update(url).digest('hex');
       const pending = inFlight.get(key);
       if (pending) return pending;

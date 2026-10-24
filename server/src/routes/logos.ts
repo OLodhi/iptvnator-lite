@@ -5,6 +5,8 @@ import type { CatalogueRepo } from '../catalogue/repo.ts';
 import type { LogoCache } from '../logos/cache.ts';
 
 export const LOGO_MAX_AGE_SECONDS = 604800;
+/** As long as the logo cache remembers a failed fetch. */
+const MISSING_MAX_AGE_SECONDS = 3600;
 
 export const logoRoutes = (deps: { catalogue: CatalogueRepo; logos: LogoCache }): FastifyPluginAsync =>
   async (app) => {
@@ -13,7 +15,10 @@ export const logoRoutes = (deps: { catalogue: CatalogueRepo; logos: LogoCache })
       { schema: { params: { type: 'object', properties: { itemId: { type: 'integer', minimum: 1 } } } } },
       async (req, reply) => {
         const notFound = () =>
-          reply.code(404).send({ code: 'NOT_FOUND', message: 'No logo for this item' } satisfies ApiError);
+          reply
+            .code(404)
+            .header('cache-control', `public, max-age=${MISSING_MAX_AGE_SECONDS}`)
+            .send({ code: 'NOT_FOUND', message: 'No logo for this item' } satisfies ApiError);
         const url = deps.catalogue.getItem(req.params.itemId)?.logoUrl;
         if (!url) return notFound();
         const image = await deps.logos.get(url);

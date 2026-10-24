@@ -37,13 +37,17 @@ test('the route serves the cached file with cache headers', async () => {
   expect(images.hits.filter((x) => x.url === '/logo.png')).toHaveLength(1);
 });
 
-test('404 when the item has no logo, the fetch fails, or the item is unknown', async () => {
+test('404 when the item has no logo, the fetch fails, or the item is unknown; browsers may keep that for an hour', async () => {
   for (const id of [withoutLogo, brokenLogo, 999999]) {
     const res = await h.app.inject(`/api/logos/${id}`);
     expect(res.statusCode, String(id)).toBe(404);
     expect(res.json().code).toBe('NOT_FOUND');
+    expect(res.headers['cache-control'], String(id)).toBe('public, max-age=3600');
   }
   expect((await h.app.inject('/api/logos/abc')).statusCode).toBe(400);
+  // The failed fetch is remembered: asking again within the hour answers 404 without going to the provider.
+  expect((await h.app.inject(`/api/logos/${brokenLogo}`)).statusCode).toBe(404);
+  expect(images.hits.filter((x) => x.url === '/page.html')).toHaveLength(1);
 });
 
 test('item responses never contain provider logo URLs', async () => {

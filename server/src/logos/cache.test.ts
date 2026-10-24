@@ -96,6 +96,29 @@ test('a failed rename returns null and leaves no temp file', async () => {
   fs.mkdirSync(path.join(dir, `${key}.png`)); // a directory in the way makes the final rename fail
   expect(await cache.get(`${server.url}/logo.png`)).toBeNull();
   expect(files()).toEqual([`${key}.png`]);
+  // Our disk failed, not the provider: the next request tries again.
+  fs.rmdirSync(path.join(dir, `${key}.png`));
+  expect(await cache.get(`${server.url}/logo.png`)).not.toBeNull();
+});
+
+test('a logo whose fetch failed is not fetched again for an hour, then it is', async () => {
+  const cache = createLogoCache({ dir, now });
+  const missing = `${server.url}/missing.png`;
+  expect(await cache.get(missing)).toBeNull();
+  clock += 3_600_000 - 1;
+  expect(await cache.get(missing)).toBeNull();
+  expect(server.hits.map((h) => h.url)).toEqual(['/missing.png']);
+  clock += 1;
+  expect(await cache.get(missing)).toBeNull();
+  expect(server.hits.map((h) => h.url)).toEqual(['/missing.png', '/missing.png']);
+});
+
+test('remembered failures are bounded, the oldest forgotten first', async () => {
+  const cache = createLogoCache({ dir, now, maxFailures: 2 });
+  for (const name of ['a', 'b', 'c']) expect(await cache.get(`${server.url}/${name}.png`)).toBeNull();
+  await cache.get(`${server.url}/c.png`); // still remembered
+  await cache.get(`${server.url}/a.png`); // forgotten when c failed: fetched again
+  expect(server.hits.map((h) => h.url)).toEqual(['/a.png', '/b.png', '/c.png', '/a.png']);
 });
 
 const put = (name: string, size: number, ageMs: number) => {
