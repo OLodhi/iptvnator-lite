@@ -158,6 +158,9 @@ const outDirOf = (m: SessionManager, sessionId: string) => dirname(m.resolveFile
 const alive = (m: SessionManager, sessionId: string) =>
   m.resolveFile(sessionId, 'index.m3u8') !== null || m.directSource(sessionId) !== null;
 const argAfter = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
+/** The backoff of every failure-restart so far (reconnects are not failures and log differently). */
+const restartDelays = (logs: { m: string; o: object }[]) =>
+  logs.filter((l) => l.m === 'ffmpeg exited; restarting').map((l) => (l.o as { delayMs: number }).delayMs);
 
 function writePlaylist(outDir: string, first: number, last: number): void {
   let text = '#EXTM3U\n#EXT-X-TARGETDURATION:3\n';
@@ -286,30 +289,34 @@ describe('session manager', () => {
     expect(t.m.touch(s.sessionId, 'C')).toBe(false);
   });
 
-  test('restarts a live process that dies, continuing segment numbers, at most 3 times', async () => {
+  test('restarts a live process that dies before producing 2 segments, continuing segment numbers, at most 3 times', async () => {
     const h = harness();
     const s = await h.m.start(live(1, 'A'));
     const outDir = outDirOf(h.m, s.sessionId);
     expect(h.children[0]!.args).not.toContain('-start_number');
 
-    writePlaylist(outDir, 0, 4);
+    // Each run below produces exactly one new segment: a failure, not a reconnect (R28).
+    writePlaylist(outDir, 0, 0);
     h.children[0]!.exit(1);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.spawn).toHaveBeenCalledTimes(1); // backing off
+    await vi.advanceTimersByTimeAsync(1);
     expect(h.spawn).toHaveBeenCalledTimes(2);
-    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('5');
+    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('1');
     expect(argAfter(h.children[1]!.args, '-hls_flags')).toContain('discont_start');
 
-    writePlaylist(outDir, 5, 9);
-    h.children[1]!.exit(0);
+    writePlaylist(outDir, 0, 1);
+    h.children[1]!.exit(0); // a clean exit is no different
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(argAfter(h.children[2]!.args, '-start_number')).toBe('10');
+    expect(argAfter(h.children[2]!.args, '-start_number')).toBe('2');
 
-    writePlaylist(outDir, 10, 12);
+    writePlaylist(outDir, 0, 2);
     h.children[2]!.exit(1);
     await vi.advanceTimersByTimeAsync(4_000);
-    expect(argAfter(h.children[3]!.args, '-start_number')).toBe('13');
+    expect(argAfter(h.children[3]!.args, '-start_number')).toBe('3');
     expect(alive(h.m, s.sessionId)).toBe(true);
 
+    writePlaylist(outDir, 0, 3);
     h.children[3]!.exit(1);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.spawn).toHaveBeenCalledTimes(4);
@@ -649,6 +656,124 @@ describe('session manager', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.spawn).toHaveBeenCalledTimes(4);
     expect(alive(h.m, s.sessionId)).toBe(false);
+  });
+
+  // Ruling R28: a live run that produced at least 2 new segments and then exited is a reconnect.
+  test('a live run that produced segments and exited cleanly reconnects at once, without using the restart budget', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    for (let run = 0; run < 5; run++) {
+      writePlaylist(outDir, 0, 5 * run + 4); // five new segments, then the provider's playlist "ends"
+      h.children[run]!.exit(0);
+      await flush(); // the clock does not move: no backoff
+      expect(h.spawn).toHaveBeenCalledTimes(run + 2);
+      expect(argAfter(h.children[run + 1]!.args, '-start_number')).toBe(String(5 * run + 5));
+      expect(argAfter(h.children[run + 1]!.args, '-hls_flags')).toContain('discont_start');
+      expect(h.m.activeUpstreams(1)).toBe(1);
+    }
+    expect(alive(h.m, s.sessionId)).toBe(true);
+    expect(restartDelays(h.logs)).toEqual([]);
+
+    // The whole budget is still there: three backed-off restarts, and only the fourth failure gives up.
+    for (const [i, delay] of [1_000, 2_000, 4_000].entries()) {
+      h.children[5 + i]!.exit(1);
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(h.spawn).toHaveBeenCalledTimes(7 + i);
+    }
+    expect(alive(h.m, s.sessionId)).toBe(true);
+    h.children[8]!.exit(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawn).toHaveBeenCalledTimes(9);
+    expect(alive(h.m, s.sessionId)).toBe(false);
+    expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  test('a live run that produced segments and then failed (e.g. a Windows rename error) also reconnects at once', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    for (const [run, code] of [1, 255, null, 1, 1].entries()) {
+      writePlaylist(outDir, 0, 5 * run + 4);
+      const child = h.children[run]!;
+      child.stderr.write('[hls @ 0x1] failed to rename file index.m3u8.tmp to index.m3u8: Operation not permitted\n');
+      child.exit(code);
+      await flush();
+      expect(h.spawn).toHaveBeenCalledTimes(run + 2);
+      expect(argAfter(h.children[run + 1]!.args, '-start_number')).toBe(String(5 * run + 5));
+    }
+    expect(alive(h.m, s.sessionId)).toBe(true);
+    expect(restartDelays(h.logs)).toEqual([]);
+  });
+
+  test('a reconnect resets the consecutive-failure count; exactly 2 new segments is enough', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    h.children[0]!.exit(1); // nothing produced: failures
+    await vi.advanceTimersByTimeAsync(1_000);
+    h.children[1]!.exit(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.spawn).toHaveBeenCalledTimes(3);
+
+    writePlaylist(outDir, 0, 1); // two new segments
+    h.children[2]!.exit(0);
+    await flush();
+    expect(h.spawn).toHaveBeenCalledTimes(4);
+    expect(argAfter(h.children[3]!.args, '-start_number')).toBe('2');
+
+    // Short runs again: the count starts from 0, so 1 s, 2 s, 4 s, and only then it gives up.
+    for (const [i, delay] of [1_000, 2_000, 4_000].entries()) {
+      h.children[3 + i]!.exit(1);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(h.spawn).toHaveBeenCalledTimes(4 + i);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.spawn).toHaveBeenCalledTimes(5 + i);
+    }
+    expect(alive(h.m, s.sessionId)).toBe(true);
+    h.children[6]!.exit(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawn).toHaveBeenCalledTimes(7);
+    expect(alive(h.m, s.sessionId)).toBe(false);
+    expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 1_000, 2_000, 4_000]);
+  });
+
+  test('a stall-watchdog kill stays a failure even when the run had produced segments', async () => {
+    const h = harness({ liveIdleMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    for (let run = 0; run < 4; run++) {
+      writePlaylist(outDir, 0, 5 * run + 4); // five new segments, then nothing more
+      await vi.advanceTimersByTimeAsync(40_000); // seen, stalled for 20 s, killed, then the backoff (at most 4 s)
+      expect(h.children[run]!.exited).toBe(true);
+      expect(h.spawn).toHaveBeenCalledTimes(Math.min(run + 2, 4));
+    }
+    expect(alive(h.m, s.sessionId)).toBe(false);
+    expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 4_000]);
+    expect(h.logs.filter((l) => l.m.includes('stalled'))).toHaveLength(4);
+    expect(h.logs.some((l) => l.m.includes('reconnecting'))).toBe(false);
+  });
+
+  test("after a relaunch the old process's segments do not count as new progress", async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: 12_000 });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+    writePlaylist(outDir, 0, 4); // written, and the process gone, before the watchdog's first look
+    h.children[0]!.exit(0);
+    await flush();
+    expect(h.spawn).toHaveBeenCalledTimes(2); // the new process writes nothing
+
+    await vi.advanceTimersByTimeAsync(10_000); // watchdog at 5 s and 10 s: segment 4 is not progress
+    expect(h.children[1]!.kills).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000); // 15 s: more than 12 s without a segment of its own
+    expect(h.children[1]!.kills).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_050); // exit, then the 1 s backoff
+    expect(h.spawn).toHaveBeenCalledTimes(3);
+    expect(argAfter(h.children[2]!.args, '-start_number')).toBe('5');
   });
 
   // Ruling R16: liveness is per viewer.

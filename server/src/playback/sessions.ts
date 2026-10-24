@@ -86,6 +86,9 @@ const HOUSEKEEPING_MS = 5_000;
 const KILL_RETRY_MS = 2_000;
 const RESTART_BACKOFF_MS = 1_000; // doubles per consecutive restart: 1 s, 2 s, 4 s
 const HEALTHY_RESET_MS = 60_000; // a live process producing segments this long earns back its restart budget
+// R28: a live process that wrote this many new segments before exiting (a provider playlist that
+// "ends", a transient write error) was working: relaunch it at once and forgive earlier failures.
+const RECONNECT_MIN_SEGMENTS = 2;
 // A plain file name: no separators, no drive or stream colons, not '.' or '..'.
 const PLAIN_FILE = /^[\w-][\w.-]*$/;
 // Session dirs are named by randomUUID(); nothing else in transcodeDir is ever removed.
@@ -118,8 +121,10 @@ type Session = {
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
   probing: Promise<void> | null; // an ffprobe that is still connected
-  restarts: number; // consecutive
+  restarts: number; // consecutive failures
   restartTimer: ReturnType<typeof setTimeout> | null;
+  launchSegment: number; // highest segment before the current process started (its start number - 1)
+  stalled: boolean; // the watchdog killed the current process
   lastSegment: number; // live watchdog: highest segment seen,
   advancedAt: number; // when it last went up,
   healthySince: number | null; // and when the current process first produced one
@@ -268,6 +273,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         : new Promise<number | null>((resolve) => child.once('exit', resolve));
     s.child = child;
     s.exit = exit;
+    // Progress is measured from here: the previous process's segments are not this one's.
+    s.launchSegment = startNumber - 1;
+    s.lastSegment = startNumber - 1;
+    s.stalled = false;
     s.advancedAt = deps.now();
     s.healthySince = null;
     if (child.stderr) {
@@ -291,6 +300,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       else log.warn({ sessionId: s.id, code }, 'ffmpeg exited early');
       return;
     }
+    // Read the playlist now: the watchdog samples only every few seconds.
+    const highest = Math.max(s.lastSegment, lastSegment(s.outDir!));
+    const segments = highest - s.launchSegment;
+    // A stall kill means no recent progress, whatever the process wrote before.
+    if (!s.stalled && segments >= RECONNECT_MIN_SEGMENTS) {
+      log.info({ sessionId: s.id, code, segments }, 'ffmpeg exited after producing segments; reconnecting');
+      s.restarts = 0;
+      relaunch(s, highest + 1);
+      return;
+    }
     if (s.restarts >= deps.maxRestarts) {
       log.warn({ sessionId: s.id, code, restarts: s.restarts }, 'ffmpeg keeps exiting; giving up');
       void stopSession(s, 'upstream failed');
@@ -302,14 +321,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     s.restartTimer = setTimeout(() => {
       s.restartTimer = null;
       if (s.state !== 'running') return;
-      try {
-        launch(s, Math.max(s.lastSegment, lastSegment(s.outDir!)) + 1);
-      } catch (err) {
-        log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg restart failed');
-        void stopSession(s, 'upstream failed');
-      }
+      relaunch(s, Math.max(s.lastSegment, lastSegment(s.outDir!)) + 1);
     }, delayMs);
     s.restartTimer.unref();
+  }
+
+  /** Starts the next live process, continuing the segment numbers; a spawn that throws ends the session. */
+  function relaunch(s: Session, startNumber: number): void {
+    try {
+      launch(s, startNumber);
+    } catch (err) {
+      log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg restart failed');
+      void stopSession(s, 'upstream failed');
+    }
   }
 
   /** Kills a live FFmpeg that is alive but no longer producing segments; the restart path takes over. */
@@ -331,6 +355,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         const url = redactUrl(s.sourceUrl);
         log.warn({ sessionId: s.id, url, lastSegment: s.lastSegment }, 'live stream stalled; restarting ffmpeg');
         s.advancedAt = now;
+        s.stalled = true;
         void killAndWait(s);
       }
     }
@@ -498,6 +523,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       probing: null,
       restarts: 0,
       restartTimer: null,
+      launchSegment: -1,
+      stalled: false,
       lastSegment: -1,
       advancedAt: 0,
       healthySince: null,
