@@ -7,6 +7,7 @@ import type { SyncRunner } from './catalogue/syncRunner.ts';
 import { createRefreshScheduler } from './catalogue/scheduler.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
+import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
 import { createSessionManager, defaultIsReady } from './playback/sessions.ts';
@@ -47,7 +48,10 @@ const sessions = createSessionManager({
   maxRestarts: 3,
   log,
 });
-const app = await buildApp({ config, db, providers, sync, catalogue, seriesInfo, sessions, log, httpLogLevel: 'warn' });
+const curation = createCurationService({ db, now: Date.now });
+const app = await buildApp({
+  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, log, httpLogLevel: 'warn',
+});
 
 const scheduler = createRefreshScheduler({ providers, sync, now: Date.now });
 

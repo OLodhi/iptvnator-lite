@@ -1,0 +1,202 @@
+import type { CurationCategory, CurationGroup, CurationUpdate, CurationView, Kind, TagStyle } from '@tv/shared';
+import type { Db } from '../db/db.ts';
+import { friendlyName, stripTag } from './tags.ts';
+import type { TagPattern } from './tags.ts';
+
+/** Sync's catch-all for items whose category the provider does not list; recreated as orphans come and go. */
+const NONE_ID = '__none__';
+const HINT_SIZE = 3;
+
+export interface CurationService {
+  view(providerId: number, kind: Kind, userId: number): CurationView;
+  /** Replaces the scope's rules for the provider and kind; `userId` null writes the default (admin) rules. */
+  save(providerId: number, kind: Kind, update: CurationUpdate, userId: number | null): void;
+  /** Hides one category in that scope. Returns false when there is no such category. */
+  hideCategory(categoryId: number, userId: number | null): boolean;
+  visibleCategoryIds(providerId: number, kind: Kind, userId: number): Set<number>;
+  /** Strips the tag from names when exactly one tag group is visible; otherwise names come back unchanged. */
+  displayNameFn(providerId: number, kind: Kind, userId: number): (name: string) => string;
+  newCount(providerId: number, kind: Kind, userId: number): number;
+}
+
+type CategoryRow = { id: number; remoteId: string; name: string; tag: string | null; firstSeenAt: number };
+type Resolved<T extends CategoryRow> = T & { visible: boolean; isNew: boolean };
+type RuleRow = { isDefault: number; targetType: 'tag' | 'category'; target: string; visible: number };
+type Rules = { tags: Map<string, boolean>; categories: Map<string, boolean> };
+type Style = { style: TagStyle; pattern: TagPattern | null };
+
+/** Names are trimmed first because the tag patterns are anchored; a name that is nothing but its tag stays as it is. */
+function strip(name: string, tag: string, pattern: TagPattern): string {
+  const trimmed = name.trim();
+  const stripped = stripTag(trimmed, tag, pattern);
+  return stripped === trimmed || stripped === '' ? name : stripped;
+}
+
+const tagRule = (rules: Rules, tag: string | null): boolean | undefined =>
+  tag === null ? undefined : rules.tags.get(tag);
+
+const COLUMNS = 'c.id AS id, c.remote_id AS remoteId, c.name AS name, c.tag AS tag, c.first_seen_at AS firstSeenAt';
+
+export function createCurationService(deps: { db: Db; now: () => number }): CurationService {
+  const { db } = deps;
+  const categories = db.prepare(
+    `SELECT ${COLUMNS} FROM categories c WHERE c.provider_id = ? AND c.kind = ? ORDER BY c.position, c.id`,
+  );
+  const categoriesWithCounts = db.prepare(
+    `SELECT ${COLUMNS}, (SELECT COUNT(*) FROM item_categories ic WHERE ic.category_id = c.id) AS itemCount
+       FROM categories c WHERE c.provider_id = ? AND c.kind = ? ORDER BY c.position, c.id`,
+  );
+  const category = db.prepare(
+    'SELECT provider_id AS providerId, kind, remote_id AS remoteId FROM categories WHERE id = ?',
+  );
+  // A null user matches no user rows, leaving only the defaults.
+  const rules = db.prepare(
+    `SELECT user_id IS NULL AS isDefault, target_type AS targetType, target, visible FROM category_rules
+      WHERE provider_id = ? AND kind = ? AND (user_id IS NULL OR user_id = ?)`,
+  );
+  const anyRule = db.prepare(
+    'SELECT 1 FROM category_rules WHERE provider_id = ? AND kind = ? AND (user_id IS NULL OR user_id = ?) LIMIT 1',
+  );
+  // The user's own review time if there is one, else the default's.
+  const savedAt = db
+    .prepare(
+      `SELECT saved_at FROM curation_state WHERE provider_id = ? AND kind = ? AND (user_id = ? OR user_id IS NULL)
+        ORDER BY user_id IS NULL LIMIT 1`,
+    )
+    .pluck();
+  const style = db.prepare('SELECT style, pattern FROM catalogue_styles WHERE provider_id = ? AND kind = ?');
+  const deleteRules = db.prepare('DELETE FROM category_rules WHERE provider_id = ? AND kind = ? AND user_id IS ?');
+  const upsertRule = db.prepare(
+    `INSERT INTO category_rules (provider_id, user_id, kind, target_type, target, visible) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (provider_id, kind, target_type, target, COALESCE(user_id, 0)) DO UPDATE SET visible = excluded.visible`,
+  );
+  const upsertState = db.prepare(
+    `INSERT INTO curation_state (provider_id, user_id, kind, saved_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (provider_id, kind, COALESCE(user_id, 0)) DO UPDATE SET saved_at = excluded.saved_at`,
+  );
+
+  const styleOf = (providerId: number, kind: Kind): Style =>
+    (style.get(providerId, kind) as Style | undefined) ?? { style: 'untagged', pattern: null };
+
+  /**
+   * Resolution order: the user's category rule, the user's tag rule, the default category rule, the default tag rule;
+   * then visible if the kind has no rules at all, otherwise hidden. A category hidden only by that last step is new
+   * when it arrived after the last review.
+   */
+  function resolve<T extends CategoryRow>(providerId: number, kind: Kind, userId: number, rows: T[]): Resolved<T>[] {
+    const user: Rules = { tags: new Map(), categories: new Map() };
+    const def: Rules = { tags: new Map(), categories: new Map() };
+    const found = rules.all(providerId, kind, userId) as RuleRow[];
+    for (const r of found) {
+      const scope = r.isDefault ? def : user;
+      (r.targetType === 'tag' ? scope.tags : scope.categories).set(r.target, r.visible === 1);
+    }
+    const curated = found.length > 0;
+    const reviewedAt = (savedAt.get(providerId, kind, userId) as number | undefined) ?? 0;
+    return rows.map((c) => {
+      const rule =
+        user.categories.get(c.remoteId) ?? tagRule(user, c.tag) ?? def.categories.get(c.remoteId) ?? tagRule(def, c.tag);
+      if (rule !== undefined) return { ...c, visible: rule, isNew: false };
+      if (!curated) return { ...c, visible: true, isNew: false };
+      return { ...c, visible: false, isNew: c.remoteId !== NONE_ID && c.firstSeenAt > reviewedAt };
+    });
+  }
+
+  function nameFn(pattern: TagPattern | null, resolved: Resolved<CategoryRow>[]): (name: string) => string {
+    const tags = [...new Set(resolved.filter((c) => c.visible && c.tag !== null).map((c) => c.tag!))];
+    if (tags.length !== 1 || pattern === null) return (name) => name;
+    const tag = tags[0]!;
+    return (name) => strip(name, tag, pattern);
+  }
+
+  const resolveAll = (providerId: number, kind: Kind, userId: number) =>
+    resolve(providerId, kind, userId, categories.all(providerId, kind) as CategoryRow[]);
+
+  function save(providerId: number, kind: Kind, update: CurationUpdate, userId: number | null): void {
+    const tagOf = new Map(
+      (categories.all(providerId, kind) as CategoryRow[]).map((c) => [c.remoteId, c.tag] as const),
+    );
+    const tags = new Map(Object.entries(update.tags));
+    db.transaction(() => {
+      deleteRules.run(providerId, kind, userId);
+      for (const [tag, visible] of tags) upsertRule.run(providerId, userId, kind, 'tag', tag, visible ? 1 : 0);
+      for (const [remoteId, visible] of Object.entries(update.categories)) {
+        // A choice equal to its group's switch is no exception: storing it would pin the category if it changed group.
+        const tag = tagOf.get(remoteId) ?? null;
+        if (tag !== null && tags.get(tag) === visible) continue;
+        upsertRule.run(providerId, userId, kind, 'category', remoteId, visible ? 1 : 0);
+      }
+      upsertState.run(providerId, userId, kind, deps.now());
+    })();
+  }
+
+  return {
+    view(providerId, kind, userId) {
+      const { style: tagStyle, pattern } = styleOf(providerId, kind);
+      const resolved = resolve(
+        providerId, kind, userId,
+        categoriesWithCounts.all(providerId, kind) as (CategoryRow & { itemCount: number })[],
+      );
+      const displayName = nameFn(pattern, resolved);
+      const groups = new Map<string, CurationGroup>();
+      const untagged: CurationCategory[] = [];
+      // Rows arrive in provider order, so groups come out in the order of their first category.
+      for (const c of resolved) {
+        const entry: CurationCategory = {
+          id: c.id, remoteId: c.remoteId, name: c.name, displayName: displayName(c.name),
+          itemCount: c.itemCount, visible: c.visible, isNew: c.isNew,
+        };
+        if (c.tag === null) {
+          untagged.push(entry);
+          continue;
+        }
+        let group = groups.get(c.tag);
+        if (!group) {
+          group = { tag: c.tag, friendlyName: friendlyName(c.tag), hint: [], categories: [] };
+          groups.set(c.tag, group);
+        }
+        if (group.hint.length < HINT_SIZE) group.hint.push(pattern ? strip(c.name, c.tag, pattern) : c.name);
+        group.categories.push(entry);
+      }
+      return {
+        kind,
+        style: tagStyle,
+        groups: [...groups.values()],
+        untagged,
+        newCount: resolved.filter((c) => c.isNew).length,
+      };
+    },
+
+    save,
+
+    hideCategory(categoryId, userId) {
+      const c = category.get(categoryId) as { providerId: number; kind: Kind; remoteId: string } | undefined;
+      if (!c) return false;
+      if (anyRule.get(c.providerId, c.kind, userId) === undefined) {
+        // With no rules the kind shows everything, and a lone rule would hide the rest: keep everything else first.
+        const update: CurationUpdate = { tags: {}, categories: {} };
+        for (const row of categories.all(c.providerId, c.kind) as CategoryRow[]) {
+          if (row.tag === null) update.categories[row.remoteId] = true;
+          else update.tags[row.tag] = true;
+        }
+        update.categories[c.remoteId] = false;
+        save(c.providerId, c.kind, update, userId);
+      } else {
+        upsertRule.run(c.providerId, userId, c.kind, 'category', c.remoteId, 0);
+      }
+      return true;
+    },
+
+    visibleCategoryIds(providerId, kind, userId) {
+      return new Set(resolveAll(providerId, kind, userId).filter((c) => c.visible).map((c) => c.id));
+    },
+
+    displayNameFn(providerId, kind, userId) {
+      return nameFn(styleOf(providerId, kind).pattern, resolveAll(providerId, kind, userId));
+    },
+
+    newCount(providerId, kind, userId) {
+      return resolveAll(providerId, kind, userId).filter((c) => c.isNew).length;
+    },
+  };
+}

@@ -35,6 +35,25 @@ export type CatalogItem = {
   rating: string | null;
 };
 export type TagStyle = 'tagged' | 'mixed' | 'untagged';
+export type CurationCategory = {
+  id: number;
+  remoteId: string;
+  name: string;
+  displayName: string;
+  itemCount: number;
+  visible: boolean;
+  isNew: boolean;
+};
+export type CurationGroup = { tag: string; friendlyName: string | null; hint: string[]; categories: CurationCategory[] };
+export type CurationView = {
+  kind: Kind;
+  style: TagStyle;
+  groups: CurationGroup[];
+  untagged: CurationCategory[];
+  newCount: number;
+};
+/** Group switches keyed by tag, and single-category choices keyed by the category's `remoteId`. */
+export type CurationUpdate = { tags: Record<string, boolean>; categories: Record<string, boolean> };
 export type Page<T> = { items: T[]; nextCursor: string | null };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };

@@ -11,7 +11,9 @@ import type { SyncRunner } from './catalogue/syncRunner.ts';
 import type { CatalogueRepo } from './catalogue/repo.ts';
 import type { SeriesInfoCache } from './catalogue/seriesInfo.ts';
 import type { SessionManager } from './playback/sessions.ts';
+import type { CurationService } from './curation/service.ts';
 import { catalogueRoutes } from './routes/catalogue.ts';
+import { curationRoutes } from './routes/curation.ts';
 import { playbackRoutes } from './routes/playback.ts';
 import { providerRoutes } from './routes/providers.ts';
 import { syncRoutes } from './routes/sync.ts';
@@ -26,6 +28,7 @@ export type AppDeps = {
   catalogue: CatalogueRepo;
   seriesInfo: SeriesInfoCache;
   sessions: SessionManager;
+  curation: CurationService;
   /** The server's own log (provider failures, sessions); silent if left out. */
   log?: Log;
   /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
@@ -44,6 +47,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers }),
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
+      await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
       await api.register(
         playbackRoutes({
           catalogue: deps.catalogue,
