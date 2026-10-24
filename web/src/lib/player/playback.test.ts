@@ -120,3 +120,19 @@ test('a real failure is reported, and a heartbeat 404 reports gone', async () =>
   deps.startHeartbeat.mock.calls[0]![2].onGone();
   expect(deps.onGone).toHaveBeenCalledTimes(1);
 });
+
+test('onStarted gets the server offset and duration; onStopping fires once, before the video is detached', async () => {
+  const { deps, pending, video, destroy } = setup();
+  const order: string[] = [];
+  const onStarted = vi.fn();
+  const onStopping = vi.fn(() => order.push(`stopping:${destroy.mock.calls.length}`));
+  const pb = createPlayback({ ...deps, onStarted, onStopping });
+  const p = pb.start({ itemId: 1, startAtSec: 90 }, video);
+  pending[0]!.resolve({ ...res('s1', 3000), startAtSec: 88 });
+  await p;
+  expect(onStarted).toHaveBeenCalledWith({ startAtSec: 88, durationSec: 3000 });
+  pb.teardown();
+  pb.teardown();
+  expect(onStopping).toHaveBeenCalledTimes(1);
+  expect(order).toEqual(['stopping:0']);
+});

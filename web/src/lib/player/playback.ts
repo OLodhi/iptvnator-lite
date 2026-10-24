@@ -7,6 +7,10 @@ export type PlaybackDeps = {
   attachStream: (video: HTMLVideoElement, url: string) => { destroy(): void };
   clientId: () => string;
   onGone: () => void;
+  /** Called once the stream is attached; startAtSec/durationSec come from the server. */
+  onStarted?: (info: { startAtSec: number; durationSec: number | null }) => void;
+  /** Called at the start of teardown of an attached session, before the video is detached. */
+  onStopping?: () => void;
   onError: (err: unknown) => void;
 };
 
@@ -24,6 +28,7 @@ export function createPlayback(deps: PlaybackDeps) {
   let active: { sessionId: string; clientId: string; vod: boolean } | undefined;
 
   function teardown() {
+    if (active) deps.onStopping?.();
     generation++;
     controller?.abort();
     controller = undefined;
@@ -58,6 +63,7 @@ export function createPlayback(deps: PlaybackDeps) {
     active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null };
     handle = deps.attachStream(video, res.url);
     stopHeartbeat = deps.startHeartbeat(res.sessionId, clientId, { onGone: deps.onGone });
+    deps.onStarted?.({ startAtSec: res.startAtSec, durationSec: res.durationSec });
   }
 
   return { start, teardown, isVod: () => active?.vod ?? false };

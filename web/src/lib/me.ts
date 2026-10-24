@@ -21,7 +21,7 @@ export const favourite = (itemId: number) => api<void>('/api/me/favourites', jso
 export const unfavourite = (itemId: number) => api<void>(`/api/me/favourites/${itemId}`, { method: 'DELETE' });
 
 export const positions = (itemId: number) => api<SavedPosition[]>(`/api/me/positions/${itemId}`);
-export const reportPosition = (report: PositionReport) => api<void>('/api/me/positions', json('PUT', report));
+export const reportPosition = (report: PositionReport) => api<void>('/api/me/positions', ({ ...json('PUT', report), keepalive: true }));
 
 export const search = (q: string, limit?: number) =>
   api<SearchResults>(`/api/search?q=${encodeURIComponent(q)}${limit === undefined ? '' : `&limit=${limit}`}`);
