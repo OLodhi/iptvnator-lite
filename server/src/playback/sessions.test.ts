@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { buildFfmpegArgs } from './ffmpegArgs.ts';
 import type { HlsPlan } from './policy.ts';
-import type { ProbeResult } from './probe.ts';
+import type { ProbeOutcome, ProbeResult } from './probe.ts';
 import { createSessionManager, defaultIsReady, PlaybackError, pruneSegments } from './sessions.ts';
 import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from './sessions.ts';
 
@@ -23,6 +23,9 @@ const MP4_MOVIE: ProbeResult = {
   video: { ...H264, codecTag: 'avc1' },
   audio: AAC,
 };
+/** What the prober returns: a result from a fresh ffprobe run, or one from its cache. */
+const fresh = (result: ProbeResult): ProbeOutcome => ({ result, cached: false });
+const fromCache = (result: ProbeResult): ProbeOutcome => ({ result, cached: true });
 
 const UA = 'TiviMate/4.7.0';
 const live = (n: number, clientId: string): StartRequest => ({
@@ -121,13 +124,15 @@ function harness(overrides: Partial<SessionManagerDeps> = {}) {
     return child;
   });
   const probe = vi.fn(async (url: string, _userAgent: string) =>
-    url.endsWith('.mp4') ? MP4_MOVIE : url.endsWith('.mkv') ? MKV_MOVIE : LIVE_HLS,
+    fresh(url.endsWith('.mp4') ? MP4_MOVIE : url.endsWith('.mkv') ? MKV_MOVIE : LIVE_HLS),
   );
+  const invalidateProbe = vi.fn((_url: string) => {});
   const deps: SessionManagerDeps = {
     ffmpegPath: 'ffmpeg',
     transcodeDir,
     spawn,
     probe,
+    invalidateProbe,
     transcodeInterlaced: false,
     maxConnections: () => null,
     isReady: async (outDir) => {
@@ -154,6 +159,7 @@ function harness(overrides: Partial<SessionManagerDeps> = {}) {
     children,
     spawn,
     probe,
+    invalidateProbe,
     logs,
     readyDirs,
     setReady(fn: (outDir: string) => boolean) {
@@ -550,7 +556,7 @@ describe('session manager', () => {
   test('the session started line names the chosen plan, without credentials', async () => {
     const h = harness({
       probe: async (url) =>
-        url.endsWith('.mp4') ? MP4_MOVIE : { ...LIVE_HLS, formatName: 'mpegts', video: { ...H264, codec: 'mpeg2video' } },
+        fresh(url.endsWith('.mp4') ? MP4_MOVIE : { ...LIVE_HLS, formatName: 'mpegts', video: { ...H264, codec: 'mpeg2video' } }),
     });
     const liveSession = await h.m.start(live(1, 'A'));
     const next = h.m.start(movie(2, 'A', 'mp4')); // preempts the live session, whose FFmpeg exits 50 ms after the kill
@@ -584,7 +590,7 @@ describe('session manager', () => {
 
   // Ruling R14: one start deadline covers probe + spawn + ready.
   test('one 15 s deadline covers the probe as well as readiness', async () => {
-    const h = harness({ probe: () => delayed(10_000, LIVE_HLS) });
+    const h = harness({ probe: () => delayed(10_000, fresh(LIVE_HLS)) });
     h.setReady(() => false);
     let settled = false;
     const start = h.m.start(live(1, 'A')).finally(() => {
@@ -604,7 +610,7 @@ describe('session manager', () => {
   });
 
   test('a probe still running at the deadline fails the start but keeps its connection counted', async () => {
-    const slowLive1 = (url: string) => (url.endsWith('/1.m3u8') ? delayed(20_000, LIVE_HLS) : delayed(0, LIVE_HLS));
+    const slowLive1 = (url: string) => (url.endsWith('/1.m3u8') ? delayed(20_000, fresh(LIVE_HLS)) : delayed(0, fresh(LIVE_HLS)));
     const h = harness({ probe: slowLive1, maxConnections: () => 1 });
     const outcome = expect(h.m.start(live(1, 'A'))).rejects.toMatchObject({ code: 'STREAM_START_TIMEOUT' });
     await vi.advanceTimersByTimeAsync(15_000);
@@ -980,7 +986,7 @@ describe('session manager', () => {
 
   // Ruling R29: a finite live playlist (ENDLIST) is swapped for the provider's continuous TS stream.
   test('a live playlist with a finite duration switches to the continuous stream, for the session and its relaunches', async () => {
-    const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
+    const probe = vi.fn(async (url: string, _userAgent: string) => fresh(url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
     const h = harness({ probe, liveIdleMs: HOUR, stallTimeoutMs: HOUR });
     const req = liveWithFallback(1, 'A');
     const s = await h.m.start(req);
@@ -1012,7 +1018,7 @@ describe('session manager', () => {
     expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
     expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
 
-    const finite = harness({ probe: async () => FINITE_HLS });
+    const finite = harness({ probe: async () => fresh(FINITE_HLS) });
     await finite.m.start(live(2, 'B')); // no fallback offered
     expect(argAfter(finite.children[0]!.args, '-i')).toBe(live(2, 'B').sourceUrl);
     expect(fallbackLogs([...h.logs, ...finite.logs])).toEqual([]);
@@ -1021,7 +1027,7 @@ describe('session manager', () => {
   test('if the continuous stream cannot be probed, the finite playlist is played after all', async () => {
     const probe = vi.fn(async (url: string, _userAgent: string) => {
       if (url.endsWith('.ts')) throw new Error(`ffprobe failed for ${url}`);
-      return FINITE_HLS;
+      return fresh(FINITE_HLS);
     });
     const h = harness({ probe });
     const req = liveWithFallback(1, 'A');
@@ -1043,7 +1049,7 @@ describe('session manager', () => {
     // Some servers (the fake among them) answer every live extension with the same playlist. Reading HLS
     // through a .ts URL would also lose -http_multiple 0, so a one-stream provider would refuse FFmpeg.
     for (const fallback of [FINITE_HLS, LIVE_HLS]) {
-      const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? fallback : FINITE_HLS));
+      const probe = vi.fn(async (url: string, _userAgent: string) => fresh(url.endsWith('.ts') ? fallback : FINITE_HLS));
       const h = harness({ probe });
       const req = liveWithFallback(1, 'A');
       const s = await h.m.start(req);
@@ -1060,7 +1066,7 @@ describe('session manager', () => {
   });
 
   test('one 15 s deadline covers the fallback probe too', async () => {
-    const probe = (url: string) => (url.endsWith('.ts') ? delayed(10_000, LIVE_TS) : delayed(8_000, FINITE_HLS));
+    const probe = (url: string) => (url.endsWith('.ts') ? delayed(10_000, fresh(LIVE_TS)) : delayed(8_000, fresh(FINITE_HLS)));
     const h = harness({ probe, maxConnections: () => 1 });
     let settled = false;
     const start = h.m.start(liveWithFallback(1, 'A')).finally(() => {
@@ -1082,6 +1088,90 @@ describe('session manager', () => {
       { level: 'info', m: TRYING, o: { sessionId, url: REDACTED_M3U8, fallback: REDACTED_TS, durationSec: 15 } },
     ]);
     expect(JSON.stringify(h.logs)).not.toContain('secret');
+  });
+
+  // Ruling R34: a stale cached probe (a format, audio index or placeholder from a day ago) must not keep
+  // failing a channel, so a failure after a probe that came from the cache forgets it.
+  test('a start that fails after a cached probe forgets it: UPSTREAM_ERROR and STREAM_START_TIMEOUT', async () => {
+    const url = live(1, 'A').sourceUrl;
+
+    const exits = harness({ probe: async () => fromCache(LIVE_HLS) });
+    exits.setReady(() => false);
+    const failed = expect(exits.m.start(live(1, 'A'))).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+    await flush();
+    expect(exits.invalidateProbe).not.toHaveBeenCalled();
+    exits.children[0]!.exit(1); // before the stream was ready
+    await failed;
+    expect(exits.invalidateProbe.mock.calls).toEqual([[url]]);
+    const sessionId = expect.any(String);
+    expect(exits.logs).toContainEqual({ level: 'info', m: 'forgot cached probe', o: { sessionId, url: REDACTED_M3U8 } });
+
+    const slow = harness({ probe: async () => fromCache(LIVE_HLS) });
+    slow.setReady(() => false);
+    const timedOut = expect(slow.m.start(live(1, 'A'))).rejects.toMatchObject({ code: 'STREAM_START_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(15_100);
+    await timedOut;
+    expect(slow.invalidateProbe.mock.calls).toEqual([[url]]);
+    expect(JSON.stringify([...exits.logs, ...slow.logs])).not.toContain('secret');
+  });
+
+  test('a start that fails after cached probes of the playlist and its continuous stream forgets both', async () => {
+    const probe = vi.fn(async (url: string, _userAgent: string) => fromCache(url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
+    const h = harness({ probe });
+    h.setReady(() => false);
+    const req = liveWithFallback(1, 'A');
+    const outcome = expect(h.m.start(req)).rejects.toMatchObject({ code: 'STREAM_START_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(15_100);
+    await outcome;
+    expect(h.invalidateProbe.mock.calls).toEqual([[req.sourceUrl], [req.fallbackSourceUrl]]);
+  });
+
+  test('a live session that keeps exiting and gives up forgets the cached probes it started from', async () => {
+    const probe = vi.fn(async (url: string, _userAgent: string) => fromCache(url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
+    const h = harness({ probe });
+    const req = liveWithFallback(1, 'A');
+    const s = await h.m.start(req);
+    expect(h.invalidateProbe).not.toHaveBeenCalled(); // a start that works keeps them
+
+    for (const [i, delay] of [1_000, 2_000, 4_000].entries()) {
+      h.children[i]!.exit(1);
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    expect(h.invalidateProbe).not.toHaveBeenCalled(); // restarts alone don't
+    h.children[3]!.exit(1);
+    await flush();
+    expect(h.logs).toContainEqual(expect.objectContaining({ m: 'ffmpeg keeps exiting; giving up' }));
+    expect(alive(h.m, s.sessionId)).toBe(false);
+    expect(h.invalidateProbe.mock.calls).toEqual([[req.sourceUrl], [req.fallbackSourceUrl]]);
+    expect(JSON.stringify(h.logs)).not.toContain('secret');
+  });
+
+  test('a failure after a fresh probe, or a start ended by shutdown, forgets nothing', async () => {
+    const exits = harness(); // fresh probes
+    exits.setReady(() => false);
+    const failed = expect(exits.m.start(live(1, 'A'))).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+    await flush();
+    exits.children[0]!.exit(1);
+    await failed;
+    expect(exits.invalidateProbe).not.toHaveBeenCalled();
+
+    const unprobed = harness({
+      probe: async () => {
+        throw new Error('ffprobe failed with exit code 1');
+      },
+    });
+    await expect(unprobed.m.start(live(1, 'A'))).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+    expect(unprobed.invalidateProbe).not.toHaveBeenCalled();
+
+    const shutdown = harness({ probe: async () => fromCache(LIVE_HLS) });
+    shutdown.setReady(() => false);
+    const stopped = expect(shutdown.m.start(live(1, 'A'))).rejects.toBeInstanceOf(PlaybackError);
+    await flush();
+    const all = shutdown.m.stopAll();
+    await vi.advanceTimersByTimeAsync(100);
+    await all;
+    await stopped;
+    expect(shutdown.invalidateProbe).not.toHaveBeenCalled();
   });
 
   // Ruling R16: liveness is per viewer.

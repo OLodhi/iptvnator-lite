@@ -18,8 +18,13 @@ export type ProbeResult = {
   audio: { index: number; codec: string; channels: number }[];
 };
 
+/** A probe's result, and whether it came from the probe cache rather than a fresh ffprobe run. */
+export type ProbeOutcome = { result: ProbeResult; cached: boolean };
+
 export interface Prober {
-  probe(url: string, userAgent: string): Promise<ProbeResult>;
+  probe(url: string, userAgent: string): Promise<ProbeOutcome>;
+  /** Forgets any cached result for `url`, so its next probe runs ffprobe again (R34). */
+  invalidate(url: string): void;
 }
 
 const CACHE_TTL_MS = 24 * 3600_000;
@@ -65,10 +70,11 @@ export function parseFfprobe(json: unknown): ProbeResult {
   };
 }
 
-/** Wraps a probe so each result is logged as one line: container, video, audio and duration (URL redacted). */
+/** Wraps a probe so each result is logged as one line: container, video, audio, duration and whether it was cached (URL redacted). */
 export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] {
   return async (url, userAgent) => {
-    const r = await probe(url, userAgent);
+    const outcome = await probe(url, userAgent);
+    const { result: r, cached } = outcome;
     const v = r.video;
     log.info(
       {
@@ -78,11 +84,19 @@ export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] 
         video: v ? `${v.codec} ${v.width}x${v.height} ${v.fieldOrder ?? 'unknown'}` : 'none',
         audio: r.audio.map((a) => a.codec).join(',') || 'none',
         durationSec: r.durationSec,
+        cached,
       },
       'probed',
     );
-    return r;
+    return outcome;
   };
+}
+
+/** Enough of a ProbeResult's shape that a cached row can be used without throwing later. */
+function isProbeResult(v: unknown): v is ProbeResult {
+  if (typeof v !== 'object' || v === null) return false;
+  const r = v as Partial<ProbeResult>;
+  return typeof r.formatName === 'string' && Array.isArray(r.audio) && (r.video === null || typeof r.video === 'object');
 }
 
 export function createProber(deps: {
@@ -100,6 +114,19 @@ export function createProber(deps: {
     'INSERT INTO probe_cache (url_key, result, probed_at) VALUES (?, ?, ?) ' +
       'ON CONFLICT(url_key) DO UPDATE SET result = excluded.result, probed_at = excluded.probed_at',
   );
+  const deleteStmt = deps.db.prepare('DELETE FROM probe_cache WHERE url_key = ?');
+
+  /** A fresh, readable cached result; a row that is stale or doesn't parse is a miss (and is overwritten). */
+  function fromCache(key: string): ProbeResult | null {
+    const row = getStmt.get(key) as { result: string; probed_at: number } | undefined;
+    if (!row || now() - row.probed_at >= CACHE_TTL_MS) return null;
+    try {
+      const parsed: unknown = JSON.parse(row.result);
+      return isProbeResult(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
 
   // Error messages deliberately never include the URL or ffprobe's stderr (credentials live in the URL).
   function runFfprobe(url: string, userAgent: string): Promise<unknown> {
@@ -143,15 +170,19 @@ export function createProber(deps: {
     });
   }
 
+  // Rows are keyed by the redacted URL, so no credentials are stored.
   return {
     async probe(url, userAgent) {
       const key = redactUrl(url);
-      const row = getStmt.get(key) as { result: string; probed_at: number } | undefined;
-      if (row && now() - row.probed_at < CACHE_TTL_MS) return JSON.parse(row.result) as ProbeResult;
+      const cached = fromCache(key);
+      if (cached) return { result: cached, cached: true };
 
       const result = parseFfprobe(await runFfprobe(url, userAgent));
       putStmt.run(key, JSON.stringify(result), now());
-      return result;
+      return { result, cached: false };
+    },
+    invalidate(url) {
+      deleteStmt.run(redactUrl(url));
     },
   };
 }

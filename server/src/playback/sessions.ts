@@ -26,6 +26,8 @@ export type SessionManagerDeps = {
    */
   spawn: (cmd: string, args: string[]) => ChildLike;
   probe: Prober['probe'];
+  /** R34: called for each probe that came from the cache when the start fails, or the live session gives up. */
+  invalidateProbe: Prober['invalidate'];
   transcodeInterlaced: boolean;
   maxConnections: (providerId: number) => number | null;
   isReady: (outDir: string) => Promise<boolean>;
@@ -158,6 +160,7 @@ type Session = {
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
   probing: Promise<void> | null; // an ffprobe that is still connected
+  cachedProbes: string[]; // URLs whose probe results came from the cache (R34)
   restarts: number; // consecutive failures
   restartTimer: ReturnType<typeof setTimeout> | null;
   launchSegment: number; // highest segment before the current process started (its start number - 1)
@@ -357,6 +360,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
     if (s.restarts >= deps.maxRestarts) {
       log.warn({ sessionId: s.id, code, restarts: s.restarts }, 'ffmpeg keeps exiting; giving up');
+      forgetCachedProbes(s);
       void stopSession(s, 'upstream failed');
       return;
     }
@@ -466,9 +470,24 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     });
   }
 
+  /** R34: a failure after a cached probe may be the cache's fault (a stale format, audio index or placeholder), so it goes. */
+  function forgetCachedProbes(s: Session): void {
+    for (const url of s.cachedProbes.splice(0)) {
+      try {
+        deps.invalidateProbe(url);
+        log.info({ sessionId: s.id, url: redactUrl(url) }, 'forgot cached probe');
+      } catch (err) {
+        log.warn({ sessionId: s.id, url: redactUrl(url), err: errorText(err) }, 'could not forget cached probe');
+      }
+    }
+  }
+
   /** Probes `url`, tracked as a held connection, racing the start deadline; a probe error passes through as is. */
   function probeRace(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
-    const probing = deps.probe(url, s.userAgent);
+    const probing = deps.probe(url, s.userAgent).then(({ result, cached }) => {
+      if (cached) s.cachedProbes.push(url);
+      return result;
+    });
     const done = () => {
       if (s.probing === ended) s.probing = null;
     };
@@ -539,10 +558,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       if (s.state !== 'starting') throw stoppedError();
     } catch (err) {
+      const shutDown = s.state !== 'starting'; // stopped from outside (shutdown), not a failure of the stream
       await stopSession(s, 'failed to start');
-      if (err instanceof PlaybackError) throw err;
-      log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg could not be started');
-      throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be started');
+      let failure: PlaybackError;
+      if (err instanceof PlaybackError) {
+        failure = err;
+      } else {
+        log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg could not be started');
+        failure = new PlaybackError('UPSTREAM_ERROR', 'The stream could not be started');
+      }
+      if (!shutDown && (failure.code === 'UPSTREAM_ERROR' || failure.code === 'STREAM_START_TIMEOUT')) {
+        forgetCachedProbes(s);
+      }
+      throw failure;
     } finally {
       deadline.clear();
     }
@@ -631,6 +659,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       child: null,
       exit: null,
       probing: null,
+      cachedProbes: [],
       restarts: 0,
       restartTimer: null,
       launchSegment: -1,

@@ -1,11 +1,15 @@
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { openDb } from '../db/db.ts';
+import type { Db } from '../db/db.ts';
+import { redactUrl } from '../util/redact.ts';
 import { createProber, parseFfprobe, withProbeLog } from './probe.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -70,14 +74,15 @@ describe('parseFfprobe', () => {
 });
 
 describe('withProbeLog', () => {
-  test('logs one redacted summary line per probe', async () => {
+  test('logs one redacted summary line per probe, saying whether it was cached', async () => {
     const lines: { o: object; m: string }[] = [];
     const log = { info: (o: object, m: string) => void lines.push({ o, m }), warn: () => {} };
     const result = parseFfprobe(fixture('h264-interlaced-ts'));
-    const probe = withProbeLog(async () => result, log);
+    const outcome = { result, cached: true };
+    const probe = withProbeLog(async () => outcome, log);
     const url = 'http://provider.test/live/someuser/secret/7.ts?username=someuser&password=secret';
 
-    expect(await probe(url, 'ua')).toBe(result);
+    expect(await probe(url, 'ua')).toBe(outcome);
     expect(lines).toHaveLength(1);
     const v = result.video!;
     expect(lines[0]!.m).toBe('probed');
@@ -87,6 +92,7 @@ describe('withProbeLog', () => {
       video: `${v.codec} ${v.width}x${v.height} tt`,
       audio: result.audio.map((a) => a.codec).join(','),
       durationSec: result.durationSec,
+      cached: true,
     });
     expect(JSON.stringify(lines)).not.toMatch(/secret|someuser/);
   });
@@ -100,7 +106,60 @@ describe('withProbeLog', () => {
   });
 });
 
+/** A stand-in for ffprobe that prints `json` and exits 0, counting its runs. */
+function fakeFfprobe(json: unknown) {
+  let runs = 0;
+  const spawnFn = (() => {
+    runs++;
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), kill: () => true });
+    child.stdout.on('end', () => child.emit('close', 0));
+    setImmediate(() => child.stdout.end(JSON.stringify(json)));
+    return child;
+  }) as unknown as typeof spawn;
+  return { spawnFn, runs: () => runs };
+}
+
 describe('createProber', () => {
+  const url = 'http://provider.test/movie/someuser/secret/7.mkv';
+  const rows = (db: Db) => db.prepare('SELECT url_key, result FROM probe_cache ORDER BY url_key').all() as { url_key: string; result: string }[];
+
+  test('says whether a result came from the cache, and invalidate forgets only that url', async () => {
+    const db = openDb(':memory:');
+    const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+    const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+    const result = parseFfprobe(fixture('h264-mkv'));
+    const other = 'http://provider.test/movie/someuser/secret/8.mkv';
+
+    expect(await prober.probe(url, 'ua')).toEqual({ result, cached: false });
+    expect(await prober.probe(url, 'ua')).toEqual({ result, cached: true });
+    await prober.probe(other, 'ua');
+    expect(ffprobe.runs()).toBe(2);
+    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(url), redactUrl(other)]); // no credentials stored
+
+    prober.invalidate(url); // given the real URL; the row is keyed by its redacted form
+    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(other)]);
+    expect(await prober.probe(url, 'ua')).toEqual({ result, cached: false });
+    expect(ffprobe.runs()).toBe(3);
+    expect(await prober.probe(other, 'ua')).toEqual({ result, cached: true });
+    prober.invalidate('http://provider.test/movie/someuser/secret/999.mkv'); // nothing cached: a no-op
+  });
+
+  test.each(['{"formatName":"hls",', 'null', '[]', '{"formatName":"hls"}'])(
+    'a cached row that does not parse as a probe result (%s) is a miss: probed again and overwritten',
+    async (corrupt) => {
+      const db = openDb(':memory:');
+      db.prepare('INSERT INTO probe_cache (url_key, result, probed_at) VALUES (?, ?, ?)').run(redactUrl(url), corrupt, Date.now());
+      const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+      const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+      const result = parseFfprobe(fixture('h264-mkv'));
+
+      expect(await prober.probe(url, 'ua')).toEqual({ result, cached: false });
+      expect(ffprobe.runs()).toBe(1);
+      expect(rows(db).map((r) => JSON.parse(r.result))).toEqual([result]);
+      expect(await prober.probe(url, 'ua')).toEqual({ result, cached: true });
+    },
+  );
+
   test('failure message contains no URL', async () => {
     const db = openDb(':memory:');
     // node exits non-zero (bad option) so ffprobe "fails"
@@ -135,11 +194,12 @@ describe.skipIf(!ffprobePath)('ffprobe integration', () => {
     const url = `${fake.url}/live/u/p/3.ts`;
 
     const first = await prober.probe(url, 'test-agent');
-    expect(first.video?.codec).toBe('mpeg2video');
+    expect(first.cached).toBe(false);
+    expect(first.result.video?.codec).toBe('mpeg2video');
     expect(spawns).toBe(1);
 
     const second = await prober.probe(url, 'test-agent');
-    expect(second).toEqual(first);
+    expect(second).toEqual({ result: first.result, cached: true });
     expect(spawns).toBe(1);
 
     const keys = db.prepare('SELECT url_key FROM probe_cache').all() as { url_key: string }[];

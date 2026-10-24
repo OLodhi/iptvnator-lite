@@ -531,12 +531,14 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
       throw new Error('Fake media is missing. Run: npm run make-media -w @tv/fake-xtream (needs TV_FFMPEG_PATH)');
     }
     w = await makeWorld(
-      (db, providers) =>
-        createSessionManager({
+      (db, providers) => {
+        const prober = createProber({ ffprobePath: config.ffprobePath, db });
+        return createSessionManager({
           ffmpegPath: config.ffmpegPath,
           transcodeDir: config.transcodeDir,
           spawn: spawnFfmpeg(log),
-          probe: createProber({ ffprobePath: config.ffprobePath, db }).probe,
+          probe: (url, userAgent) => prober.probe(url, userAgent),
+          invalidateProbe: (url) => prober.invalidate(url),
           transcodeInterlaced: false,
           maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
           isReady: defaultIsReady,
@@ -547,7 +549,8 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
           stallTimeoutMs: 20_000,
           maxRestarts: 3,
           log,
-        }),
+        });
+      },
       { config, log },
     );
   }, 30_000);

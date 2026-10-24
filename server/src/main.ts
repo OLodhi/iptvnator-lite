@@ -34,6 +34,7 @@ const sessions = createSessionManager({
   transcodeDir: config.transcodeDir,
   spawn: spawnFfmpeg(log),
   probe: withProbeLog((url, userAgent) => prober.probe(url, userAgent), log),
+  invalidateProbe: (url) => prober.invalidate(url),
   transcodeInterlaced: config.transcodeInterlaced,
   maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
   isReady: defaultIsReady,
