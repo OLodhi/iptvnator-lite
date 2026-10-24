@@ -9,7 +9,7 @@ export type { SyncResult } from '@tv/shared';
 
 const ALL_KINDS: Kind[] = ['live', 'movie', 'series'];
 const BATCH = 2000;
-const PRUNE_CHUNK = 5000;
+const PRUNE_CHUNK = 1000;
 const NONE_ID = '__none__';
 
 type Statements = ReturnType<typeof prepare>;
