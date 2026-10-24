@@ -54,8 +54,16 @@ export function segmentQuery(segment: Segment, nowMs: number, tz: string = devic
   return { mode: 'range', from: at(1, 6), to: at(2, 2) };
 }
 
-export function formatClock(sec: number, tz: string = deviceZone()): string {
-  return new Intl.DateTimeFormat('en-GB', { timeZone: tz, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' }).format(new Date(sec * 1000));
+// One formatter per zone ('' = the device zone): building one costs far more than formatting, and the grid formats hundreds per render.
+const clockFormats = new Map<string, Intl.DateTimeFormat>();
+
+export function formatClock(sec: number, tz?: string): string {
+  let format = clockFormats.get(tz ?? '');
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' });
+    clockFormats.set(tz ?? '', format);
+  }
+  return format.format(new Date(sec * 1000));
 }
 
 export function progress(startSec: number, stopSec: number, nowMs: number): number {
