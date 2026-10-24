@@ -9,6 +9,7 @@ import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { CLIENT_ID, PlaybackError } from '../playback/sessions.ts';
 import type { SessionManager } from '../playback/sessions.ts';
 import { resolveSourceUrl, SourceError } from '../playback/sourceUrl.ts';
+import { fetchWithLimitRetry, MIRRORED_HEADERS } from '../playback/upstream.ts';
 import { ProviderError } from '../providers/errors.ts';
 import type { PersonalService } from '../personal/service.ts';
 import { currentUserId } from '../users.ts';
@@ -37,6 +38,11 @@ type DirectProxy = {
   clientId: string;
   /** Ends it because its session is over (as opposed to the viewer leaving or the provider failing). */
   stop(): void;
+  /**
+   * Ends it because a newer request for the same session needs the provider connection. The viewer's connection
+   * is cut, never answered: 404 means the session ended, and 502 that the provider failed.
+   */
+  preempt(): void;
   /** Resolves once the provider request has been aborted and its body closed. */
   settled: Promise<void>;
 };
@@ -52,8 +58,6 @@ const FILE_TYPES: Record<string, string> = {
   m4s: 'video/iso.segment',
   mp4: 'video/mp4',
 };
-// Everything else the provider sends (cookies, server names, ...) stays on the server.
-const MIRRORED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
 
 const playSchema = {
   type: 'object',
@@ -73,9 +77,9 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
     const proxies = new Set<DirectProxy>();
 
     /** Ends the matching direct streams and waits until their provider requests are closed. */
-    async function endProxies(match: (p: DirectProxy) => boolean): Promise<void> {
+    async function endProxies(match: (p: DirectProxy) => boolean, how: 'stop' | 'preempt' = 'stop'): Promise<void> {
       const ending = [...proxies].filter(match);
-      for (const p of ending) p.stop();
+      for (const p of ending) p[how]();
       await Promise.all(ending.map((p) => p.settled));
     }
 
@@ -211,6 +215,10 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
           if (body) reply.raw.destroy();
           upstream.abort();
         },
+        preempt() {
+          reply.raw.destroy();
+          upstream.abort();
+        },
       };
       proxies.add(proxy);
       // Re-checked while streaming: a session that was reaped stops being read from the provider.
@@ -242,10 +250,14 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
 
       const headers: Record<string, string> = { 'user-agent': source.userAgent, 'accept-encoding': 'identity' };
       if (req.headers.range) headers.range = req.headers.range;
+      // Safari overlaps range requests when it seeks, and a one-connection provider refuses the second while
+      // the first is open: the newer request takes the session's connection over.
+      await endProxies((p) => p !== proxy && p.sessionId === viewer.sessionId, 'preempt');
+      // Covers the retries too: the provider may not have noticed the closed connection yet.
       const headersTimer = setTimeout(() => upstream.abort(), UPSTREAM_HEADERS_TIMEOUT_MS);
       let res: Response;
       try {
-        res = await fetch(source.url, { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal });
+        res = await fetchWithLimitRetry(source.url, { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal });
       } catch (err) {
         done();
         return endEarly('The provider did not answer', () =>

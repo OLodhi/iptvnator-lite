@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, get as httpGet } from 'node:http';
-import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import type { ClientRequest, IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -397,9 +397,10 @@ describe('playback routes', () => {
       expect(openAtRelease).toEqual([0]);
       expect(await waiting.status).toBe(404);
 
-      // POST /api/play for the same viewer: their old direct request is cut; other viewers' are not.
+      // POST /api/play for the same viewer: their old direct request is cut; another viewer's (in their own
+      // session, as a direct session's requests take each other over) is not.
       const old = viewer(`${w.origin}/api/sessions/sess/A/direct`);
-      const other = viewer(`${w.origin}/api/sessions/sess/B/direct`);
+      const other = viewer(`${w.origin}/api/sessions/other/B/direct`);
       await vi.waitFor(() => expect(upstream.open()).toBe(2));
       expect((await playBody(w, { itemId: w.itemId('live', 1), clientId: 'A' })).statusCode).toBe(200);
       expect(openAtStart).toEqual([1]);
@@ -787,6 +788,24 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     expect(logs.filter((l) => l.includes(r.sessionId) && /HTTP error 403/.test(l))).toEqual([]);
   });
 
+  test('a second range request on a direct movie takes over the provider connection', async () => {
+    const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
+    expect(movie.mode).toBe('direct');
+    const media = readFileSync(join(mediaDir, 'movie.mp4'));
+    // Like Safari seeking: its open `bytes=0-` request is still streaming when it asks for another range.
+    const a = await openPaused(w.origin + movie.url, { range: 'bytes=0-' });
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(1));
+
+    const b = await getAll(w.origin + movie.url, { range: 'bytes=1000-1999' });
+    expect(b.status).toBe(206);
+    expect(b.headers['content-range']).toBe(`bytes 1000-1999/${media.length}`);
+    expect(b.body.equals(media.subarray(1000, 2000))).toBe(true);
+
+    expect(await drain(a.res)).toBeLessThan(media.length);
+    expect(a.res.complete).toBe(false); // A was cut off
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(0), { timeout: 2_000 });
+  });
+
   test('dead channel fails cleanly', async () => {
     const res = await play({ itemId: w.itemId('live', 999), clientId: 'A' });
     expect(res.statusCode).toBe(502);
@@ -879,10 +898,10 @@ function crossStreamRefusals(from: number) {
 }
 
 /** GETs a URL, reads the first chunk, then stops reading so the body backs up to the provider. */
-function openPaused(url: string): Promise<{ req: ClientRequest; res: IncomingMessage }> {
+function openPaused(url: string, headers: OutgoingHttpHeaders = {}): Promise<{ req: ClientRequest; res: IncomingMessage }> {
   return new Promise((ok, fail) => {
-    const req = httpGet(url, (res) => {
-      if (res.statusCode !== 200) return fail(new Error(`status ${res.statusCode}`));
+    const req = httpGet(url, { headers }, (res) => {
+      if (res.statusCode !== 200 && res.statusCode !== 206) return fail(new Error(`status ${res.statusCode}`));
       res.on('error', () => {}); // cut short on purpose by the tests
       res.once('data', () => {
         res.pause();
@@ -890,6 +909,19 @@ function openPaused(url: string): Promise<{ req: ClientRequest; res: IncomingMes
       });
     });
     req.on('error', () => {}); // destroyed on purpose by the tests
+  });
+}
+
+/** GETs a URL over a real socket and reads the whole response. */
+function getAll(url: string, headers: OutgoingHttpHeaders): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((ok, fail) => {
+    const req = httpGet(url, { headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => ok({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('error', fail);
+    });
+    req.on('error', fail);
   });
 }
 
