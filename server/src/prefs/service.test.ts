@@ -29,6 +29,10 @@ test('corrupt JSON returns the fallback', () => {
   expect(prefs.get(1, 'bad', 7)).toBe(7);
 });
 
+test('an unserialisable value throws a clear error', () => {
+  expect(() => prefs.set(1, 'k', undefined)).toThrow('prefs value must be JSON-serialisable');
+});
+
 test('values are per user', () => {
   prefs.set(1, 'k', 'one');
   prefs.set(2, 'k', 'two');

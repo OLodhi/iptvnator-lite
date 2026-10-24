@@ -23,7 +23,9 @@ export function createPrefsService(db: Db): PrefsService {
       }
     },
     set(userId, key, value) {
-      upsert.run(userId, key, JSON.stringify(value));
+      const json = JSON.stringify(value);
+      if (json === undefined) throw new Error('prefs value must be JSON-serialisable');
+      upsert.run(userId, key, json);
     },
   };
 }

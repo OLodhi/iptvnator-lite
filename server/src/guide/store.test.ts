@@ -95,6 +95,67 @@ describe('guide store', () => {
     expect(store.state(P)).toMatchObject({ generation: 1, failures: 0, lastError: null });
   });
 
+  test('a new attempt never shares a number with leftover rows', async () => {
+    const g1 = store.beginGeneration(P, 1);
+    store.insertProgrammes(P, g1, [prog('a', 0, { title: 'orphan' })]);
+    const g2 = store.beginGeneration(P, 2);
+    expect(g2).toBeGreaterThan(g1);
+    store.insertProgrammes(P, g2, [prog('a', 0, { title: 'fresh' })]);
+    commit(g2);
+    expect(db.prepare('SELECT title FROM programmes WHERE generation = ?').all(store.currentGeneration(P))).toEqual([{ title: 'fresh' }]);
+    expect(count('programmes', g1)).toBe(1);
+    await store.pruneGenerations(P);
+    expect(count('programmes', g1)).toBe(0);
+  });
+
+  test('prune leaves an in-flight newer generation alone', async () => {
+    commit(store.beginGeneration(P, 1));
+    const next = store.beginGeneration(P, 2);
+    store.insertProgrammes(P, next, [prog('a', 0)]);
+    await store.pruneGenerations(P);
+    expect(count('programmes', next)).toBe(1);
+  });
+
+  test('abandon never deletes the current generation', async () => {
+    const g = store.beginGeneration(P, 1);
+    store.insertProgrammes(P, g, [prog('a', 0)]);
+    commit(g);
+    await store.abandonGeneration(P, g);
+    expect(count('programmes', g)).toBe(1);
+  });
+
+  test('abandon removes more than one chunk', async () => {
+    const g = store.beginGeneration(P, 1);
+    store.insertProgrammes(P, g, Array.from({ length: 2500 }, (_, i) => prog('a', i * 60)));
+    await store.abandonGeneration(P, g);
+    expect(count('programmes', g)).toBe(0);
+  });
+
+  test('commit refuses a generation that is not newer', () => {
+    const g = store.beginGeneration(P, 1);
+    commit(g);
+    expect(() => commit(g)).toThrow(/not newer/);
+    expect(() => commit(g - 1)).toThrow(/not newer/);
+    expect(store.currentGeneration(P)).toBe(g);
+  });
+
+  test('recordFailure leaves the committed guide readable', () => {
+    const g = store.beginGeneration(P, 1);
+    store.insertProgrammes(P, g, [prog('a', 0)]);
+    commit(g);
+    store.recordFailure(P, 'boom');
+    expect(store.state(P)).toMatchObject({ generation: g, fetchedAt: 500, source: 'xmltv', failures: 1 });
+    expect(count('programmes', g)).toBe(1);
+  });
+
+  test('truncation never leaves half of a surrogate pair', () => {
+    const g = store.beginGeneration(P, 1);
+    const description = 'a'.repeat(TEXT_LIMITS.description - 1) + '\u{1F600}';
+    store.insertProgrammes(P, g, [prog('a', 0, { description })]);
+    const stored = (db.prepare('SELECT description FROM programmes').get() as { description: string }).description;
+    expect(stored).toBe('a'.repeat(TEXT_LIMITS.description - 1));
+  });
+
   test('deleting the provider cascades', () => {
     const g = store.beginGeneration(P, 1);
     store.insertChannels(P, g, [{ key: 'a', name: 'A', names: [] }]);
