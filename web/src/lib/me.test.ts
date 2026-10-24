@@ -46,6 +46,10 @@ test('search encodes the query and passes the limit', async () => {
   expect(last().url).toBe('/api/search?q=a%20b%26c');
   await me.search('x', 20);
   expect(last().url).toBe('/api/search?q=x&limit=20');
+  const ctl = new AbortController();
+  await me.search('x', 20, ctl.signal);
+  const [, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  expect(init.signal).toBe(ctl.signal);
 });
 
 test('curation and saveCuration', async () => {

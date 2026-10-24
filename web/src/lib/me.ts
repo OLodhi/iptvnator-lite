@@ -23,8 +23,8 @@ export const unfavourite = (itemId: number) => api<void>(`/api/me/favourites/${i
 export const positions = (itemId: number) => api<SavedPosition[]>(`/api/me/positions/${itemId}`);
 export const reportPosition = (report: PositionReport) => api<void>('/api/me/positions', ({ ...json('PUT', report), keepalive: true }));
 
-export const search = (q: string, limit?: number) =>
-  api<SearchResults>(`/api/search?q=${encodeURIComponent(q)}${limit === undefined ? '' : `&limit=${limit}`}`);
+export const search = (q: string, limit?: number, signal?: AbortSignal) =>
+  api<SearchResults>(`/api/search?q=${encodeURIComponent(q)}${limit === undefined ? '' : `&limit=${limit}`}`, signal ? { signal } : undefined);
 
 export const curation = (providerId: number, kind: Kind) => api<CurationView>(`/api/providers/${providerId}/curation/${kind}`);
 export const saveCuration = (providerId: number, kind: Kind, update: CurationUpdate) =>
