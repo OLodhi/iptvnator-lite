@@ -14,6 +14,7 @@ import type { Db } from '../db/db.ts';
 import { createPersonalService } from '../personal/service.ts';
 import { createProviderService } from '../providers/service.ts';
 import { testConfig } from './config.ts';
+import { guideDeps } from './guideDeps.ts';
 import { stubSessions } from './sessions.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
@@ -32,6 +33,7 @@ export async function startBrowseApp(catalogue: FakeCatalogue) {
     config, db, providers, catalogue: repo, curation, personal, seriesInfo,
     sync: createSyncRunner({ db, providers }),
     sessions: stubSessions(),
+    ...guideDeps(db, providers),
   });
   const providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });

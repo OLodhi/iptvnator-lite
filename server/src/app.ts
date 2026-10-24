@@ -43,10 +43,11 @@ export type AppDeps = {
   sessions: SessionManager;
   curation: CurationService;
   personal: PersonalService;
-  /** Guide status and refresh routes are registered only when this is given. */
-  guide?: GuideRunner;
-  /** Per-user preferences, for the guide routes Task 10 adds. */
-  prefs?: PrefsService;
+  guide: GuideRunner;
+  /** Per-user preferences (the guide's view and filter). */
+  prefs: PrefsService;
+  /** Milliseconds; `Date.now` if left out. Tests fix it so the guide's "now" is stable. */
+  now?: () => number;
   /** Proxied logos and posters; a cache over `config.logoDir` if left out. */
   logos?: LogoCache;
   /** Where IPTVnator uploads are spooled; the OS temp directory if left out. */
@@ -61,7 +62,9 @@ export type AppDeps = {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
-  const presenter = createPresenter({ ...deps, guide: createGuideQueries(deps.db), now: Date.now });
+  const now = deps.now ?? Date.now;
+  const queries = createGuideQueries(deps.db);
+  const presenter = createPresenter({ ...deps, guide: queries, now });
   const search = createSearch(deps.db);
   const logos =
     deps.logos ?? createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
@@ -75,7 +78,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers, presenter }),
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
-      if (deps.guide) await api.register(guideRoutes({ guide: deps.guide, providers: deps.providers }));
+      await api.register(
+        guideRoutes({
+          db: deps.db, guide: deps.guide, providers: deps.providers, prefs: deps.prefs, curation: deps.curation,
+          personal: deps.personal, catalogue: deps.catalogue, presenter, queries, now,
+        }),
+      );
       await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
       await api.register(
         importRoutes({

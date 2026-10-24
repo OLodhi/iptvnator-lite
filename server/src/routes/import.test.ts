@@ -17,6 +17,7 @@ import { createProviderService } from '../providers/service.ts';
 import { iptvnatorFixture, SERVER } from '../testing/iptvnatorDb.ts';
 import { testConfig } from '../testing/config.ts';
 import { stubSessions } from '../testing/sessions.ts';
+import { guideDeps } from '../testing/guideDeps.ts';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-import-route-test-'));
 const spool = path.join(dir, 'spool');
@@ -32,7 +33,7 @@ beforeAll(async () => {
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
   const catalogue = createCatalogueRepo(db);
   app = await buildApp({
-    config, db, providers, catalogue, tmpDir: spool, maxImportBytes: LIMIT,
+    config, db, providers, catalogue, ...guideDeps(db, providers), tmpDir: spool, maxImportBytes: LIMIT,
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions(),

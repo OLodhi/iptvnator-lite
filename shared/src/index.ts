@@ -91,6 +91,21 @@ export type CurationView = {
 /** Group switches keyed by tag, and single-category choices keyed by the category's `remoteId`. */
 export type CurationUpdate = { tags: Record<string, boolean>; categories: Record<string, boolean> };
 export type Page<T> = { items: T[]; nextCursor: string | null };
+export type GuideView = 'whatson' | 'grid';
+/** `filter` is 'all', 'favourites' or `category:${number}`. */
+export type GuidePrefs = { view: GuideView; filter: string };
+export type GuideChip = { filter: string; label: string };
+export type GuideMeta = {
+  providerId: number | null;
+  chips: GuideChip[];
+  prefs: GuidePrefs;
+  /** Earliest start and latest stop of the current guide, epoch seconds. */
+  range: { fromSec: number; toSec: number } | null;
+  status: GuideStatus | null;
+};
+export type WhatsOnEntry = { item: CatalogItem; programme: Programme; live: boolean; catchup: boolean };
+export type GridRow = { item: CatalogItem; programmes: Programme[]; hasGuide: boolean };
+export type GuideSource = { key: string; name: string };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
 export type PlayRequest = { itemId: number; episodeRemoteId?: string; startAtSec?: number; clientId: string };

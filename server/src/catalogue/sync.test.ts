@@ -14,6 +14,7 @@ import { createXtreamClient } from '../providers/xtream/client.ts';
 import type { XtreamClient } from '../providers/xtream/client.ts';
 import { syncCatalogue } from './sync.ts';
 import { createSyncRunner } from './syncRunner.ts';
+import { guideDeps } from '../testing/guideDeps.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
 const UA = 'test-agent';
@@ -378,7 +379,7 @@ test('sync routes start a sync and report status', async () => {
   const seriesInfo = createSeriesInfoCache({ providers, catalogue });
   const sessions = stubSessions();
   const curation = createCurationService({ db, now: Date.now });
-  const app = await buildApp({ config: testConfig(), db, providers, sync, catalogue, seriesInfo, sessions, curation, personal: createPersonalService({ db, now: Date.now }) });
+  const app = await buildApp({ config: testConfig(), db, providers, sync, catalogue, seriesInfo, sessions, curation, personal: createPersonalService({ db, now: Date.now }), ...guideDeps(db, providers) });
   const post = await app.inject({ method: 'POST', url: `/api/providers/${providerId}/sync` });
   expect(post.statusCode).toBe(202);
   expect(post.json()).toEqual({ started: true });

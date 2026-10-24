@@ -39,6 +39,7 @@ import { testConfig } from '../testing/config.ts';
 import { stubSessions } from '../testing/sessions.ts';
 import type { Log } from '../util/log.ts';
 import { playbackRoutes } from './playback.ts';
+import { guideDeps } from '../testing/guideDeps.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
 const UA = 'TiviMate/4.7.0';
@@ -88,7 +89,7 @@ async function makeWorld(
   const sessions = makeSessions(db, providers);
   const sync = createSyncRunner({ db, providers });
   const curation = createCurationService({ db, now: Date.now });
-  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, curation, personal: createPersonalService({ db, now: Date.now }), log: opts.log });
+  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, curation, personal: createPersonalService({ db, now: Date.now }), ...guideDeps(db, providers), log: opts.log });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const origin = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const providerId = (await providers.add({ kind: 'xtream', serverUrl: opts.providerUrl ?? fake.url, username: 'u', password: 'p' })).id;

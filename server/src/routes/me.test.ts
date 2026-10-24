@@ -20,6 +20,7 @@ import { createProviderService } from '../providers/service.ts';
 import { PlaybackError } from '../playback/sessions.ts';
 import { testConfig } from '../testing/config.ts';
 import { stubSessions } from '../testing/sessions.ts';
+import { guideDeps } from '../testing/guideDeps.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
 const USER = 1;
@@ -40,7 +41,7 @@ beforeAll(async () => {
   const catalogue = createCatalogueRepo(db);
   personal = createPersonalService({ db, now: Date.now });
   app = await buildApp({
-    config, db, providers, catalogue, personal,
+    config, db, providers, catalogue, ...guideDeps(db, providers), personal,
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions({

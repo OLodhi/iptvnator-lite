@@ -12,6 +12,7 @@ import { openDb } from './db/db.ts';
 import { createProviderService } from './providers/service.ts';
 import { testConfig } from './testing/config.ts';
 import { stubSessions } from './testing/sessions.ts';
+import { guideDeps } from './testing/guideDeps.ts';
 
 async function appFor(webDir: string) {
   const db = openDb(':memory:');
@@ -19,7 +20,7 @@ async function appFor(webDir: string) {
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
   const catalogue = createCatalogueRepo(db);
   return buildApp({
-    config, db, providers, catalogue,
+    config, db, providers, catalogue, ...guideDeps(db, providers),
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions(),
