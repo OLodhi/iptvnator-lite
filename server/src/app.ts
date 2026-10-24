@@ -12,6 +12,10 @@ import type { CatalogueRepo } from './catalogue/repo.ts';
 import type { SeriesInfoCache } from './catalogue/seriesInfo.ts';
 import type { SessionManager } from './playback/sessions.ts';
 import type { CurationService } from './curation/service.ts';
+import { createPresenter } from './browse/presenter.ts';
+import { createSearch } from './catalogue/search.ts';
+import { browseRoutes } from './routes/browse.ts';
+import { searchRoutes } from './routes/search.ts';
 import { catalogueRoutes } from './routes/catalogue.ts';
 import { curationRoutes } from './routes/curation.ts';
 import type { PersonalService } from './personal/service.ts';
@@ -40,6 +44,8 @@ export type AppDeps = {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
+  const presenter = createPresenter(deps);
+  const search = createSearch(deps.db);
   const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
 
   await app.register(
@@ -47,12 +53,18 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       await api.register(healthRoutes);
       await api.register(providerRoutes(deps.providers));
       await api.register(
-        catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers }),
+        catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers, presenter }),
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
       await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
       await api.register(
         meRoutes({ personal: deps.personal, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo }),
+      );
+      await api.register(browseRoutes({ presenter, providers: deps.providers }));
+      await api.register(
+        searchRoutes({
+          search, presenter, catalogue: deps.catalogue, curation: deps.curation, personal: deps.personal, providers: deps.providers,
+        }),
       );
       await api.register(
         playbackRoutes({

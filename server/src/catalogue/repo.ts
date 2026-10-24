@@ -1,21 +1,23 @@
 import type { CatalogItem, Category, Kind, Page } from '@tv/shared';
 import type { Db } from '../db/db.ts';
 
-export type ItemDetail = CatalogItem & { remoteId: string; containerExt: string | null };
-
 export interface CatalogueRepo {
   listCategories(providerId: number, kind: Kind): Category[];
   /** Returns undefined when the cursor is malformed. */
-  listItems(categoryId: number, cursor: string | null, limit: number): Page<CatalogItem> | undefined;
+  listItems(categoryId: number, cursor: string | null, limit: number): Page<StoredItem> | undefined;
   getItem(id: number): ItemDetail | undefined;
 }
 
-type ItemRow = CatalogItem & { position?: number };
+/** What the repo stores of an item; the presenter adds `displayName` and `favourite`. */
+export type StoredItem = Omit<CatalogItem, 'displayName' | 'favourite'>;
+export type ItemDetail = StoredItem & { remoteId: string; containerExt: string | null };
 
-const COLUMNS = `items.id AS id, items.provider_id AS providerId, items.kind AS kind, items.name AS name,
+type ItemRow = StoredItem & { position?: number };
+
+export const ITEM_COLUMNS = `items.id AS id, items.provider_id AS providerId, items.kind AS kind, items.name AS name,
   items.logo_url AS logoUrl, items.catchup_days AS catchupDays, items.year AS year, items.rating AS rating`;
 
-const toItem = (r: ItemRow): CatalogItem => ({
+const toItem = (r: ItemRow): StoredItem => ({
   id: r.id,
   providerId: r.providerId,
   kind: r.kind,
@@ -42,20 +44,20 @@ export function createCatalogueRepo(db: Db): CatalogueRepo {
       ORDER BY c.position, c.id`,
   );
   const firstPage = db.prepare(
-    `SELECT ${COLUMNS}, ic.position AS position
+    `SELECT ${ITEM_COLUMNS}, ic.position AS position
        FROM item_categories ic JOIN items ON items.id = ic.item_id
       WHERE ic.category_id = @categoryId
       ORDER BY ic.position, ic.item_id LIMIT @limit`,
   );
   const nextPage = db.prepare(
-    `SELECT ${COLUMNS}, ic.position AS position
+    `SELECT ${ITEM_COLUMNS}, ic.position AS position
        FROM item_categories ic JOIN items ON items.id = ic.item_id
       WHERE ic.category_id = @categoryId
         AND (ic.position > @position OR (ic.position = @position AND ic.item_id > @itemId))
       ORDER BY ic.position, ic.item_id LIMIT @limit`,
   );
   const one = db.prepare(
-    `SELECT ${COLUMNS}, items.remote_id AS remoteId, items.container_ext AS containerExt FROM items WHERE items.id = ?`,
+    `SELECT ${ITEM_COLUMNS}, items.remote_id AS remoteId, items.container_ext AS containerExt FROM items WHERE items.id = ?`,
   );
 
   return {

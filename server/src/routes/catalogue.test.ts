@@ -135,6 +135,13 @@ test('item responses contain no provider URLs', async () => {
   }
 });
 
+test('item responses carry displayName and favourite', async () => {
+  const [cat] = (await get(`/api/providers/${providerId}/categories?kind=movie`)).json();
+  const [first] = (await get(`/api/categories/${cat.id}/items`)).json().items;
+  expect(first).toMatchObject({ displayName: expect.any(String), favourite: false });
+  expect((await get(`/api/items/${first.id}`)).json()).toMatchObject({ displayName: first.displayName, favourite: false });
+});
+
 test('the series cache resolves episodes for stream building', async () => {
   const db = openDb(':memory:');
   const providers = createProviderService({ db, userAgent: 'x' });

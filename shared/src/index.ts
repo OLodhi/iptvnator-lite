@@ -33,6 +33,10 @@ export type CatalogItem = {
   catchupDays: number | null;
   year: number | null;
   rating: string | null;
+  /** The name as shown: the single visible tag group's tag stripped. */
+  displayName: string;
+  /** Whether the current user has favourited it. */
+  favourite: boolean;
 };
 export type TagStyle = 'tagged' | 'mixed' | 'untagged';
 export type CurationCategory = {
@@ -76,4 +80,29 @@ export type SavedPosition = {
   durationSec: number | null;
   finished: boolean;
   updatedAt: number;
+};
+export type BrowseCategory = { id: number; displayName: string; itemCount: number; pinned: boolean };
+export type ContinueItem = {
+  item: CatalogItem;
+  episodeRemoteId: string | null;
+  /** "S<season> E<num>" for an episode; null for a movie or when the series info is unavailable. */
+  episodeLabel: string | null;
+  positionSec: number;
+  durationSec: number | null;
+};
+export type BrowseView = {
+  providerId: number | null;
+  kind: Kind;
+  categories: BrowseCategory[];
+  pinned: BrowseCategory[];
+  recent: CatalogItem[];
+  favourites: CatalogItem[];
+  continueWatching: ContinueItem[];
+  newCategories: number;
+};
+export type SearchResults = {
+  live: CatalogItem[];
+  movie: CatalogItem[];
+  series: CatalogItem[];
+  categories: (BrowseCategory & { kind: Kind })[];
 };

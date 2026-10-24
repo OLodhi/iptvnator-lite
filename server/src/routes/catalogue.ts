@@ -1,7 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { ApiError, Kind } from '@tv/shared';
+import type { Presenter } from '../browse/presenter.ts';
 import type { CatalogueRepo } from '../catalogue/repo.ts';
 import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
+import { currentUserId } from '../users.ts';
 import { ProviderError } from '../providers/errors.ts';
 import type { ProviderService } from '../providers/service.ts';
 
@@ -13,6 +15,7 @@ export const catalogueRoutes = (deps: {
   catalogue: CatalogueRepo;
   seriesInfo: SeriesInfoCache;
   providers: ProviderService;
+  presenter: Presenter;
 }): FastifyPluginAsync =>
   async (app) => {
     const notFound = (what: string, id: number): ApiError => ({ code: 'NOT_FOUND', message: `${what} ${id} not found` });
@@ -62,15 +65,14 @@ export const catalogueRoutes = (deps: {
         const limit = Math.min(req.query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
         const page = deps.catalogue.listItems(req.params.id, req.query.cursor ?? null, limit);
         if (!page) return reply.code(400).send({ code: 'VALIDATION', message: 'Invalid cursor' } satisfies ApiError);
-        return page;
+        return { items: deps.presenter.items(page.items, currentUserId(req)), nextCursor: page.nextCursor };
       },
     );
 
     app.get<{ Params: { id: number } }>('/items/:id', { schema: { params: idParams } }, async (req, reply) => {
       const item = deps.catalogue.getItem(req.params.id);
       if (!item) return reply.code(404).send(notFound('Item', req.params.id));
-      const { remoteId: _remoteId, containerExt: _containerExt, ...pub } = item;
-      return pub;
+      return deps.presenter.items([item], currentUserId(req))[0];
     });
 
     app.get<{ Params: { id: number } }>('/items/:id/seasons', { schema: { params: idParams } }, async (req, reply) => {
