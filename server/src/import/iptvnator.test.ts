@@ -168,3 +168,18 @@ test('reads a WAL-mode database', () => {
   wal.close();
   expect(run(file).hiddenApplied).toBe(1);
 });
+
+test('a failure part-way through leaves nothing imported', () => {
+  const file = fixture({
+    categories: [{ type: 'live', xtreamId: 5, hidden: true }, { type: 'movies', xtreamId: 11, hidden: true }],
+    favourites: [{ type: 'live', xtreamId: 1 }],
+  });
+  const personal = createPersonalService({ db, now: Date.now });
+  const failing = { ...personal, addFavourite: () => { throw new Error('disk full'); } };
+  expect(() =>
+    importIptvnator({ db, curation: createCurationService({ db, now: Date.now }), personal: failing }, { file, providerId, userId: USER }),
+  ).toThrowError('disk full');
+  expect(db.prepare('SELECT COUNT(*) FROM category_rules').pluck().get()).toBe(0);
+  expect(db.prepare('SELECT COUNT(*) FROM curation_state').pluck().get()).toBe(0);
+  expect(db.prepare('SELECT COUNT(*) FROM favourites').pluck().get()).toBe(0);
+});

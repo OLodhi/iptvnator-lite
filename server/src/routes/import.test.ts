@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { ImportResult } from '@tv/shared';
@@ -19,6 +20,7 @@ import { stubSessions } from '../testing/sessions.ts';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-import-route-test-'));
 const spool = path.join(dir, 'spool');
+const LIMIT = 256 * 1024;
 let app: FastifyInstance;
 let db: Db;
 let providerId: number;
@@ -30,7 +32,7 @@ beforeAll(async () => {
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
   const catalogue = createCatalogueRepo(db);
   app = await buildApp({
-    config, db, providers, catalogue, tmpDir: spool,
+    config, db, providers, catalogue, tmpDir: spool, maxImportBytes: LIMIT,
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions(),
@@ -82,5 +84,24 @@ test('the route answers 400 and 422 and deletes the temp file on failure', async
   expect(fs.readdirSync(spool)).toEqual([]);
 
   expect((await upload(Buffer.from('x'), 999)).statusCode).toBe(404);
+  expect(fs.readdirSync(spool)).toEqual([]);
+});
+
+test('an upload declared over the limit is refused with 413 before anything is spooled', async () => {
+  const res = await upload(Buffer.alloc(LIMIT + 1));
+  expect(res.statusCode).toBe(413);
+  expect(res.json()).toMatchObject({ code: 'IMPORT_TOO_LARGE' });
+  expect(fs.readdirSync(spool)).toEqual([]);
+});
+
+test('a streamed upload that outgrows the limit is refused with 413 and its temp file removed', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: `/api/providers/${providerId}/import/iptvnator`,
+    headers: { 'content-type': 'application/octet-stream' },
+    payload: Readable.from([Buffer.alloc(LIMIT), Buffer.alloc(LIMIT)]),
+  });
+  expect(res.statusCode).toBe(413);
+  expect(res.json()).toMatchObject({ code: 'IMPORT_TOO_LARGE' });
   expect(fs.readdirSync(spool)).toEqual([]);
 });

@@ -43,6 +43,8 @@ export type AppDeps = {
   logos?: LogoCache;
   /** Where IPTVnator uploads are spooled; the OS temp directory if left out. */
   tmpDir?: string;
+  /** Largest IPTVnator upload in bytes; 512 MB if left out. */
+  maxImportBytes?: number;
   /** The server's own log (provider failures, sessions); silent if left out. */
   log?: Log;
   /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
@@ -69,6 +71,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       await api.register(
         importRoutes({
           db: deps.db, curation: deps.curation, personal: deps.personal, providers: deps.providers, tmpDir: deps.tmpDir,
+          maxImportBytes: deps.maxImportBytes,
         }),
       );
       await api.register(

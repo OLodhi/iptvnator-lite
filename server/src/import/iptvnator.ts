@@ -115,23 +115,26 @@ export function importIptvnator(
   const item = deps.db.prepare('SELECT id FROM items WHERE provider_id = ? AND kind = ? AND remote_id = ?').pluck();
   const result: ImportResult = { categoriesMatched: 0, hiddenApplied: 0, favouritesImported: 0 };
 
-  for (const kind of KINDS) {
-    const tagOf = new Map(
-      (ours.all(input.providerId, kind) as { remoteId: string; tag: string | null }[]).map((c) => [c.remoteId, c.tag]),
-    );
-    const matched = theirs.categories
-      .filter((c) => c.kind === kind && tagOf.has(c.remoteId))
-      .map((c) => ({ remoteId: c.remoteId, tag: tagOf.get(c.remoteId)!, visible: !c.hidden }));
-    if (matched.length === 0) continue;
-    const { update, hidden } = curationFor(matched);
-    deps.curation.save(input.providerId, kind, update, null);
-    result.categoriesMatched += matched.length;
-    result.hiddenApplied += hidden;
-  }
+  // One transaction: a failure part-way leaves no rules or favourites behind (the saves nest as savepoints).
+  deps.db.transaction(() => {
+    for (const kind of KINDS) {
+      const tagOf = new Map(
+        (ours.all(input.providerId, kind) as { remoteId: string; tag: string | null }[]).map((c) => [c.remoteId, c.tag]),
+      );
+      const matched = theirs.categories
+        .filter((c) => c.kind === kind && tagOf.has(c.remoteId))
+        .map((c) => ({ remoteId: c.remoteId, tag: tagOf.get(c.remoteId)!, visible: !c.hidden }));
+      if (matched.length === 0) continue;
+      const { update, hidden } = curationFor(matched);
+      deps.curation.save(input.providerId, kind, update, null);
+      result.categoriesMatched += matched.length;
+      result.hiddenApplied += hidden;
+    }
 
-  for (const f of theirs.favourites) {
-    const id = item.get(input.providerId, f.kind, f.remoteId) as number | undefined;
-    if (id !== undefined && deps.personal.addFavourite(input.userId, id)) result.favouritesImported++;
-  }
+    for (const f of theirs.favourites) {
+      const id = item.get(input.providerId, f.kind, f.remoteId) as number | undefined;
+      if (id !== undefined && deps.personal.addFavourite(input.userId, id)) result.favouritesImported++;
+    }
+  })();
   return result;
 }
