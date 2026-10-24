@@ -4,12 +4,17 @@ import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
 import { createSyncRunner } from './catalogue/syncRunner.ts';
 import type { SyncRunner } from './catalogue/syncRunner.ts';
-import { createRefreshScheduler } from './catalogue/scheduler.ts';
+import { catalogueJob, createRefreshScheduler, guideJob } from './catalogue/scheduler.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { createPersonalService } from './personal/service.ts';
 import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
+import { afterSync, createGuideRunner } from './guide/runner.ts';
+import { createGuideStore } from './guide/store.ts';
+import { visibleLiveItemIds } from './guide/visible.ts';
+import { createPrefsService } from './prefs/service.ts';
+import { DEFAULT_USER_ID } from './users.ts';
 import { createLogoCache } from './logos/cache.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
 import { startUpstreamRelay } from './playback/relay.ts';
@@ -30,7 +35,16 @@ const providers = createProviderService({
   userAgent: config.defaultUserAgent,
   onAdded: (id) => sync?.start(id),
 });
-sync = createSyncRunner({ db, providers, log });
+const curation = createCurationService({ db, now: Date.now });
+const guideStore = createGuideStore(db);
+const guide = createGuideRunner({
+  db,
+  store: guideStore,
+  providers,
+  visibleLiveItemIds: (providerId) => visibleLiveItemIds(db, curation, providerId, DEFAULT_USER_ID),
+  log,
+});
+sync = createSyncRunner({ db, providers, onSynced: afterSync(guide, guideStore), log });
 const catalogue = createCatalogueRepo(db);
 const seriesInfo = createSeriesInfoCache({ providers, catalogue });
 const prober = createProber({ ffprobePath: config.ffprobePath, db });
@@ -53,14 +67,18 @@ const sessions = createSessionManager({
   log,
   relay,
 });
-const curation = createCurationService({ db, now: Date.now });
 const personal = createPersonalService({ db, now: Date.now });
+const prefs = createPrefsService(db);
 const logos = createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
 const app = await buildApp({
-  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, logos, log, httpLogLevel: 'warn',
+  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, guide, prefs, logos, log, httpLogLevel: 'warn',
 });
 
-const scheduler = createRefreshScheduler({ providers, sync, now: Date.now });
+const scheduler = createRefreshScheduler({
+  jobs: [catalogueJob({ providers, sync }), guideJob({ providers, guide, store: guideStore })],
+  now: Date.now,
+  log,
+});
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
@@ -69,8 +87,8 @@ async function shutdown(): Promise<void> {
   scheduler.stop();
   logos.stop();
   try {
-    // Together: closing the app aborts direct streams, and stopAll ends every FFmpeg.
-    await Promise.allSettled([app.close(), sessions.stopAll()]);
+    // Together: closing the app aborts direct streams, stopAll ends every FFmpeg, and the guide refresh is aborted.
+    await Promise.allSettled([app.close(), sessions.stopAll(), guide.stop()]);
     await relay.close();
   } finally {
     db.close();

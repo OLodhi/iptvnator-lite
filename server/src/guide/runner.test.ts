@@ -1,0 +1,163 @@
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, expect, test } from 'vitest';
+import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
+import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
+import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
+import { syncCatalogue } from '../catalogue/sync.ts';
+import { createSyncRunner } from '../catalogue/syncRunner.ts';
+import { createCurationService } from '../curation/service.ts';
+import { openDb } from '../db/db.ts';
+import type { Db } from '../db/db.ts';
+import { createProviderService } from '../providers/service.ts';
+import type { ProviderService } from '../providers/service.ts';
+import { DEFAULT_USER_ID } from '../users.ts';
+import type { Log } from '../util/log.ts';
+import { afterSync, createGuideRunner } from './runner.ts';
+import type { GuideRunner } from './runner.ts';
+import { createGuideStore } from './store.ts';
+import type { GuideStore } from './store.ts';
+import { visibleLiveItemIds } from './visible.ts';
+
+const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
+const NOW_MS = Date.UTC(2026, 9, 24, 12, 0, 0);
+
+let fake: FakeXtream;
+let db: Db;
+let store: GuideStore;
+let providers: ProviderService;
+let providerId: number;
+let runner: GuideRunner | undefined;
+let xmltvCalls: number;
+const lines: { level: string; o: Record<string, unknown>; msg: string }[] = [];
+const log: Log = {
+  info: (o, msg) => void lines.push({ level: 'info', o: o as Record<string, unknown>, msg }),
+  warn: (o, msg) => void lines.push({ level: 'warn', o: o as Record<string, unknown>, msg }),
+};
+
+beforeEach(async () => {
+  fake = await startFakeXtream({
+    mediaDir, catalogue: smallCatalogue(), now: () => NOW_MS, guideWindow: { pastDays: 3, futureDays: 2, programmeMinutes: 60 },
+  });
+  db = openDb(':memory:');
+  store = createGuideStore(db);
+  providers = createProviderService({ db, userAgent: 'ua' });
+  providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
+  await syncCatalogue({ db, client: providers.clientFor(providerId), providerId, kinds: ['live'] });
+  xmltvCalls = 0;
+  lines.length = 0;
+});
+afterEach(async () => {
+  await runner?.stop();
+  runner = undefined;
+  await fake.close();
+  db.close();
+});
+
+/** The real provider service, with each client's xmltv wrapped (counted, and optionally replaced). */
+function wrapped(xmltv?: (signal: AbortSignal | undefined) => Promise<never>): ProviderService {
+  return {
+    ...providers,
+    clientFor: (id: number) => {
+      const client = providers.clientFor(id);
+      return {
+        ...client,
+        xmltv: (opts) => {
+          xmltvCalls++;
+          return xmltv ? xmltv(opts?.signal) : client.xmltv(opts);
+        },
+      };
+    },
+  };
+}
+
+function makeRunner(over: Partial<Parameters<typeof createGuideRunner>[0]> = {}): GuideRunner {
+  const curation = createCurationService({ db, now: Date.now });
+  runner = createGuideRunner({
+    db,
+    store,
+    providers: wrapped(),
+    visibleLiveItemIds: (id) => visibleLiveItemIds(db, curation, id, DEFAULT_USER_ID),
+    now: () => NOW_MS,
+    log,
+    ...over,
+  });
+  return runner;
+}
+
+async function settled(r: GuideRunner): Promise<void> {
+  for (let i = 0; i < 400 && r.running(providerId); i++) await new Promise((res) => setTimeout(res, 25));
+}
+
+test('start runs one refresh at a time and reports status', async () => {
+  const r = makeRunner();
+  expect(r.status(providerId)).toEqual({
+    state: 'idle', fetchedAt: null, source: null, channels: 0, programmes: 0, linkedChannels: 0, error: null,
+  });
+  r.start(providerId);
+  r.start(providerId);
+  expect(r.running(providerId)).toBe(true);
+  expect(r.status(providerId).state).toBe('running');
+  await settled(r);
+  expect(xmltvCalls).toBe(1);
+  const status = r.status(providerId);
+  expect(status).toMatchObject({ state: 'idle', source: 'xmltv', fetchedAt: NOW_MS, error: null, channels: 3, linkedChannels: 2 });
+  expect(status.programmes).toBeGreaterThan(0);
+});
+
+test('failure is reported with a redacted error', async () => {
+  const leaky = {
+    ...providers,
+    clientFor: () => {
+      throw new Error('connect failed: http://host/player_api.php?username=alice&password=hunter2');
+    },
+  } as unknown as ProviderService;
+  const r = makeRunner({ providers: leaky });
+  r.start(providerId);
+  await settled(r);
+  const status = r.status(providerId);
+  expect(status.state).toBe('failed');
+  expect(status.error).toContain('connect failed');
+  expect(JSON.stringify([status, lines])).not.toMatch(/hunter2|alice/);
+  expect(lines.some((l) => l.level === 'warn' && l.msg === 'guide refresh failed')).toBe(true);
+  // A later success clears the failure.
+  runner = undefined;
+  const ok = makeRunner();
+  ok.start(providerId);
+  await settled(ok);
+  expect(ok.status(providerId)).toMatchObject({ state: 'idle', error: null });
+});
+
+test('onSynced relinks and starts the first guide refresh', async () => {
+  const r = makeRunner();
+  const sync = createSyncRunner({ db, providers, onSynced: afterSync(r, store), log });
+  sync.start(providerId);
+  for (let i = 0; i < 400 && (sync.status(providerId).state === 'running' || r.running(providerId) || !store.state(providerId)?.fetchedAt); i++) {
+    await new Promise((res) => setTimeout(res, 25));
+  }
+  expect(r.status(providerId)).toMatchObject({ state: 'idle', source: 'xmltv', linkedChannels: 2 });
+
+  // With a guide already stored, a later sync only relinks.
+  const before = store.state(providerId)?.attemptedAt;
+  const again = createSyncRunner({ db, providers, onSynced: afterSync(r, store), log });
+  again.start(providerId);
+  for (let i = 0; i < 400 && again.status(providerId).state === 'running'; i++) await new Promise((res) => setTimeout(res, 25));
+  expect(again.status(providerId).state).toBe('idle');
+  expect(r.running(providerId)).toBe(false);
+  expect(store.state(providerId)?.attemptedAt).toBe(before);
+});
+
+test('stop aborts a running refresh', async () => {
+  const stalled = wrapped((signal) => new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason))));
+  const r = makeRunner({ providers: stalled });
+  r.start(providerId);
+  await new Promise((res) => setTimeout(res, 50));
+  expect(r.running(providerId)).toBe(true);
+  await r.stop();
+  expect(r.running(providerId)).toBe(false);
+  // An abort is not a failure.
+  expect(store.state(providerId)?.failures ?? 0).toBe(0);
+  expect(r.status(providerId).state).toBe('idle');
+  r.start(providerId);
+  expect(r.running(providerId)).toBe(false);
+});

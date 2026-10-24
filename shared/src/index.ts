@@ -15,6 +15,21 @@ export type SyncStatus = {
   finishedAt: number | null;
   result: SyncResult | null;
   error: string | null;
+  /** Failed syncs in a row; 0 after a success or before any attempt. */
+  failures: number;
+};
+/** Guide refresh state for a provider. `fetchedAt` is epoch milliseconds, like `lastSyncedAt`. */
+export type GuideStatus = {
+  state: 'idle' | 'running' | 'failed';
+  fetchedAt: number | null;
+  source: 'xmltv' | 'provider' | null;
+  /** Guide channels in the current generation. */
+  channels: number;
+  /** Programmes in the current generation. */
+  programmes: number;
+  /** Catalogue channels linked to a guide channel. */
+  linkedChannels: number;
+  error: string | null;
 };
 export type AddProviderRequest = {
   kind: 'xtream';

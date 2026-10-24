@@ -20,6 +20,9 @@ import { catalogueRoutes } from './routes/catalogue.ts';
 import { curationRoutes } from './routes/curation.ts';
 import type { PersonalService } from './personal/service.ts';
 import { createLogoCache, type LogoCache } from './logos/cache.ts';
+import type { PrefsService } from './prefs/service.ts';
+import type { GuideRunner } from './guide/runner.ts';
+import { guideRoutes } from './routes/guide.ts';
 import { importRoutes } from './routes/import.ts';
 import { logoRoutes } from './routes/logos.ts';
 import { meRoutes } from './routes/me.ts';
@@ -39,6 +42,10 @@ export type AppDeps = {
   sessions: SessionManager;
   curation: CurationService;
   personal: PersonalService;
+  /** Guide status and refresh routes are registered only when this is given. */
+  guide?: GuideRunner;
+  /** Per-user preferences, for the guide routes Task 10 adds. */
+  prefs?: PrefsService;
   /** Proxied logos and posters; a cache over `config.logoDir` if left out. */
   logos?: LogoCache;
   /** Where IPTVnator uploads are spooled; the OS temp directory if left out. */
@@ -67,6 +74,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers, presenter }),
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
+      if (deps.guide) await api.register(guideRoutes({ guide: deps.guide, providers: deps.providers }));
       await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
       await api.register(
         importRoutes({

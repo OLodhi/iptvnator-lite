@@ -1,0 +1,119 @@
+import type { GuideStatus } from '@tv/shared';
+import type { Db } from '../db/db.ts';
+import type { ProviderService } from '../providers/service.ts';
+import { silentLog } from '../util/log.ts';
+import type { Log } from '../util/log.ts';
+import { redactUrl } from '../util/redact.ts';
+import { refreshGuide } from './ingest.ts';
+import { relinkGuide } from './match.ts';
+import type { GuideStore } from './store.ts';
+
+export interface GuideRunner {
+  /** Starts a refresh in the background; does nothing while one is already running for this provider. */
+  start(providerId: number): void;
+  status(providerId: number): GuideStatus;
+  /** Re-matches channels to guide channels from the stored guide, without fetching. */
+  relink(providerId: number): void;
+  running(providerId: number): boolean;
+  /** Aborts every running refresh and waits for them to settle. The abort is not recorded as a failure. */
+  stop(): Promise<void>;
+}
+
+export function createGuideRunner(deps: {
+  db: Db;
+  store: GuideStore;
+  providers: ProviderService;
+  visibleLiveItemIds: (providerId: number) => number[];
+  /** Milliseconds. */
+  now?: () => number;
+  log?: Log;
+}): GuideRunner {
+  const log = deps.log ?? silentLog;
+  const now = deps.now ?? Date.now;
+  const active = new Map<number, { controller: AbortController; done: Promise<void> }>();
+  let stopped = false;
+
+  const count = deps.db.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM guide_channels WHERE provider_id = @p AND generation = @g) AS channels,
+       (SELECT COUNT(*) FROM programmes WHERE provider_id = @p AND generation = @g) AS programmes,
+       (SELECT COUNT(*) FROM guide_links WHERE provider_id = @p) AS linkedChannels`,
+  );
+
+  const errorText = (err: unknown): string => redactUrl(err instanceof Error ? err.message : String(err));
+
+  async function run(providerId: number, signal: AbortSignal): Promise<void> {
+    const startedAt = now();
+    try {
+      let client;
+      try {
+        client = deps.providers.clientFor(providerId);
+      } catch (err) {
+        deps.store.recordFailure(providerId, errorText(err));
+        throw err;
+      }
+      const result = await refreshGuide({
+        db: deps.db,
+        store: deps.store,
+        client,
+        providerId,
+        timezone: deps.providers.account(providerId)?.timezone ?? null,
+        visibleLiveItemIds: () => deps.visibleLiveItemIds(providerId),
+        now,
+        log,
+        signal,
+      });
+      log.info({ providerId, ...result, durationMs: now() - startedAt }, 'guide refreshed');
+    } catch (err) {
+      if (signal.aborted) {
+        log.info({ providerId }, 'guide refresh aborted');
+        return;
+      }
+      // refreshGuide records the failure itself and rethrows the original error, which may name a URL.
+      log.warn({ providerId, err: errorText(err), durationMs: now() - startedAt }, 'guide refresh failed');
+    }
+  }
+
+  return {
+    start(providerId) {
+      if (stopped || active.has(providerId)) return;
+      const controller = new AbortController();
+      const done = run(providerId, controller.signal).finally(() => active.delete(providerId));
+      active.set(providerId, { controller, done });
+    },
+    running: (providerId) => active.has(providerId),
+    relink(providerId) {
+      relinkGuide(deps.db, providerId);
+    },
+    status(providerId) {
+      const state = deps.store.state(providerId);
+      const counts = count.get({ p: providerId, g: deps.store.currentGeneration(providerId) }) as {
+        channels: number;
+        programmes: number;
+        linkedChannels: number;
+      };
+      return {
+        state: active.has(providerId) ? 'running' : (state?.failures ?? 0) > 0 ? 'failed' : 'idle',
+        // The store keeps seconds; the API speaks milliseconds, like lastSyncedAt.
+        fetchedAt: state?.fetchedAt == null ? null : state.fetchedAt * 1000,
+        source: state?.source ?? null,
+        ...counts,
+        error: state?.lastError ?? null,
+      };
+    },
+    async stop() {
+      stopped = true;
+      const pending = [...active.values()];
+      for (const a of pending) a.controller.abort();
+      await Promise.allSettled(pending.map((a) => a.done));
+    },
+  };
+}
+
+/** What a catalogue sync calls when it finishes: re-match from the stored guide, and fetch one if there is none. */
+export function afterSync(guide: GuideRunner, store: GuideStore): (providerId: number) => void {
+  return (providerId) => {
+    guide.relink(providerId);
+    if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
+  };
+}
