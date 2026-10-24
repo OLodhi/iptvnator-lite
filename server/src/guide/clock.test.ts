@@ -2,6 +2,9 @@ import { expect, test } from 'vitest';
 import { formatCatchupStart, parseProviderLocal, resolveProviderTimezone, wallClockParts } from './clock.ts';
 
 const sec = (...a: Parameters<typeof Date.UTC>) => Date.UTC(...a) / 1000;
+// The repeated hour resolves to its second (standard-time) occurrence; the gap resolves to 01:30Z (03:30 local).
+const PIN_REPEATED = Date.UTC(2026, 9, 25, 1, 30) / 1000;
+const PIN_GAP = Date.UTC(2026, 2, 29, 1, 30) / 1000;
 
 test('formats the catch-up start in summer and winter', () => {
   expect(formatCatchupStart(sec(2026, 6, 1, 18, 0), 'Europe/London')).toBe('2026-07-01:19-00');
@@ -25,6 +28,27 @@ test('resolveProviderTimezone', () => {
   expect(resolveProviderTimezone({ time_now: '2026-10-24 20:30:00', timestamp_now: at })).toBe('UTC');
   expect(resolveProviderTimezone({ time_now: '2026-10-25 11:30:00', timestamp_now: at })).toBe('UTC+14:00');
   expect(resolveProviderTimezone({})).toBeNull();
+});
+
+test('DST: the wall clock around the autumn and spring changes', () => {
+  const tz = 'Europe/Amsterdam';
+  // Clocks go back at 01:00Z: both instants read 02:30, so the format cannot tell them apart.
+  expect(formatCatchupStart(sec(2026, 9, 25, 0, 30), tz)).toBe('2026-10-25:02-30');
+  expect(formatCatchupStart(sec(2026, 9, 25, 1, 30), tz)).toBe('2026-10-25:02-30');
+  expect(formatCatchupStart(sec(2026, 2, 29, 0, 30), tz)).toBe('2026-03-29:01-30');
+  expect(formatCatchupStart(sec(2026, 2, 29, 1, 30), tz)).toBe('2026-03-29:03-30');
+});
+
+test('DST: parseProviderLocal is deterministic in the repeated hour and the gap', () => {
+  const tz = 'Europe/Amsterdam';
+  expect(parseProviderLocal('2026-10-25 02:30:00', tz)).toBe(PIN_REPEATED);
+  expect(parseProviderLocal('2026-03-29 02:30:00', tz)).toBe(PIN_GAP);
+});
+
+test('a missing timezone (legacy account) formats in UTC', () => {
+  const legacy = undefined as unknown as null;
+  expect(formatCatchupStart(sec(2026, 6, 1, 18, 0), legacy)).toBe('2026-07-01:18-00');
+  expect(parseProviderLocal('2026-07-01 18:00:00', legacy)).toBe(sec(2026, 6, 1, 18, 0));
 });
 
 test('parseProviderLocal reads wall time in the zone', () => {

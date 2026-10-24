@@ -21,13 +21,16 @@ type RawRow = {
   last_synced_at: number | null;
 };
 
+// Accounts stored before the timezone field existed lack the key.
+const withTimezone = (a: XtreamAccount): XtreamAccount => ({ ...a, timezone: a.timezone ?? null });
+
 function toRow(r: RawRow): ProviderRow {
   return {
     id: r.id,
     kind: r.kind,
     name: r.name,
     config: JSON.parse(r.config) as XtreamCreds,
-    account: r.account ? (JSON.parse(r.account) as XtreamAccount) : null,
+    account: r.account ? withTimezone(JSON.parse(r.account) as XtreamAccount) : null,
     createdAt: r.created_at,
     lastSyncedAt: r.last_synced_at,
   };

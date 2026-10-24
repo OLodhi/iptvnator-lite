@@ -17,6 +17,15 @@ afterAll(async () => {
   await fake.close();
 });
 
+test('an account stored without a timezone reads back with timezone null', async () => {
+  const db = openDb(':memory:');
+  const providers = createProviderService({ db, userAgent: 'ua' });
+  const id = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
+  const legacy = { status: 'Active', maxConnections: 1, expiresAt: null, allowedOutputFormats: [] };
+  db.prepare('UPDATE providers SET account = ? WHERE id = ?').run(JSON.stringify(legacy), id);
+  expect(providers.account(id)?.timezone).toBeNull();
+});
+
 test('refreshAccount stores the new account', async () => {
   const db = openDb(':memory:');
   const providers = createProviderService({ db, userAgent: 'ua' });

@@ -18,7 +18,7 @@ function validZone(tz: string): boolean {
 
 /** The offset of a fixed-offset (or null = UTC) zone in seconds; null for a named IANA zone. */
 function fixedOffsetSec(tz: string | null): number | null {
-  if (tz === null) return 0;
+  if (tz == null) return 0; // null or a legacy account without the key
   const m = FIXED.exec(tz);
   if (!m) return null;
   if (!m[1]) return 0;

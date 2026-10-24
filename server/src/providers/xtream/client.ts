@@ -224,49 +224,64 @@ export function createXtreamClient(
       if (o.signal?.aborted) ac.abort();
       let idle = false;
       let timer = setTimeout(() => ac.abort(), timeoutMs); // time to headers
-      const touch = () => {
+      let source: Readable | undefined;
+      // One cleanup, run when the returned stream closes (or on a failed start), so nothing outlives it.
+      const cleanup = () => {
+        clearTimeout(timer);
+        o.signal?.removeEventListener('abort', onCallerAbort);
+        ac.abort();
+        source?.destroy();
+      };
+      const aborted = () => new DOMException('The guide request was aborted', 'AbortError');
+      let res: Response;
+      try {
+        res = await get('xmltv.php', new URLSearchParams({ username: creds.username, password: creds.password }), ac.signal);
+      } catch (e) {
+        cleanup();
+        throw o.signal?.aborted ? aborted() : e;
+      }
+      if (!res.body) {
+        cleanup();
+        throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an empty response');
+      }
+      clearTimeout(timer); // headers are in; the idle timer arms on the first read
+      const src = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+      source = src;
+      // The idle timer only runs while we are waiting on the provider, never while the consumer applies backpressure.
+      const arm = () => {
         clearTimeout(timer);
         timer = setTimeout(() => {
           idle = true;
           ac.abort();
         }, idleMs);
       };
-      const cleanup = () => {
-        clearTimeout(timer);
-        o.signal?.removeEventListener('abort', onCallerAbort);
-      };
-      let res: Response;
-      try {
-        res = await get('xmltv.php', new URLSearchParams({ username: creds.username, password: creds.password }), ac.signal);
-      } catch (e) {
-        cleanup();
-        throw e;
-      }
-      if (!res.body) {
-        cleanup();
-        throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned an empty response');
-      }
-      const source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
-      touch();
-      async function* body() {
-        try {
-          for await (const chunk of source) {
-            touch();
-            yield chunk;
-          }
-        } catch {
-          // Drop the underlying error: its text can embed the credential-bearing URL.
-          throw new ProviderError(
-            'PROVIDER_UNREACHABLE',
-            idle ? 'The provider connection timed out' : 'The connection to the provider was lost',
-          );
-        } finally {
+      const out = new Readable({
+        read() {
+          arm();
+          src.resume();
+        },
+        destroy(err, cb) {
           cleanup();
-          ac.abort();
-          source.destroy();
-        }
-      }
-      return Readable.from(body(), { objectMode: false });
+          cb(err);
+        },
+      });
+      src.on('data', (chunk: Buffer) => {
+        clearTimeout(timer);
+        if (out.push(chunk)) arm();
+        else src.pause();
+      });
+      src.on('end', () => {
+        clearTimeout(timer);
+        out.push(null);
+      });
+      src.on('error', () => {
+        // Drop the underlying error: its text can embed the credential-bearing URL.
+        if (idle) out.destroy(new ProviderError('PROVIDER_UNREACHABLE', 'The provider connection timed out'));
+        else if (o.signal?.aborted) out.destroy(aborted());
+        else out.destroy(new ProviderError('PROVIDER_UNREACHABLE', 'The connection to the provider was lost'));
+      });
+      src.pause();
+      return out;
     },
 
     async epgTable(streamId, o: { signal?: AbortSignal; tz?: string | null } = {}) {
@@ -275,19 +290,20 @@ export function createXtreamClient(
         const body = await json(action, { stream_id: streamId }, signal);
         const raw = isRecord(body) ? body.epg_listings : undefined;
         if (Array.isArray(raw)) return raw;
-        if (isRecord(raw)) return Object.values(raw).flatMap((v) => (Array.isArray(v) ? v : []));
+        // PHP sparse arrays arrive as an object of listings, or of arrays of listings.
+        if (isRecord(raw)) return Object.values(raw).flatMap((v) => (Array.isArray(v) ? v : [v]));
         return null;
       };
       let raw: unknown[] | null = null;
       try {
         raw = await attempt('get_simple_data_table');
       } catch (e) {
-        if (o.signal?.aborted) throw e;
+        if (o.signal?.aborted || (e instanceof ProviderError && e.code === 'PROVIDER_AUTH_FAILED')) throw e;
       }
       // The provider's own typo for the same action.
       raw ??= await attempt('get_simple_date_table');
-      if (raw === null) throw new ProviderError('PROVIDER_BAD_RESPONSE', 'The provider returned no listings');
-      return raw
+      // Valid JSON from both actions but no listings in either: the provider has none.
+      return (raw ?? [])
         .map((l) => decodeListing(l, o.tz ?? null))
         .filter((l): l is Listing => l !== null)
         .sort((a, b) => a.start - b.start);

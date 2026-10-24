@@ -226,6 +226,144 @@ describe('xtream guide and timeshift calls', () => {
     expect(c.timeshiftUrl('7', start, start + 3600, null, 'm3u8')).toMatch(/\/7\.m3u8$/);
   });
 
+  test('destroying an unread xmltv stream cleans up without an unhandled error', async () => {
+    const unhandled: unknown[] = [];
+    const record = (e: unknown) => void unhandled.push(e);
+    process.on('uncaughtException', record);
+    process.on('unhandledRejection', record);
+    let closed!: () => void;
+    const serverSawClose = new Promise<void>((r) => (closed = r));
+    try {
+      await withServer(
+        (_req, res) => {
+          res.writeHead(200);
+          res.write('<tv>');
+          res.on('close', closed);
+        },
+        async (url) => {
+          const stream = await clientFor(url).xmltv({ idleTimeoutMs: 100 });
+          stream.destroy();
+          await Promise.race([
+            serverSawClose,
+            new Promise((_, no) => setTimeout(() => no(new Error('server never saw the connection close')), 2000)),
+          ]);
+          await new Promise((r) => setTimeout(r, 300)); // past the idle timeout: nothing may fire
+        },
+      );
+    } finally {
+      process.off('uncaughtException', record);
+      process.off('unhandledRejection', record);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
+  test('xmltv does not idle out while the consumer applies backpressure', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200);
+        res.write('x'.repeat(2_000_000));
+        setTimeout(() => res.end('<tv/>'), 700);
+      },
+      async (url) => {
+        const stream = await clientFor(url, 5000).xmltv({ idleTimeoutMs: 200 });
+        await new Promise((r) => setTimeout(r, 500)); // not reading
+        let n = 0;
+        for await (const c of stream) n += (c as Buffer).length;
+        expect(n).toBe(2_000_005);
+      },
+    );
+  });
+
+  test('xmltv: a caller abort rejects as an abort and consumer errors pass through', async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200);
+        res.write('<tv>');
+      },
+      async (url) => {
+        const ac = new AbortController();
+        const stream = await clientFor(url, 5000).xmltv({ signal: ac.signal });
+        const failed = (async () => {
+          for await (const _ of stream) void _;
+        })();
+        setTimeout(() => ac.abort(), 50);
+        await expect(failed).rejects.toMatchObject({ name: 'AbortError' });
+
+        const mine = new Error('consumer says stop');
+        const stream2 = await clientFor(url, 5000).xmltv();
+        setTimeout(() => stream2.destroy(mine), 50);
+        await expect(
+          (async () => {
+            for await (const _ of stream2) void _;
+          })(),
+        ).rejects.toBe(mine);
+      },
+    );
+  });
+
+  test('epgTable returns [] when the provider has no listings', async () => {
+    await withFake({ mediaDir, listings: false }, async (f) => {
+      const c = createXtreamClient({ serverUrl: f.url, username: 'u', password: 'p' }, { userAgent });
+      expect(await c.epgTable('1')).toEqual([]);
+    });
+  });
+
+  test('epgTable does not retry after an auth failure', async () => {
+    let calls = 0;
+    await withServer(
+      (_req, res) => {
+        calls++;
+        res.writeHead(403).end();
+      },
+      async (url) => {
+        await expect(clientFor(url).epgTable('1')).rejects.toMatchObject({ code: 'PROVIDER_AUTH_FAILED' });
+        expect(calls).toBe(1);
+      },
+    );
+  });
+
+  test('epgTable accepts epg_listings as an object of listings (PHP sparse array)', async () => {
+    const l = (n: number) => ({ title: 'Some show', start_timestamp: String(n), stop_timestamp: String(n + 60) });
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200).end(JSON.stringify({ epg_listings: { '3': l(300), '0': l(100) } }));
+      },
+      async (url) => {
+        expect((await clientFor(url).epgTable('1')).map((x) => x.start)).toEqual([100, 300]);
+      },
+    );
+  });
+
+  test('credentials never leak from the idle, unreachable and 500 paths', async () => {
+    const creds = { username: 'bob-secret-user', password: 'hunter2-secret-pw' };
+    const check = (err: { message: string; stack?: string }) => {
+      for (const s of Object.values(creds)) {
+        expect(err.message).not.toContain(s);
+        expect(err.stack ?? '').not.toContain(s);
+      }
+    };
+    const at = (serverUrl: string, timeoutMs = 2000) => createXtreamClient({ serverUrl, ...creds }, { userAgent, timeoutMs });
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200);
+        res.write('<tv>');
+      },
+      async (url) => {
+        const err = await text(await at(url).xmltv({ idleTimeoutMs: 100 })).catch((e) => e);
+        expect(err).toMatchObject({ code: 'PROVIDER_UNREACHABLE' });
+        check(err);
+      },
+    );
+    const down = await at('http://127.0.0.1:1').xmltv().catch((e) => e);
+    expect(down).toMatchObject({ code: 'PROVIDER_UNREACHABLE' });
+    check(down);
+    await withFake({ mediaDir, username: creds.username, password: creds.password, guide: 'error' }, async (f) => {
+      const err = await at(f.url).xmltv().catch((e) => e);
+      expect(err).toMatchObject({ code: 'PROVIDER_BAD_RESPONSE' });
+      check(err);
+    });
+  });
+
   test('credentials never appear in thrown errors', async () => {
     await withFake({ mediaDir, username: 'alice-secret', password: 'p4ss-secret' }, async (f) => {
       const c = createXtreamClient({ serverUrl: f.url, username: 'alice-secret', password: 'wrong-pass' }, { userAgent });
