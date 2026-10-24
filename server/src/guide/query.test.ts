@@ -202,7 +202,8 @@ describe('guide queries', () => {
     item(2, 'orphan', 3);
     // Generation 1 holds rows that the current generation 2 does not.
     seed(
-      [prog('a', NOW + HOUR, NOW + 2 * HOUR, 'old-range'), prog('a', NOW - 2 * HOUR, NOW - HOUR, 'old-past'), prog('orphan', 10, 20, 'old-orphan')],
+      [prog('a', NOW + HOUR, NOW + 2 * HOUR, 'old-range'), prog('a', NOW - 2 * HOUR, NOW - HOUR, 'old-past'), prog('orphan', 10, 20, 'old-orphan'),
+        prog('a', NOW + 8 * HOUR, NOW + 9 * HOUR, 'old-late')],
       [{ key: 'old-chan', name: 'Old' }],
     );
     seed([prog('a', NOW + 3 * HOUR, NOW + 4 * HOUR, 'new-range'), prog('a', NOW - 4 * HOUR, NOW - 3 * HOUR, 'new-past')], [{ key: 'new-chan', name: 'New' }]);
@@ -276,9 +277,12 @@ describe('guide queries', () => {
     const ids = Array.from({ length: N }, (_, i) => i + 1);
     const time = (f: () => unknown): number => {
       f();
-      const s = performance.now();
-      f();
-      return performance.now() - s;
+      const runs = Array.from({ length: 5 }, () => {
+        const s = performance.now();
+        f();
+        return performance.now() - s;
+      });
+      return runs.sort((a, b) => a - b)[2]!; // the median, so one GC pause cannot fail the guard
     };
     expect(time(() => q.whatsOn({ providerId: P, order: ids, mode: 'now', nowSec: NOW, cursor: null, limit: 500 }))).toBeLessThan(50);
     expect(time(() => q.programmesFor(P, ids.slice(0, 30), NOW, NOW + 6 * HOUR))).toBeLessThan(50);
