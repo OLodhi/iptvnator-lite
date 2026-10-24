@@ -3,73 +3,51 @@
   import Hls from 'hls.js';
   import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
-  import type { PlayRequest, PlayResponse } from '@tv/shared';
+  import type { PlayResponse } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { getClientId } from '$lib/clientId';
   import { messageFor } from '$lib/messages';
-  import { attachStream, type StreamHandle } from '$lib/player/attach';
+  import { attachStream } from '$lib/player/attach';
+  import { createPlayback } from '$lib/player/playback';
   import { releaseSession, startHeartbeat } from '$lib/session';
 
   let video = $state<HTMLVideoElement>();
   let error = $state('');
   let stopped = $state(false);
 
-  let handle: StreamHandle | undefined;
-  let stopHeartbeat: (() => void) | undefined;
-  let active: { sessionId: string; clientId: string; vod: boolean } | undefined;
-
-  function teardown() {
-    stopHeartbeat?.();
-    stopHeartbeat = undefined;
-    handle?.destroy();
-    handle = undefined;
-    if (active) {
-      void releaseSession(active.sessionId, active.clientId);
-      active = undefined;
+  const playback = createPlayback({
+    play: (req, signal) => api<PlayResponse>('/api/play', { method: 'POST', body: JSON.stringify(req), signal }),
+    releaseSession: (sessionId, clientId) => releaseSession(sessionId, clientId),
+    startHeartbeat: (sessionId, clientId, opts) => startHeartbeat(sessionId, clientId, opts),
+    attachStream: (v, url) => attachStream(v, url, { Hls }),
+    clientId: getClientId,
+    onGone: () => {
+      stopped = true;
+    },
+    onError: (err) => {
+      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     }
-  }
+  });
 
-  async function start(startAtSec: number) {
+  function start(startAtSec: number) {
+    if (!video) return;
     error = '';
     stopped = false;
     const q = page.url.searchParams;
-    const itemId = Number(q.get('item'));
-    const episode = q.get('episode');
-    const clientId = getClientId();
-    const body: PlayRequest = { itemId, clientId, startAtSec };
-    if (episode) body.episodeRemoteId = episode;
-    try {
-      const res = await api<PlayResponse>('/api/play', { method: 'POST', body: JSON.stringify(body) });
-      if (!video) return;
-      active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null };
-      handle = attachStream(video, res.url, { Hls });
-      stopHeartbeat = startHeartbeat(res.sessionId, clientId, {
-        onGone: () => {
-          stopped = true;
-        }
-      });
-      void video.play().catch(() => {
-        // autoplay can be refused; the controls are there
-      });
-    } catch (err) {
-      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
-    }
+    const episodeRemoteId = q.get('episode') ?? undefined;
+    void playback.start({ itemId: Number(q.get('item')), episodeRemoteId, startAtSec }, video);
   }
 
   function restart() {
-    const resumeAt = active?.vod && video ? Math.floor(video.currentTime) : 0;
-    teardown();
-    void start(resumeAt);
+    start(playback.isVod() && video ? Math.floor(video.currentTime) : 0);
   }
 
-  onMount(() => {
-    void start(Number(page.url.searchParams.get('t')) || 0);
-  });
-  beforeNavigate(teardown);
-  onDestroy(teardown);
+  onMount(() => start(Number(page.url.searchParams.get('t')) || 0));
+  beforeNavigate(playback.teardown);
+  onDestroy(playback.teardown);
 </script>
 
-<svelte:window onpagehide={teardown} />
+<svelte:window onpagehide={playback.teardown} />
 
 <p><button class="stopped" onclick={() => history.back()}>‹ Back</button></p>
 
