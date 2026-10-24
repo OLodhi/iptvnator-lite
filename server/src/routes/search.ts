@@ -52,9 +52,10 @@ export const searchRoutes = (deps: {
         const needle = fold(q);
         for (const kind of KINDS) {
           const resolution = deps.curation.resolution(provider.id, kind, userId);
-          const { visibleIds, displayName } = resolution;
+          const { visibleIds, allVisible, displayName } = resolution;
           const favourites = new Set(deps.personal.favouriteItemIds(userId, provider.id, kind));
-          results[kind] = deps.presenter.itemsWith(resolution, favourites, deps.search.items(provider.id, kind, q, visibleIds, limit));
+          const found = deps.search.items(provider.id, kind, q, allVisible ? 'all' : visibleIds, limit);
+          results[kind] = deps.presenter.itemsWith(resolution, favourites, found);
           const pinned = new Set(deps.personal.pinnedCategoryIds(userId, provider.id, kind));
           for (const c of deps.catalogue.listCategories(provider.id, kind)) {
             const name = displayName(c.name);

@@ -16,6 +16,8 @@ const LIVE_TAGS = ['UK| ', 'US| ', 'AR| '];
 const VOD_TAGS = ['|EN| ', '|FR| '];
 const TOPICS = ['Sports', 'News', 'Movies', 'Kids', 'Music', 'Documentary', 'Drama', 'Comedy', 'Action', 'Family'];
 const WORDS = ['Alpha', 'Bravo', 'Cedar', 'Delta', 'Ember', 'Falcon', 'Garnet', 'Harbor', 'Indigo', 'Juniper', 'Kestrel', 'Lumen'];
+// Like real titles, a third start with "The" and a third with "A", so common search words match a large share.
+const ARTICLES = ['The ', 'A ', ''];
 
 function makeKind(count: number, categories: number, tags: string[], label: string): FakeKind {
   const cats: FakeCategory[] = [];
@@ -30,7 +32,7 @@ function makeKind(count: number, categories: number, tags: string[], label: stri
     const tag = cat && /^(\w{2}\| |\|\w{2}\| )/.exec(cat.name)?.[0];
     items.push({
       id: i + 1,
-      name: `${tag ?? ''}${label} ${WORDS[i % WORDS.length]} ${i + 1}`,
+      name: `${tag ?? ''}${ARTICLES[i % ARTICLES.length]}${label} ${WORDS[i % WORDS.length]} ${i + 1}`,
       categoryId: cat?.id ?? '1',
     });
   }

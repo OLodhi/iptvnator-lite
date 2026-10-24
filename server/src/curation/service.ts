@@ -8,7 +8,13 @@ const NONE_ID = '__none__';
 const HINT_SIZE = 3;
 
 /** What a browse request needs about a kind, worked out in one pass. */
-export type Resolution = { visibleIds: Set<number>; displayName: (name: string) => string; newCount: number };
+export type Resolution = {
+  visibleIds: Set<number>;
+  /** The kind has categories and every one of them is visible. */
+  allVisible: boolean;
+  displayName: (name: string) => string;
+  newCount: number;
+};
 
 export interface CurationService {
   view(providerId: number, kind: Kind, userId: number): CurationView;
@@ -133,6 +139,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
     const resolved = resolve(providerId, kind, userId, rows);
     return {
       visibleIds: new Set(resolved.filter((c) => c.visible).map((c) => c.id)),
+      allVisible: resolved.length > 0 && resolved.every((c) => c.visible),
       displayName: nameFn(rows[0]?.pattern ?? null, resolved),
       newCount: resolved.filter((c) => c.isNew).length,
     };

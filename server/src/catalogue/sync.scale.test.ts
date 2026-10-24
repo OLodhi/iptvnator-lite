@@ -1,46 +1,27 @@
-import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { openDb } from '../db/db.ts';
 import { createProviderService } from '../providers/service.ts';
 import { createXtreamClient } from '../providers/xtream/client.ts';
 import type { XtreamClient } from '../providers/xtream/client.ts';
+import { startGeneratedFake } from '../testing/generatedFake.ts';
 import { syncCatalogue } from './sync.ts';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const fakeScript = path.resolve(here, '../../../tools/fake-xtream/src/server.ts');
-const mediaDir = path.resolve(here, '../../../tools/fake-xtream/media');
-
-let child: ChildProcess;
+let fake: Awaited<ReturnType<typeof startGeneratedFake>>;
 let url: string;
 let tmp: string;
 
-// The fake runs in its own process so its catalogue and JSON serialisation stay out of our RSS.
 beforeAll(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-scale-'));
-  child = spawn(
-    process.execPath,
-    [fakeScript, '--port', '0', '--media', mediaDir, '--generate', '50000,200000,50000,400'],
-    { stdio: ['ignore', 'pipe', 'inherit'] },
-  );
-  url = await new Promise<string>((resolve, reject) => {
-    let buf = '';
-    child.stdout!.on('data', (d: Buffer) => {
-      buf += d.toString();
-      const m = /listening on (http:\/\/\S+)/.exec(buf);
-      if (m) resolve(m[1]!);
-    });
-    child.once('exit', (code) => reject(new Error(`fake exited early (${code})`)));
-  });
+  fake = await startGeneratedFake('50000,200000,50000,400');
+  url = fake.url;
 }, 60_000);
 
 afterAll(() => {
-  child?.kill();
+  fake?.stop();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
