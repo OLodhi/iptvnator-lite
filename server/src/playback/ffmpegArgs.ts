@@ -25,7 +25,7 @@ function outPath(dir: string, name: string): string {
   return join(dir, name).replaceAll('\\', '/');
 }
 
-function isHlsUrl(url: string): boolean {
+export function isHlsUrl(url: string): boolean {
   try {
     return new URL(url).pathname.toLowerCase().endsWith('.m3u8');
   } catch {

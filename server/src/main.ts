@@ -12,6 +12,7 @@ import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
 import { createLogoCache } from './logos/cache.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
+import { startUpstreamRelay } from './playback/relay.ts';
 import { createSessionManager, defaultIsReady } from './playback/sessions.ts';
 import { spawnFfmpeg } from './playback/spawn.ts';
 import { createProviderService } from './providers/service.ts';
@@ -33,6 +34,7 @@ sync = createSyncRunner({ db, providers, log });
 const catalogue = createCatalogueRepo(db);
 const seriesInfo = createSeriesInfoCache({ providers, catalogue });
 const prober = createProber({ ffprobePath: config.ffprobePath, db });
+const relay = await startUpstreamRelay({ log });
 const sessions = createSessionManager({
   ffmpegPath: config.ffmpegPath,
   transcodeDir: config.transcodeDir,
@@ -49,6 +51,7 @@ const sessions = createSessionManager({
   stallTimeoutMs: 20_000,
   maxRestarts: 3,
   log,
+  relay,
 });
 const curation = createCurationService({ db, now: Date.now });
 const personal = createPersonalService({ db, now: Date.now });
@@ -68,6 +71,7 @@ async function shutdown(): Promise<void> {
   try {
     // Together: closing the app aborts direct streams, and stopAll ends every FFmpeg.
     await Promise.allSettled([app.close(), sessions.stopAll()]);
+    await relay.close();
   } finally {
     db.close();
     process.exit(0);

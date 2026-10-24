@@ -26,6 +26,8 @@ import { createCurationService } from '../curation/service.ts';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
 import { createProber } from '../playback/probe.ts';
+import { startUpstreamRelay } from '../playback/relay.ts';
+import type { UpstreamRelay } from '../playback/relay.ts';
 import { createSessionManager, defaultIsReady, PlaybackError } from '../playback/sessions.ts';
 import type { SessionManager } from '../playback/sessions.ts';
 import { resolveSourceUrl } from '../playback/sourceUrl.ts';
@@ -527,12 +529,14 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   };
   const playing: { sessionId: string; clientId: string }[] = [];
   const scratch = mkdtempSync(join(tmpdir(), 'tv-playback-'));
+  let relay: UpstreamRelay;
   let w: World;
 
   beforeAll(async () => {
     if (!existsSync(join(mediaDir, 'hevc.mkv'))) {
       throw new Error('Fake media is missing. Run: npm run make-media -w @tv/fake-xtream (needs TV_FFMPEG_PATH)');
     }
+    relay = await startUpstreamRelay({ log });
     w = await makeWorld(
       (db, providers) => {
         const prober = createProber({ ffprobePath: config.ffprobePath, db });
@@ -552,6 +556,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
           stallTimeoutMs: 20_000,
           maxRestarts: 3,
           log,
+          relay,
         });
       },
       { config, log },
@@ -565,16 +570,19 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   afterAll(async () => {
     await w?.sessions.stopAll(); // no FFmpeg outlives the suite
     await w?.app.close();
+    await relay?.close();
     rmSync(scratch, { recursive: true, force: true });
   });
 
-  async function play(body: { itemId: number; clientId: string; episodeRemoteId?: string }) {
+  type Play = { itemId: number; clientId: string; episodeRemoteId?: string; startAtSec?: number };
+
+  async function play(body: Play) {
     const res = await playBody(w, body);
     if (res.statusCode === 200) playing.push({ sessionId: res.json().sessionId, clientId: body.clientId });
     return res;
   }
 
-  async function playOk(body: { itemId: number; clientId: string; episodeRemoteId?: string }): Promise<PlayResponse> {
+  async function playOk(body: Play): Promise<PlayResponse> {
     const res = await play(body);
     expect(res.statusCode, res.body).toBe(200);
     return res.json();
@@ -759,6 +767,26 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     await drain(held.res);
   });
 
+  test('resumes an MKV movie at startAtSec on a one-connection provider', async () => {
+    const r = await playOk({ itemId: w.itemId('movie', 1), clientId: 'A', startAtSec: 29 });
+    expect(r).toMatchObject({ mode: 'hls', startAtSec: 29 });
+    // FFmpeg remuxes the rest of the title within seconds; the playlist ends once it has.
+    let playlist = '';
+    const giveUpAt = Date.now() + 20_000;
+    while (!playlist.includes('#EXT-X-ENDLIST')) {
+      expect(Date.now(), `the playlist did not end within 20 s:\n${playlist}`).toBeLessThan(giveUpAt);
+      await new Promise((ok) => setTimeout(ok, 250));
+      const pl = await w.app.inject(r.url);
+      expect(pl.statusCode).toBe(200);
+      playlist = pl.body;
+    }
+    const seconds = [...playlist.matchAll(/^#EXTINF:([\d.]+),/gm)].reduce((sum, m) => sum + Number(m[1]), 0);
+    // 0:29 to the end of the 60 s title. A failed seek gives the whole title from 0:00 instead.
+    expect(seconds).toBeGreaterThanOrEqual(28);
+    expect(seconds).toBeLessThanOrEqual(34);
+    expect(logs.filter((l) => l.includes(r.sessionId) && /HTTP error 403/.test(l))).toEqual([]);
+  });
+
   test('dead channel fails cleanly', async () => {
     const res = await play({ itemId: w.itemId('live', 999), clientId: 'A' });
     expect(res.statusCode).toBe(502);
@@ -889,10 +917,12 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
     warn: (o: object, m: string) => void lines.push(JSON.stringify({ m, ...o })),
   };
   let pacedFake: FakeXtream;
+  let relay: UpstreamRelay;
   let w: World;
 
   beforeAll(async () => {
     pacedFake = await startFakeXtream({ mediaDir, catalogue: smallCatalogue(), paced: true });
+    relay = await startUpstreamRelay({ log });
     w = await makeWorld(
       (db, providers) => {
         const prober = createProber({ ffprobePath: config.ffprobePath, db });
@@ -912,6 +942,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
           stallTimeoutMs: 20_000,
           maxRestarts: 3,
           log,
+          relay,
         });
       },
       { config, log, providerUrl: pacedFake.url },
@@ -921,6 +952,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
   afterAll(async () => {
     await w?.sessions.stopAll();
     await w?.app.close();
+    await relay?.close();
     await pacedFake?.close();
   });
 

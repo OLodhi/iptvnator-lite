@@ -168,6 +168,18 @@ function harness(overrides: Partial<SessionManagerDeps> = {}) {
   };
 }
 
+const RELAY_URL = 'http://127.0.0.1:9/0f8fad5b-d9cb-469f-a165-70867728950e/1.mkv';
+
+/** A relay stand-in: `onEvent` hears each register and unregister, in order with the children's events. */
+function stubRelay(onEvent: (event: string) => void) {
+  const unregister = vi.fn(async () => onEvent('relay:unregister'));
+  const register = vi.fn((_source: { url: string; userAgent: string }) => {
+    onEvent('relay:register');
+    return { url: RELAY_URL, unregister };
+  });
+  return { register, unregister };
+}
+
 const outDirOf = (m: SessionManager, sessionId: string) => dirname(m.resolveFile(sessionId, 'index.m3u8')!);
 /** Side-effect-free liveness check (touch() would re-add a viewer). */
 const alive = (m: SessionManager, sessionId: string) =>
@@ -539,6 +551,65 @@ describe('session manager', () => {
     await flush();
     expect(h.logs.some((l) => l.m === 'ffmpeg finished')).toBe(true);
     expect(h.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  test('non-HLS VOD reads the provider through the relay; live and HLS inputs do not', async () => {
+    const relay = stubRelay(() => {});
+    const HLS_MOVIE: ProbeResult = { ...MKV_MOVIE, formatName: 'hls' };
+    const h = harness({
+      relay,
+      probe: async (url) =>
+        fresh(url.endsWith('.mkv') ? MKV_MOVIE : url.endsWith('.ts') ? LIVE_TS : url.includes('/movie/') ? HLS_MOVIE : LIVE_HLS),
+    });
+    const input = (n: number) => argAfter(h.children[n]!.args, '-i');
+
+    const mkv = movie(1, 'A');
+    await h.m.start(mkv);
+    expect(input(0)).toBe(RELAY_URL);
+    expect(JSON.stringify(h.children[0]!.args)).not.toContain(mkv.sourceUrl);
+    expect(relay.register).toHaveBeenCalledWith({ url: mkv.sourceUrl, userAgent: UA });
+
+    const liveTs = { ...live(2, 'B'), sourceUrl: 'http://provider.test/live/user/secret/2.ts' };
+    await h.m.start(liveTs);
+    expect(input(1)).toBe(liveTs.sourceUrl);
+
+    // HLS by its URL, or behind another extension as ffprobe found: FFmpeg reads it over one connection already.
+    const hlsByUrl = { ...movie(3, 'C'), sourceUrl: 'http://provider.test/movie/user/secret/3.m3u8' };
+    const hlsByFormat = { ...movie(4, 'D'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
+    await h.m.start(hlsByUrl);
+    await h.m.start(hlsByFormat);
+    expect(input(2)).toBe(hlsByUrl.sourceUrl);
+    expect(input(3)).toBe(hlsByFormat.sourceUrl);
+    expect(relay.register).toHaveBeenCalledTimes(1);
+  });
+
+  test('the relay is registered once per session and released when it stops', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    h = harness({ relay });
+
+    // Registered before the first launch, and released only once FFmpeg has exited.
+    const a = await h.m.start(movie(1, 'A'));
+    const released = h.m.release(a.sessionId, 'A');
+    await vi.advanceTimersByTimeAsync(100);
+    await released;
+    expect(h.events).toEqual(['relay:register', 'spawn:1', 'kill:1', 'exit:1', 'relay:unregister']);
+    expect(relay.register).toHaveBeenCalledTimes(1);
+    expect(relay.unregister).toHaveBeenCalledTimes(1);
+
+    // A VOD FFmpeg that exits early is not relaunched, but the session goes on serving what it wrote:
+    // the registration lasts as long as the session, not as long as FFmpeg.
+    h.events.length = 0;
+    const b = await h.m.start(movie(1, 'B'));
+    h.children[1]!.exit(1);
+    await flush();
+    expect(h.logs.some((l) => l.m === 'ffmpeg exited early')).toBe(true);
+    expect(alive(h.m, b.sessionId)).toBe(true);
+    expect(relay.unregister).toHaveBeenCalledTimes(1); // still only A's
+    await h.m.release(b.sessionId, 'B');
+    expect(h.events).toEqual(['relay:register', 'spawn:2', 'exit:2', 'relay:unregister']);
+    expect(relay.register).toHaveBeenCalledTimes(2);
+    expect(relay.unregister).toHaveBeenCalledTimes(2);
   });
 
   test('logs ffmpeg stderr and urls with credentials redacted', async () => {

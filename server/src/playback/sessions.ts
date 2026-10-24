@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PlayResponse } from '@tv/shared';
 import { redactUrl } from '../util/redact.ts';
-import { buildFfmpegArgs } from './ffmpegArgs.ts';
+import { buildFfmpegArgs, isHlsUrl } from './ffmpegArgs.ts';
 import { choosePlan } from './policy.ts';
 import type { HlsPlan } from './policy.ts';
 import type { ProbeResult, Prober } from './probe.ts';
+import type { UpstreamRelay } from './relay.ts';
 
 export type ChildLike = {
   pid?: number;
@@ -38,6 +39,8 @@ export type SessionManagerDeps = {
   maxRestarts: number /* 3 consecutive */;
   stallTimeoutMs: number /* 20_000 without a new live segment */;
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
+  /** FFmpeg reads non-HLS VOD through it, so a seek never opens a second provider connection. Left out, it reads the provider. */
+  relay?: Pick<UpstreamRelay, 'register'>;
 };
 
 export type StartRequest = {
@@ -159,6 +162,7 @@ type Session = {
   outDir: string | null;
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
+  relayed: { url: string; unregister(): Promise<void> } | null; // what FFmpeg reads instead of sourceUrl, for the whole session
   probing: Promise<void> | null; // an ffprobe that is still connected
   cachedProbes: string[]; // URLs whose probe results came from the cache (R34)
   restarts: number; // consecutive failures
@@ -270,6 +274,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     s.prunes = []; // the whole directory is about to go
     const stopped = (async () => {
       await killAndWait(s);
+      await s.relayed?.unregister(); // the provider connection FFmpeg read through is closed
       if (s.outDir) await removeDir(s.outDir);
       log.info({ sessionId: s.id, reason }, 'session stopped');
     })();
@@ -302,7 +307,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   function launch(s: Session, startNumber: number): void {
     const args = buildFfmpegArgs({
-      url: s.sourceUrl,
+      url: s.relayed?.url ?? s.sourceUrl,
       userAgent: s.userAgent,
       plan: s.plan!,
       inputFormat: s.inputFormat,
@@ -553,6 +558,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         s.plan = plan;
         s.outDir = join(deps.transcodeDir, s.id);
         mkdirSync(s.outDir, { recursive: true });
+        // Through the relay for the whole session. Not for live, which never seeks, nor for HLS, which is already
+        // read over one connection (-http_multiple 0) and whose relative segment URLs would not resolve through it.
+        // The probe above stays direct: it has finished before FFmpeg starts.
+        if (deps.relay && s.kind !== 'live' && !isHlsUrl(s.sourceUrl) && !s.inputFormat.includes('hls')) {
+          s.relayed = deps.relay.register({ url: s.sourceUrl, userAgent: s.userAgent });
+        }
         launch(s, 0);
         await waitUntilReady(s, deadline.expired);
       }
@@ -658,6 +669,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       outDir: null,
       child: null,
       exit: null,
+      relayed: null,
       probing: null,
       cachedProbes: [],
       restarts: 0,
