@@ -1,15 +1,29 @@
 <script lang="ts">
   import type { CatalogItem } from '@tv/shared';
+  import { longpress } from '$lib/actions/longpress';
   import Artwork from './Artwork.svelte';
+  import NowLine from './NowLine.svelte';
 
-  type Props = { item: CatalogItem; onToggleFavourite: (item: CatalogItem) => void };
-  let { item, onToggleFavourite }: Props = $props();
+  type Props = {
+    item: CatalogItem;
+    onToggleFavourite: (item: CatalogItem) => void;
+    onLongPress?: (item: CatalogItem) => void;
+  };
+  let { item, onToggleFavourite, onLongPress }: Props = $props();
 </script>
 
 <div class="channel-row">
-  <a class="main" href={`/watch?item=${item.id}`}>
+  <a
+    class="main"
+    href={`/watch?item=${item.id}`}
+    draggable="false"
+    use:longpress={{ onLongPress: () => onLongPress?.(item) }}
+  >
     <span class="logo"><Artwork name={item.displayName} src={item.logoUrl} fit="contain" /></span>
-    <span class="name">{item.displayName}</span>
+    <span class="text">
+      <span class="name">{item.displayName}</span>
+      {#if item.now}<NowLine now={item.now} />{/if}
+    </span>
   </a>
   <button
     type="button"
@@ -50,9 +64,12 @@
     overflow: hidden;
     background: var(--surface);
   }
-  .name {
+  .text {
     flex: 1;
     min-width: 0;
+  }
+  .name {
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -150,7 +150,7 @@ input {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   background: var(--surface);
   border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom);
@@ -164,7 +164,7 @@ input {
   color: var(--muted);
   text-decoration: none;
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 11px;
 }
 
 .tabbar a[aria-current='page'] {

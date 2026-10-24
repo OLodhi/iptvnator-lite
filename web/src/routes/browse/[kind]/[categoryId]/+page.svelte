@@ -9,6 +9,7 @@
   import { posterRowHeight } from '$lib/browseModel';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
   import ChannelRow from '$lib/components/ChannelRow.svelte';
+  import GuideSourceSheet from '$lib/components/GuideSourceSheet.svelte';
   import PosterCell from '$lib/components/PosterCell.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
 
@@ -21,6 +22,7 @@
   let gridWidth = $state(0);
   let loadFailed = $state(false);
   let sheetFor = $state<CatalogItem | null>(null);
+  let mapFor = $state<CatalogItem | null>(null);
   let title = $state('');
   let seq = 0;
 
@@ -101,7 +103,9 @@
   const sheetActions = $derived.by(() => {
     const target = sheetFor;
     if (!target) return [];
-    return [{ label: target.favourite ? 'Unfavourite' : 'Favourite', run: () => void toggleFavourite(target) }];
+    const actions: { label: string; run: () => void }[] = [{ label: target.favourite ? 'Unfavourite' : 'Favourite', run: () => void toggleFavourite(target) }];
+    if (target.kind === 'live') actions.push({ label: 'Map guide channel…', run: () => (mapFor = target) });
+    return actions;
   });
 </script>
 
@@ -119,7 +123,7 @@
     {#if kind === 'live'}
       <VirtualList {items} rowHeight={64} onEnd={loadMore}>
         {#snippet row(item)}
-          <ChannelRow {item} onToggleFavourite={toggleFavourite} />
+          <ChannelRow {item} onToggleFavourite={toggleFavourite} onLongPress={(i) => (sheetFor = i)} />
         {/snippet}
       </VirtualList>
     {:else}
@@ -147,6 +151,13 @@
   title={sheetFor?.displayName ?? ''}
   actions={sheetActions}
   onClose={() => (sheetFor = null)}
+/>
+
+<GuideSourceSheet
+  open={mapFor !== null}
+  item={mapFor}
+  onClose={() => (mapFor = null)}
+  onMapped={() => void load(categoryId, null)}
 />
 
 <style>
