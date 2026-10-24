@@ -426,10 +426,21 @@ describe('playback routes', () => {
     const origin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
     vi.spyOn(sessions, 'touch').mockReturnValue(true);
     vi.spyOn(sessions, 'directSource').mockReturnValue({ url: `${origin}/movie/user/secret/5.mp4`, userAgent: UA });
+    // A long wait after a refusal, so B always arrives while A is still waiting.
+    const proxy = Fastify();
+    const { catalogue, seriesInfo, providers, db } = w;
+    const personal = createPersonalService({ db, now: Date.now });
+    const log = collectingLog(routeLogs);
+    await proxy.register(
+      playbackRoutes({ catalogue, seriesInfo, providers, sessions, personal, log, userAgent: UA, retryDelaysMs: [2000, 2000] }),
+      { prefix: '/api' },
+    );
+    await proxy.listen({ port: 0, host: '127.0.0.1' });
+    const proxyOrigin = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
     try {
-      const a = viewer(`${w.origin}/api/sessions/sess/A/direct`);
-      await vi.waitFor(() => expect(requests).toBe(1)); // A was refused and waits 250 ms before trying again
-      const b = await getAll(`${w.origin}/api/sessions/sess/A/direct`, { range: 'bytes=0-3' });
+      const a = viewer(`${proxyOrigin}/api/sessions/sess/A/direct`);
+      await vi.waitFor(() => expect(requests).toBe(1)); // A was refused and waits 2 s before trying again
+      const b = await getAll(`${proxyOrigin}/api/sessions/sess/A/direct`, { range: 'bytes=0-3' });
       expect(b.status).toBe(206);
       expect(b.body.toString()).toBe('abcd');
       // A's connection was cut: not answered 404 (its session is still there) or 502 (the provider did nothing wrong).
@@ -437,6 +448,7 @@ describe('playback routes', () => {
       expect(requests).toBe(2); // and A never tried again
       expect(routeLogs.filter((l) => l.m.startsWith('direct stream:'))).toEqual([]);
     } finally {
+      await proxy.close();
       await new Promise<void>((ok) => {
         upstream.closeAllConnections();
         upstream.close(() => ok());

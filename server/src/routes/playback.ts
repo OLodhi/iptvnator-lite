@@ -28,6 +28,8 @@ export type PlaybackRouteDeps = {
   userAgent: string;
   /** How often a streaming direct response re-checks that its session is still running. */
   touchIntervalMs?: number;
+  /** The direct proxy's waits before retrying a provider refusal; RETRY_DELAYS_MS if left out. */
+  retryDelaysMs?: readonly number[];
 };
 
 type SessionParams = { id: string; clientId: string };
@@ -256,7 +258,8 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
       const headersTimer = setTimeout(() => upstream.abort(), UPSTREAM_HEADERS_TIMEOUT_MS);
       let res: Response;
       try {
-        res = await fetchWithLimitRetry(source.url, { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal });
+        const init = { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal };
+        res = await fetchWithLimitRetry(source.url, init, deps.retryDelaysMs);
       } catch (err) {
         done();
         return endEarly('The provider did not answer', () =>
