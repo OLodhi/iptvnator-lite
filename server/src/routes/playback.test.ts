@@ -161,6 +161,7 @@ describe('playback routes', () => {
       kind: 'live',
       contentKey: 'live:1',
       sourceUrl: `${fake.url}/live/u/p/1.m3u8`, // the fake allows m3u8, so it is preferred
+      fallbackSourceUrl: `${fake.url}/live/u/p/1.ts`, // and ts too, for a playlist that turns out to be finite (R29)
       userAgent: UA,
       startAtSec: 0,
       clientId: 'A',
@@ -475,18 +476,39 @@ describe('resolveSourceUrl', () => {
     const req = { itemId: 5, clientId: 'A' };
     const live = item({ kind: 'live' });
     const m3u8 = await resolveSourceUrl(deps(live, { allowedOutputFormats: ['ts', 'm3u8'] }), req);
-    expect(m3u8).toEqual({ providerId: 3, kind: 'live', contentKey: 'live:77', sourceUrl: 'live/77.m3u8' });
+    expect(m3u8).toStrictEqual({
+      providerId: 3,
+      kind: 'live',
+      contentKey: 'live:77',
+      sourceUrl: 'live/77.m3u8',
+      fallbackSourceUrl: 'live/77.ts', // R29: in case the playlist turns out to be finite
+    });
     expect((await resolveSourceUrl(deps(live, { allowedOutputFormats: ['ts'] }), req)).sourceUrl).toBe('live/77.ts');
     expect((await resolveSourceUrl(deps(live, null), req)).sourceUrl).toBe('live/77.ts');
   });
 
+  test('a live fallback is offered only for an m3u8 primary when the provider also allows ts', async () => {
+    const req = { itemId: 5, clientId: 'A' };
+    const live = item({ kind: 'live' });
+    const m3u8Only = await resolveSourceUrl(deps(live, { allowedOutputFormats: ['m3u8'] }), req);
+    expect(m3u8Only.sourceUrl).toBe('live/77.m3u8');
+    expect(m3u8Only).not.toHaveProperty('fallbackSourceUrl');
+    expect(await resolveSourceUrl(deps(live, { allowedOutputFormats: ['ts'] }), req)).not.toHaveProperty('fallbackSourceUrl');
+    expect(await resolveSourceUrl(deps(live, null), req)).not.toHaveProperty('fallbackSourceUrl');
+    const anyFormats = { allowedOutputFormats: ['ts', 'm3u8'] };
+    const movie = await resolveSourceUrl(deps(item({ kind: 'movie' }), anyFormats), req);
+    expect(movie).not.toHaveProperty('fallbackSourceUrl');
+    const ep = await resolveSourceUrl(deps(item({ kind: 'series' }), anyFormats), { ...req, episodeRemoteId: '9' });
+    expect(ep).not.toHaveProperty('fallbackSourceUrl');
+  });
+
   test('movies default to mp4 and episodes use their own container', async () => {
     const movie = await resolveSourceUrl(deps(item({ kind: 'movie' }), null), { itemId: 5, clientId: 'A' });
-    expect(movie).toEqual({ providerId: 3, kind: 'movie', contentKey: 'movie:77', sourceUrl: 'movie/77.mp4' });
+    expect(movie).toStrictEqual({ providerId: 3, kind: 'movie', contentKey: 'movie:77', sourceUrl: 'movie/77.mp4' });
     const mkv = await resolveSourceUrl(deps(item({ kind: 'movie', containerExt: 'mkv' }), null), { itemId: 5, clientId: 'A' });
     expect(mkv.sourceUrl).toBe('movie/77.mkv');
     const ep = await resolveSourceUrl(deps(item({ kind: 'series' }), null), { itemId: 5, episodeRemoteId: '9', clientId: 'A' });
-    expect(ep).toEqual({ providerId: 3, kind: 'episode', contentKey: 'episode:9', sourceUrl: 'series/9.avi' });
+    expect(ep).toStrictEqual({ providerId: 3, kind: 'episode', contentKey: 'episode:9', sourceUrl: 'series/9.avi' });
   });
 });
 

@@ -43,6 +43,8 @@ export type StartRequest = {
   kind: 'live' | 'movie' | 'episode';
   contentKey: string;
   sourceUrl: string;
+  /** Live only: the provider's continuous stream, used instead if `sourceUrl` is a finite playlist (R29). */
+  fallbackSourceUrl?: string;
   userAgent: string;
   startAtSec: number;
   clientId: string;
@@ -86,9 +88,11 @@ const HOUSEKEEPING_MS = 5_000;
 const KILL_RETRY_MS = 2_000;
 const RESTART_BACKOFF_MS = 1_000; // doubles per consecutive restart: 1 s, 2 s, 4 s
 const HEALTHY_RESET_MS = 60_000; // a live process producing segments this long earns back its restart budget
-// R28: a live process that wrote this many new segments before exiting (a provider playlist that
-// "ends", a transient write error) was working: relaunch it at once and forgive earlier failures.
+// R28/R28a: a live process that wrote this many new segments and ran this long before exiting (a
+// provider playlist that "ends", a transient write error) was working: relaunch it at once and forgive
+// earlier failures. Anything quicker is a failure, so an input read faster than real time can't tight-loop.
 const RECONNECT_MIN_SEGMENTS = 2;
+const RECONNECT_MIN_RUN_MS = 10_000;
 // A plain file name: no separators, no drive or stream colons, not '.' or '..'.
 const PLAIN_FILE = /^[\w-][\w.-]*$/;
 // Session dirs are named by randomUUID(); nothing else in transcodeDir is ever removed.
@@ -108,7 +112,7 @@ type Session = {
   key: string;
   providerId: number;
   kind: StartRequest['kind'];
-  sourceUrl: string;
+  sourceUrl: string; // what FFmpeg reads: the requested URL, or its continuous fallback (R29)
   userAgent: string;
   startAtSec: number;
   // starting: probing/spawning, not yet joinable; running: registered; stopping: on its way out.
@@ -124,6 +128,7 @@ type Session = {
   restarts: number; // consecutive failures
   restartTimer: ReturnType<typeof setTimeout> | null;
   launchSegment: number; // highest segment before the current process started (its start number - 1)
+  launchedAt: number; // when the current process started
   stalled: boolean; // the watchdog killed the current process
   lastSegment: number; // live watchdog: highest segment seen,
   advancedAt: number; // when it last went up,
@@ -277,7 +282,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     s.launchSegment = startNumber - 1;
     s.lastSegment = startNumber - 1;
     s.stalled = false;
-    s.advancedAt = deps.now();
+    s.launchedAt = deps.now();
+    s.advancedAt = s.launchedAt;
     s.healthySince = null;
     if (child.stderr) {
       const lines = createInterface({ input: child.stderr, crlfDelay: Infinity });
@@ -303,9 +309,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // Read the playlist now: the watchdog samples only every few seconds.
     const highest = Math.max(s.lastSegment, lastSegment(s.outDir!));
     const segments = highest - s.launchSegment;
+    const ranMs = deps.now() - s.launchedAt;
     // A stall kill means no recent progress, whatever the process wrote before.
-    if (!s.stalled && segments >= RECONNECT_MIN_SEGMENTS) {
-      log.info({ sessionId: s.id, code, segments }, 'ffmpeg exited after producing segments; reconnecting');
+    if (!s.stalled && segments >= RECONNECT_MIN_SEGMENTS && ranMs >= RECONNECT_MIN_RUN_MS) {
+      log.info({ sessionId: s.id, code, segments, ranMs }, 'ffmpeg exited after producing segments; reconnecting');
       s.restarts = 0;
       relaunch(s, highest + 1);
       return;
@@ -391,30 +398,57 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     });
   }
 
-  async function probeWithin(s: Session, expired: Promise<never>): Promise<ProbeResult> {
-    const probing = deps.probe(s.sourceUrl, s.userAgent);
-    s.probing = probing.then(
-      () => {
-        s.probing = null;
-      },
-      () => {
-        s.probing = null;
-      },
-    );
+  async function probeWithin(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
+    const probing = deps.probe(url, s.userAgent);
+    const done = () => {
+      if (s.probing === ended) s.probing = null;
+    };
+    const ended = probing.then(done, done);
+    s.probing = ended;
     try {
       return await Promise.race([probing, expired]);
     } catch (err) {
       if (err instanceof PlaybackError) throw err; // the deadline
-      log.warn({ url: redactUrl(s.sourceUrl), err: errorText(err) }, 'probe failed');
+      log.warn({ url: redactUrl(url), err: errorText(err) }, 'probe failed');
       throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be opened');
     }
   }
 
-  async function open(s: Session): Promise<void> {
-    const deadline = startDeadline(deps.readyTimeoutMs); // probe + spawn + ready, all together
+  /** R29: a live HLS input with a duration is an ENDLIST playlist, which FFmpeg reads to the end and leaves. */
+  const finitePlaylist = (s: Session, probe: ProbeResult) =>
+    s.kind === 'live' && probe.formatName.includes('hls') && probe.durationSec !== null;
+
+  /** Switches the session to the provider's continuous stream, unless that can't be probed (within the same deadline). */
+  async function continuousInstead(s: Session, playlist: ProbeResult, url: string, expired: Promise<never>): Promise<ProbeResult> {
+    const { durationSec } = playlist;
+    const urls = { url: redactUrl(s.sourceUrl), fallback: redactUrl(url) };
+    log.info({ sessionId: s.id, ...urls, durationSec }, 'live playlist is finite; switching to continuous stream');
     try {
-      const probe = await probeWithin(s, deadline.expired);
+      const probe = await probeWithin(s, url, expired);
+      // Only an actual stream will do. Some servers answer every live extension with the same playlist,
+      // and HLS behind a non-.m3u8 URL would also be read without -http_multiple 0.
+      if (probe.formatName.includes('hls')) {
+        log.info({ sessionId: s.id, ...urls }, 'continuous stream is a playlist too; playing the original');
+        return playlist;
+      }
+      s.sourceUrl = url;
+      return probe;
+    } catch (err) {
+      if (err instanceof PlaybackError && err.code === 'STREAM_START_TIMEOUT') throw err;
+      log.warn({ sessionId: s.id, url: urls.url }, 'continuous stream could not be opened; playing the playlist');
+      return playlist;
+    }
+  }
+
+  async function open(s: Session, fallbackUrl: string | undefined): Promise<void> {
+    const deadline = startDeadline(deps.readyTimeoutMs); // probes + spawn + ready, all together
+    try {
+      let probe = await probeWithin(s, s.sourceUrl, deadline.expired);
       if (s.state !== 'starting') throw stoppedError();
+      if (fallbackUrl && finitePlaylist(s, probe)) {
+        probe = await continuousInstead(s, probe, fallbackUrl, deadline.expired);
+        if (s.state !== 'starting') throw stoppedError();
+      }
       const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
       s.inputFormat = probe.formatName;
       s.durationSec = s.kind === 'live' ? null : probe.durationSec;
@@ -524,6 +558,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       restarts: 0,
       restartTimer: null,
       launchSegment: -1,
+      launchedAt: 0,
       stalled: false,
       lastSegment: -1,
       advancedAt: 0,
@@ -531,7 +566,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       clients: new Map([[req.clientId, deps.now()]]),
       stopped: null,
     };
-    const done = open(s);
+    const done = open(s, req.fallbackSourceUrl);
     starting.set(key, { session: s, done });
     try {
       await done;

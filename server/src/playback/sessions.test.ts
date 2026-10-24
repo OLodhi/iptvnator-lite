@@ -11,6 +11,8 @@ import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from
 const H264 = { codec: 'h264', codecTag: null, width: 1280, height: 720, interlaced: false, fieldOrder: 'progressive' };
 const AAC = [{ index: 1, codec: 'aac', channels: 2 }];
 const LIVE_HLS: ProbeResult = { formatName: 'hls', durationSec: null, video: H264, audio: AAC };
+const FINITE_HLS: ProbeResult = { ...LIVE_HLS, durationSec: 15 }; // an ENDLIST playlist
+const LIVE_TS: ProbeResult = { formatName: 'mpegts', durationSec: null, video: H264, audio: AAC };
 const MKV_MOVIE: ProbeResult = { formatName: 'matroska,webm', durationSec: 60, video: H264, audio: AAC };
 const MP4_MOVIE: ProbeResult = {
   formatName: 'mov,mp4,m4a,3gp,3g2,mj2',
@@ -29,6 +31,10 @@ const live = (n: number, clientId: string): StartRequest => ({
   startAtSec: 0,
   clientId,
   quality: 'original',
+});
+const liveWithFallback = (n: number, clientId: string) => ({
+  ...live(n, clientId),
+  fallbackSourceUrl: `http://provider.test/live/user/secret/${n}.ts`,
 });
 const movie = (n: number, clientId: string, ext = 'mkv'): StartRequest => ({
   providerId: 1,
@@ -658,7 +664,7 @@ describe('session manager', () => {
     expect(alive(h.m, s.sessionId)).toBe(false);
   });
 
-  // Ruling R28: a live run that produced at least 2 new segments and then exited is a reconnect.
+  // Rulings R28/R28a: a live run that produced at least 2 new segments over at least 10 s and then exited is a reconnect.
   test('a live run that produced segments and exited cleanly reconnects at once, without using the restart budget', async () => {
     const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
     const s = await h.m.start(live(1, 'A'));
@@ -666,6 +672,7 @@ describe('session manager', () => {
 
     for (let run = 0; run < 5; run++) {
       writePlaylist(outDir, 0, 5 * run + 4); // five new segments, then the provider's playlist "ends"
+      await vi.advanceTimersByTimeAsync(12_000);
       h.children[run]!.exit(0);
       await flush(); // the clock does not move: no backoff
       expect(h.spawn).toHaveBeenCalledTimes(run + 2);
@@ -697,6 +704,7 @@ describe('session manager', () => {
 
     for (const [run, code] of [1, 255, null, 1, 1].entries()) {
       writePlaylist(outDir, 0, 5 * run + 4);
+      await vi.advanceTimersByTimeAsync(12_000);
       const child = h.children[run]!;
       child.stderr.write('[hls @ 0x1] failed to rename file index.m3u8.tmp to index.m3u8: Operation not permitted\n');
       child.exit(code);
@@ -708,7 +716,7 @@ describe('session manager', () => {
     expect(restartDelays(h.logs)).toEqual([]);
   });
 
-  test('a reconnect resets the consecutive-failure count; exactly 2 new segments is enough', async () => {
+  test('a reconnect resets the consecutive-failure count; exactly 2 new segments over exactly 10 s is enough', async () => {
     const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
     const s = await h.m.start(live(1, 'A'));
     const outDir = outDirOf(h.m, s.sessionId);
@@ -720,6 +728,7 @@ describe('session manager', () => {
     expect(h.spawn).toHaveBeenCalledTimes(3);
 
     writePlaylist(outDir, 0, 1); // two new segments
+    await vi.advanceTimersByTimeAsync(10_000);
     h.children[2]!.exit(0);
     await flush();
     expect(h.spawn).toHaveBeenCalledTimes(4);
@@ -739,6 +748,62 @@ describe('session manager', () => {
     expect(h.spawn).toHaveBeenCalledTimes(7);
     expect(alive(h.m, s.sessionId)).toBe(false);
     expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 1_000, 2_000, 4_000]);
+  });
+
+  test('a run shorter than 10 s is a failure however many segments it wrote; a longer one reconnects', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    // 2 s: five segments, but too quick to trust. A failure, with the 1 s backoff.
+    await vi.advanceTimersByTimeAsync(2_000);
+    writePlaylist(outDir, 0, 4);
+    h.children[0]!.exit(0);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('5');
+
+    // Just under 10 s: still a failure (2 s backoff).
+    await vi.advanceTimersByTimeAsync(9_999);
+    writePlaylist(outDir, 0, 9);
+    h.children[1]!.exit(0);
+    await flush();
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.spawn).toHaveBeenCalledTimes(3);
+
+    // 12 s: a reconnect, at once, and the two failures are forgiven.
+    await vi.advanceTimersByTimeAsync(12_000);
+    writePlaylist(outDir, 0, 14);
+    h.children[2]!.exit(0);
+    await flush();
+    expect(h.spawn).toHaveBeenCalledTimes(4);
+    expect(argAfter(h.children[3]!.args, '-start_number')).toBe('15');
+    h.children[3]!.exit(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.spawn).toHaveBeenCalledTimes(5);
+    expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 1_000]);
+  });
+
+  test('quick runs that each write five segments (an ending playlist read in half a second) still give up', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    for (const [run, delay] of [1_000, 2_000, 4_000, 0].entries()) {
+      writePlaylist(outDir, 0, 5 * run + 4);
+      await vi.advanceTimersByTimeAsync(500);
+      h.children[run]!.exit(0);
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawn).toHaveBeenCalledTimes(4);
+    expect(alive(h.m, s.sessionId)).toBe(false);
+    expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 4_000]);
+    expect(h.logs.some((l) => l.m.includes('reconnecting'))).toBe(false);
+    expect(h.logs).toContainEqual(expect.objectContaining({ m: 'ffmpeg keeps exiting; giving up' }));
   });
 
   test('a stall-watchdog kill stays a failure even when the run had produced segments', async () => {
@@ -762,18 +827,117 @@ describe('session manager', () => {
     const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: 12_000 });
     const s = await h.m.start(live(1, 'A'));
     const outDir = outDirOf(h.m, s.sessionId);
-    writePlaylist(outDir, 0, 4); // written, and the process gone, before the watchdog's first look
+    await vi.advanceTimersByTimeAsync(12_000); // watchdog at 5 s and 10 s: nothing yet
+    writePlaylist(outDir, 0, 4); // written, and the process gone, before the watchdog's next look
     h.children[0]!.exit(0);
     await flush();
-    expect(h.spawn).toHaveBeenCalledTimes(2); // the new process writes nothing
+    expect(h.spawn).toHaveBeenCalledTimes(2); // reconnected at 12 s; the new process writes nothing
 
-    await vi.advanceTimersByTimeAsync(10_000); // watchdog at 5 s and 10 s: segment 4 is not progress
+    await vi.advanceTimersByTimeAsync(8_000); // watchdog at 15 s and 20 s: segment 4 is not progress
     expect(h.children[1]!.kills).toBe(0);
-    await vi.advanceTimersByTimeAsync(5_000); // 15 s: more than 12 s without a segment of its own
+    await vi.advanceTimersByTimeAsync(5_000); // 25 s: more than 12 s without a segment of its own
     expect(h.children[1]!.kills).toBe(1);
     await vi.advanceTimersByTimeAsync(1_050); // exit, then the 1 s backoff
     expect(h.spawn).toHaveBeenCalledTimes(3);
     expect(argAfter(h.children[2]!.args, '-start_number')).toBe('5');
+  });
+
+  // Ruling R29: a finite live playlist (ENDLIST) is swapped for the provider's continuous TS stream.
+  test('a live playlist with a finite duration switches to the continuous stream, for the session and its relaunches', async () => {
+    const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
+    const h = harness({ probe, liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const req = liveWithFallback(1, 'A');
+    const s = await h.m.start(req);
+
+    expect(s.mode).toBe('hls');
+    expect(probe.mock.calls.map(([url]) => url)).toEqual([req.sourceUrl, req.fallbackSourceUrl]);
+    const args = h.children[0]!.args;
+    expect(argAfter(args, '-i')).toBe(req.fallbackSourceUrl);
+    expect(args).not.toContain('-http_multiple');
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      m: 'live playlist is finite; switching to continuous stream',
+      o: expect.objectContaining({
+        url: 'http://provider.test/live/***/***/1.m3u8',
+        fallback: 'http://provider.test/live/***/***/1.ts',
+        durationSec: 15,
+      }),
+    });
+    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: 'http://provider.test/live/***/***/1.ts' });
+
+    h.children[0]!.exit(1); // a relaunch keeps the continuous stream
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    expect(argAfter(h.children[1]!.args, '-i')).toBe(req.fallbackSourceUrl);
+    expect(alive(h.m, s.sessionId)).toBe(true);
+    expect(JSON.stringify(h.logs)).not.toContain('secret');
+  });
+
+  test('a live playlist without a duration, or without a fallback, is played as it is', async () => {
+    const h = harness(); // live HLS, no duration
+    const req = liveWithFallback(1, 'A');
+    await h.m.start(req);
+    expect(h.probe).toHaveBeenCalledTimes(1);
+    expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
+    expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
+
+    const finite = harness({ probe: async () => FINITE_HLS });
+    await finite.m.start(live(2, 'B')); // no fallback offered
+    expect(argAfter(finite.children[0]!.args, '-i')).toBe(live(2, 'B').sourceUrl);
+    expect([...h.logs, ...finite.logs].some((l) => l.m.includes('switching'))).toBe(false);
+  });
+
+  test('if the continuous stream cannot be probed, the finite playlist is played after all', async () => {
+    const probe = vi.fn(async (url: string, _userAgent: string) => {
+      if (url.endsWith('.ts')) throw new Error(`ffprobe failed for ${url}`);
+      return FINITE_HLS;
+    });
+    const h = harness({ probe });
+    const req = liveWithFallback(1, 'A');
+    const s = await h.m.start(req);
+
+    expect(s.mode).toBe('hls');
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
+    expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
+    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: 'http://provider.test/live/***/***/1.m3u8' });
+    expect(JSON.stringify(h.logs)).not.toContain('secret');
+  });
+
+  test('a fallback that turns out to be a playlist as well is not used', async () => {
+    // Some servers (the fake among them) answer every live extension with the same playlist. Reading HLS
+    // through a .ts URL would also lose -http_multiple 0, so a one-stream provider would refuse FFmpeg.
+    for (const fallback of [FINITE_HLS, LIVE_HLS]) {
+      const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? fallback : FINITE_HLS));
+      const h = harness({ probe });
+      const req = liveWithFallback(1, 'A');
+      await h.m.start(req);
+
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
+      expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
+      expect(h.logs).toContainEqual(expect.objectContaining({ m: 'continuous stream is a playlist too; playing the original' }));
+      expect(JSON.stringify(h.logs)).not.toContain('secret');
+    }
+  });
+
+  test('one 15 s deadline covers the fallback probe too', async () => {
+    const probe = (url: string) => (url.endsWith('.ts') ? delayed(10_000, LIVE_TS) : delayed(8_000, FINITE_HLS));
+    const h = harness({ probe, maxConnections: () => 1 });
+    let settled = false;
+    const start = h.m.start(liveWithFallback(1, 'A')).finally(() => {
+      settled = true;
+    });
+    const outcome = expect(start).rejects.toMatchObject({ code: 'STREAM_START_TIMEOUT' });
+
+    await vi.advanceTimersByTimeAsync(14_900); // the fallback probe has been running since 8 s
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(200); // 15.1 s
+    await outcome;
+    expect(h.spawn).not.toHaveBeenCalled();
+    expect(h.m.activeUpstreams(1)).toBe(1); // that ffprobe is still connected
+    await vi.advanceTimersByTimeAsync(3_000); // 18.1 s: it has finished
+    expect(h.m.activeUpstreams(1)).toBe(0);
   });
 
   // Ruling R16: liveness is per viewer.

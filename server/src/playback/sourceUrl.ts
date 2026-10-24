@@ -9,6 +9,8 @@ export type ResolvedSource = {
   contentKey: string;
   /** Carries provider credentials: never log it unredacted or send it to the browser. */
   sourceUrl: string;
+  /** Live m3u8 only: the continuous TS stream, if the playlist turns out to be finite (R29). Carries credentials too. */
+  fallbackSourceUrl?: string;
 };
 
 /** Why a play request names nothing playable. */
@@ -35,7 +37,14 @@ export async function resolveSourceUrl(
   if (item.kind === 'live') {
     const formats = deps.providers.account(providerId)?.allowedOutputFormats ?? [];
     const format = formats.includes('m3u8') ? 'm3u8' : 'ts';
-    return { providerId, kind: 'live', contentKey: `live:${item.remoteId}`, sourceUrl: client.liveUrl(item.remoteId, format) };
+    const source: ResolvedSource = {
+      providerId,
+      kind: 'live',
+      contentKey: `live:${item.remoteId}`,
+      sourceUrl: client.liveUrl(item.remoteId, format),
+    };
+    if (format === 'm3u8' && formats.includes('ts')) source.fallbackSourceUrl = client.liveUrl(item.remoteId, 'ts');
+    return source;
   }
   if (item.kind === 'movie') {
     const sourceUrl = client.movieUrl(item.remoteId, item.containerExt ?? 'mp4');
