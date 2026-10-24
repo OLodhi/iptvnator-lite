@@ -58,7 +58,17 @@
 
 <form onsubmit={submit}>
   <label>Server address
-    <input type="url" bind:value={serverUrl} placeholder="http://example.com:8080" required autocapitalize="off" autocorrect="off" />
+    <!-- Text, not url: bare hosts like 192.168.1.5:8080 are fine (the server normalises them). -->
+    <input
+      type="text"
+      inputmode="url"
+      bind:value={serverUrl}
+      placeholder="http://example.com:8080"
+      required
+      autocapitalize="off"
+      autocorrect="off"
+      spellcheck="false"
+    />
   </label>
   <label>Username
     <input bind:value={username} required autocapitalize="off" autocorrect="off" autocomplete="username" />
