@@ -18,6 +18,8 @@ export type FakeXtreamOptions = {
   maxConnections?: number;
   /** Serve live like a real provider: TS streamed at its real bitrate and looped forever, HLS as a sliding window. */
   paced?: boolean;
+  /** Paced only: how long the live TS files play for, which sets their bitrate (size / seconds). Default 30 (make-media). */
+  pacedMediaSeconds?: number;
 };
 
 export type FakeXtream = {
@@ -58,6 +60,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
   const username = opts.username ?? 'u';
   const password = opts.password ?? 'p';
   const maxConnections = opts.maxConnections ?? 1;
+  const mediaSeconds = opts.pacedMediaSeconds ?? MEDIA_SECONDS;
   const mediaDir = resolve(opts.mediaDir);
   let catalogue = opts.catalogue ?? smallCatalogue();
   const open = new Map<ServerResponse, string>(); // open media responses → request path
@@ -182,13 +185,25 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
 
   /** Writes `bitrate / 10` bytes every 100 ms, restarting at the file's start at the end, until the client goes. */
   async function paceLive(res: ServerResponse, file: string, size: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    res.once('close', () => clearInterval(timer)); // before the read, so a client that leaves during it starts nothing
     const data = await readFile(file);
-    const perTick = Math.max(188, Math.round(size / MEDIA_SECONDS / (1000 / PACE_MS)));
+    if (res.destroyed) return;
+    if (data.length === 0) {
+      res.end();
+      return;
+    }
+    const bytesPerMs = size / mediaSeconds / 1000;
+    const maxBurst = Math.ceil(bytesPerMs * 1000); // about 1 s of data
+    const t0 = Date.now();
+    let sent = 0; // the target is elapsed x bitrate, so late or skipped ticks catch up
     let offset = 0;
-    const timer = setInterval(() => {
+    timer = setInterval(() => {
       if (res.destroyed) return clearInterval(timer);
       if (res.writableNeedDrain) return; // the client is behind; don't pile up
-      let left = perTick;
+      let left = Math.min(maxBurst, Math.floor((Date.now() - t0) * bytesPerMs) - sent);
+      if (left <= 0) return;
+      sent += left;
       while (left > 0) {
         const n = Math.min(left, data.length - offset);
         res.write(data.subarray(offset, offset + n));
@@ -196,7 +211,6 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
         left -= n;
       }
     }, PACE_MS);
-    res.once('close', () => clearInterval(timer));
   }
 
   /** A live sliding-window playlist: no ENDLIST, the newest segment advances with wall-clock time. */

@@ -1,4 +1,5 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -171,8 +172,9 @@ describe('paced fake xtream', () => {
     await paced?.close();
   });
 
-  test('streams raw.ts at its real bitrate and keeps going past the end of the file', async () => {
-    const bitrate = statSync(join(mediaDir, 'raw.ts')).size / 30; // bytes per second of the 30 s file
+  test('streams raw.ts at its real bitrate, nowhere near its end where an unpaced stream has finished', async () => {
+    const size = statSync(join(mediaDir, 'raw.ts')).size;
+    const bitrate = size / 30; // bytes per second of the 30 s file
     const res = await fetch(`${paced.url}/live/u/p/2.ts`);
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
@@ -187,24 +189,43 @@ describe('paced fake xtream', () => {
     const elapsed = (Date.now() - t0) / 1000;
     expect(bytes).toBeGreaterThan(bitrate * elapsed * 0.75);
     expect(bytes).toBeLessThan(bitrate * elapsed * 1.25);
+    expect(bytes).toBeLessThan(size / 5);
     await reader.cancel();
     await vi_waitFor(() => paced.openMediaConnections() === 0);
   });
 
-  test('is nowhere near the end of the file after 2 s, where an unpaced stream has long finished', async () => {
-    const size = statSync(join(mediaDir, 'raw.ts')).size;
-    const res = await fetch(`${paced.url}/live/u/p/2.ts`);
-    const reader = res.body!.getReader();
-    let bytes = 0;
-    const t0 = Date.now();
-    while (Date.now() - t0 < 2000) {
-      const { value, done } = await reader.read();
-      expect(done).toBe(false);
-      bytes += value!.length;
+  test('loops a file back to its start, and ends an empty one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tv-fake-wrap-'));
+    try {
+      const file = Buffer.alloc(188 * 50);
+      for (let i = 0; i < file.length; i++) file[i] = i % 251;
+      writeFileSync(join(dir, 'raw.ts'), file);
+      writeFileSync(join(dir, 'mpeg2.ts'), '');
+      const tiny = await startFakeXtream({ mediaDir: dir, paced: true, pacedMediaSeconds: 1 }); // 9.4 kB/s
+      try {
+        const res = await fetch(`${tiny.url}/live/u/p/2.ts`);
+        const reader = res.body!.getReader();
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        while (bytes < file.length * 2 + 100) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error('a paced live stream must not end');
+          chunks.push(Buffer.from(value));
+          bytes += value.length;
+        }
+        await reader.cancel();
+        const all = Buffer.concat(chunks);
+        expect(all.subarray(0, file.length).equals(file)).toBe(true);
+        expect(all.subarray(file.length, file.length * 2).equals(file)).toBe(true); // the bytes after the wrap
+
+        const empty = await fetch(`${tiny.url}/live/u/p/3.ts`);
+        expect((await empty.arrayBuffer()).byteLength).toBe(0);
+      } finally {
+        await tiny.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    expect(bytes).toBeLessThan(size / 5);
-    await reader.cancel();
-    await vi_waitFor(() => paced.openMediaConnections() === 0);
   });
 
   test('serves a sliding-window HLS playlist that advances with time and has no ENDLIST', async () => {
@@ -235,6 +256,25 @@ describe('paced fake xtream', () => {
       expect(text.match(/^#EXT-X-DISCONTINUITY$/gm)).toHaveLength(1);
       expect(text.indexOf('seg-live-14.ts')).toBeLessThan(text.indexOf('#EXT-X-DISCONTINUITY\n'));
       expect(text.indexOf('#EXT-X-DISCONTINUITY\n')).toBeLessThan(text.indexOf('seg-live-15.ts'));
+
+      // Across a double wrap (sequence past 30) both counters only ever go up and DISCONTINUITY-SEQUENCE is exact.
+      let lastMedia = -1;
+      let lastDisc = -1;
+      for (let secs = 0; secs <= 80; secs += 2) {
+        Date.now = () => realNow() + secs * 1000;
+        const pl = await (await fetch(`${late.url}/live/u/p/1.m3u8`)).text();
+        const media = Number(/#EXT-X-MEDIA-SEQUENCE:(\d+)/.exec(pl)![1]);
+        const disc = Number(/#EXT-X-DISCONTINUITY-SEQUENCE:(\d+)/.exec(pl)![1]);
+        expect(media).toBeGreaterThanOrEqual(lastMedia);
+        expect(disc).toBeGreaterThanOrEqual(lastDisc);
+        const uris = pl.split('\n').filter((l) => l.startsWith('/hls/'));
+        const nums = uris.map((u) => Number(/seg-live-(\d+)/.exec(u)![1]));
+        // Discontinuities before the first listed segment: one per multiple of 15 in 15..first-1.
+        expect(disc).toBe(nums[0]! > 0 ? Math.floor((nums[0]! - 1) / 15) : 0);
+        lastMedia = media;
+        lastDisc = disc;
+      }
+      expect(lastDisc).toBeGreaterThanOrEqual(2); // past 30: two wraps behind the window
     } finally {
       Date.now = realNow;
       await late.close();

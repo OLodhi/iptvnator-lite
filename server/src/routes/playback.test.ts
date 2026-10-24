@@ -929,21 +929,27 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
     expect(res.statusCode, res.body).toBe(200);
     const { sessionId, url } = res.json() as PlayResponse;
 
-    // Watch like a player: refetch the playlist and heartbeat every few seconds for a minute.
+    // Watch like a player: refetch the playlist and heartbeat every few seconds for a minute, noting how far it has got.
+    const highest: number[] = [];
     const until = Date.now() + 60_000;
     while (Date.now() < until) {
       const pl = await w.app.inject(url);
       expect(pl.statusCode).toBe(200);
       expect(pl.body).not.toContain('#EXT-X-ENDLIST');
+      const uris = pl.body.split(/\r?\n/).filter((l) => /^seg_\d+\.ts$/.test(l));
+      highest.push(Number(/seg_(\d+)/.exec(uris.at(-1) ?? '')?.[1] ?? -1));
       const beat = await w.app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/A/heartbeat` });
       expect(beat.statusCode).toBe(204);
       await new Promise((ok) => setTimeout(ok, 3_000));
     }
 
+    // A frozen stream fails here: 3 s segments give about 19 new ones in 60 s. (MEDIA-SEQUENCE stays 0 with a 100-segment list.)
+    expect(highest.at(-1)! - highest[0]!).toBeGreaterThanOrEqual(10);
     expect(lines.filter((l) => /restarting|reconnecting/.test(l))).toEqual([]);
     expect(w.sessions.touch(sessionId, 'A')).toBe(true); // still alive
     const segments = readdirSync(join(config.transcodeDir, sessionId)).filter((f) => /^seg_\d+\.ts$/.test(f));
     expect(segments.length).toBeGreaterThan(5);
+    // Only a sanity bound at 60 s: delete_segments starts after about 100 x 3 s. Cleanup itself is covered by the prune unit tests.
     expect(segments.length).toBeLessThanOrEqual(LIVE_LIST_SIZE + 2);
     await w.sessions.release(sessionId, 'A');
   });
