@@ -122,8 +122,15 @@ test('items whose category is unknown land in Uncategorised', async () => {
   expect(row).toEqual({ remote_id: '__none__', name: 'Uncategorised' });
 });
 
+type LogLine = { level: 'info' | 'warn'; m: string; o: object };
+const collectingLog = (lines: LogLine[]) => ({
+  info: (o: object, m: string) => void lines.push({ level: 'info', m, o }),
+  warn: (o: object, m: string) => void lines.push({ level: 'warn', m, o }),
+});
+
 test('runner reports running then idle with the result', async () => {
-  const runner = createSyncRunner({ db, providers });
+  const lines: LogLine[] = [];
+  const runner = createSyncRunner({ db, providers, log: collectingLog(lines) });
   expect(runner.status(providerId).state).toBe('idle');
   runner.start(providerId);
   runner.start(providerId);
@@ -134,6 +141,38 @@ test('runner reports running then idle with the result', async () => {
   expect(s.error).toBeNull();
   expect(s.finishedAt).not.toBeNull();
   expect(providers.get(providerId)?.lastSyncedAt).not.toBeNull();
+
+  // One info line: the provider, per-kind counts and how long it took.
+  expect(lines).toEqual([
+    {
+      level: 'info',
+      m: 'catalogue synced',
+      o: { providerId, live: s.result!.live, movie: s.result!.movie, series: s.result!.series, durationMs: expect.any(Number) },
+    },
+  ]);
+  expect((lines[0]!.o as { durationMs: number }).durationMs).toBe(s.finishedAt! - s.startedAt!);
+});
+
+test('runner logs a failure with the error redacted, and reports it redacted', async () => {
+  const leaky = createProviderService({
+    db,
+    userAgent: UA,
+    makeClient: (creds, opts) => ({
+      ...createXtreamClient(creds, opts),
+      getCategories: async () => {
+        throw new Error(`fetch failed: ${fake.url}/player_api.php?username=someuser&password=secret&action=get_live_categories`);
+      },
+    }),
+  });
+  const lines: LogLine[] = [];
+  const runner = createSyncRunner({ db, providers: leaky, log: collectingLog(lines) });
+  runner.start(providerId);
+  await expect.poll(() => runner.status(providerId).state, { timeout: 10_000 }).toBe('failed');
+
+  const err = `fetch failed: ${fake.url}/player_api.php?username=***&password=***&action=get_live_categories`;
+  expect(lines).toEqual([{ level: 'warn', m: 'catalogue sync failed', o: { providerId, err, durationMs: expect.any(Number) } }]);
+  expect(runner.status(providerId).error).toBe(err);
+  expect(JSON.stringify([lines, runner.status(providerId)])).not.toMatch(/someuser|secret/);
 });
 
 test('sync routes start a sync and report status', async () => {

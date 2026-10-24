@@ -25,7 +25,7 @@ const providers = createProviderService({
   userAgent: config.defaultUserAgent,
   onAdded: (id) => sync?.start(id),
 });
-sync = createSyncRunner({ db, providers });
+sync = createSyncRunner({ db, providers, log });
 const catalogue = createCatalogueRepo(db);
 const seriesInfo = createSeriesInfoCache({ providers, catalogue });
 const prober = createProber({ ffprobePath: config.ffprobePath, db });
