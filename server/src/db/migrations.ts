@@ -69,6 +69,7 @@ export const migrations: string[] = [
   ALTER TABLE categories ADD COLUMN tag TEXT;                     -- detected tag key, NULL = untagged
   ALTER TABLE categories ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0;
   UPDATE categories SET first_seen_at = seen_at;
+  ALTER TABLE categories ADD COLUMN tag_changed_at INTEGER NOT NULL DEFAULT 0;  -- last sync that changed tag; 0 = never
   CREATE TABLE catalogue_styles (
     provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
     kind TEXT NOT NULL, style TEXT NOT NULL CHECK (style IN ('tagged','mixed','untagged')), pattern TEXT,

@@ -20,7 +20,9 @@ function prepare(db: Db) {
       `INSERT INTO categories (provider_id, kind, remote_id, name, position, seen_at, tag, first_seen_at)
        VALUES (@providerId, @kind, @remoteId, @name, @position, @seenAt, @tag, @seenAt)
        ON CONFLICT (provider_id, kind, remote_id)
-       DO UPDATE SET name = excluded.name, position = excluded.position, seen_at = excluded.seen_at, tag = excluded.tag
+       DO UPDATE SET name = excluded.name, position = excluded.position, seen_at = excluded.seen_at, tag = excluded.tag,
+         -- SET expressions read the row as it was, so categories.tag here is the old tag.
+         tag_changed_at = CASE WHEN categories.tag IS NOT excluded.tag THEN excluded.seen_at ELSE categories.tag_changed_at END
        RETURNING id`,
     ),
     upsertItem: db.prepare(

@@ -221,6 +221,40 @@ test('first_seen_at is set once and never moves', async () => {
   ]);
 });
 
+test('tag_changed_at moves only when the stored tag changes', async () => {
+  const [t1, t2, t3, t4] = [1_000_000, 2_000_000, 3_000_000, 4_000_000];
+  const rows = () =>
+    db.prepare("SELECT remote_id, tag, tag_changed_at FROM categories WHERE kind = 'live' ORDER BY remote_id").all();
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t1 });
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t2 });
+  expect(rows()).toEqual([
+    { remote_id: '1', tag: null, tag_changed_at: 0 },
+    { remote_id: '2', tag: null, tag_changed_at: 0 },
+    { remote_id: '3', tag: null, tag_changed_at: 0 },
+  ]);
+  // A second UK category makes UK a tag (P2-R4): category 1 changes tag; the inserted one keeps the default.
+  const c = smallCatalogue();
+  c.live.categories.push({ id: '4', name: 'UK| Sports' });
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t3 });
+  expect(rows()).toEqual([
+    { remote_id: '1', tag: 'UK', tag_changed_at: t3 },
+    { remote_id: '2', tag: null, tag_changed_at: 0 },
+    { remote_id: '3', tag: null, tag_changed_at: 0 },
+    { remote_id: '4', tag: 'UK', tag_changed_at: 0 },
+  ]);
+  // A rename that keeps the tag leaves it alone.
+  c.live.categories[0]!.name = 'UK| General HD';
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'], now: () => t4 });
+  expect(rows()).toEqual([
+    { remote_id: '1', tag: 'UK', tag_changed_at: t3 },
+    { remote_id: '2', tag: null, tag_changed_at: 0 },
+    { remote_id: '3', tag: null, tag_changed_at: 0 },
+    { remote_id: '4', tag: 'UK', tag_changed_at: 0 },
+  ]);
+});
+
 test('a removed link is pruned after a full stream', async () => {
   await syncCatalogue({ db, client, providerId, kinds: ['live'] });
   expect(linksOf('live', '1')).toEqual(['1']);

@@ -36,6 +36,7 @@ const BASE: Cat[] = [
 const ALL = BASE.map(([id]) => id);
 const UK = ['11', '12', '13'];
 const UK_ONLY: CurationUpdate = { tags: { UK: true, US: false, AR: false }, categories: {} };
+const UK_US: CurationUpdate = { tags: { UK: true, US: true, AR: false }, categories: {} };
 
 /** One channel per category and a second in the first; `orphan` adds a channel in a category the provider does not list. */
 function catalogue(cats: Cat[], opts: { orphan?: boolean }): FakeCatalogue {
@@ -165,6 +166,47 @@ test('a new tag group with no rule starts hidden and counts as new', async () =>
   ]);
 });
 
+test('a category whose group shrinks to one loses its tag and counts as new', async () => {
+  save(UK_US);
+  expect(visible()).toEqual(['11', '21', '12', '22', '13']);
+  // 21 is left as the only US category, so it is no longer tagged and no rule covers it.
+  await sync(BASE.filter(([id]) => id !== '22'));
+  expect(visible()).toEqual(UK);
+  expect(newCount()).toBe(1);
+  expect(flags(view().untagged)).toEqual([
+    ['21', false, true],
+    ['41', false, false],
+  ]);
+});
+
+test('a rename into a tag group with no rule counts as new', async () => {
+  save(UK_US);
+  // 21 moves from US (on) to DE, which arrives with it and has no rule; a new US category keeps US a group.
+  await sync([
+    ...BASE.map(([id, name]): Cat => [id, id === '21' ? 'DE| SPORTS' : name]),
+    ['51', 'DE| Y'],
+    ['23', 'US| NEW'],
+  ]);
+  expect(visible()).toEqual(['11', '12', '22', '13', '23']);
+  expect(newCount()).toBe(2);
+  expect(flags(view().groups.find((g) => g.tag === 'DE')!.categories)).toEqual([
+    ['21', false, true],
+    ['51', false, true],
+  ]);
+});
+
+test('a resync that changes the tag pattern puts the stranded categories up for review', async () => {
+  save(UK_ONLY);
+  // Ten bracket-tagged categories outnumber the nine pipe-tagged ones, so the pattern flips and the old tags vanish.
+  const bracket = Array.from({ length: 10 }, (_, i): Cat => [String(60 + i), `[${i < 5 ? 'DE' : 'FR'}] TOPIC ${i}`]);
+  await sync([...BASE, ...bracket]);
+  expect(db.prepare("SELECT pattern FROM catalogue_styles WHERE kind = 'live'").pluck().get()).toBe('bracket');
+  expect(visible()).toEqual([]);
+  // Nothing goes dark silently: everything is new except MISC, which was reviewed and has not changed.
+  expect(newCount()).toBe(BASE.length - 1 + bracket.length);
+  expect(everyCategory(view()).filter((c) => !c.isNew).map((c) => c.remoteId)).toEqual(['41']);
+});
+
 test('rename keeps the exception', async () => {
   save({ ...UK_ONLY, categories: { '12': false } });
   await sync(BASE.map(([id, name]): Cat => [id, id === '12' ? 'UK| NEWS HD' : name]));
@@ -261,6 +303,19 @@ test('display names strip the single visible tag', () => {
   save({ tags: { UK: true, US: true, AR: false }, categories: {} });
   expect(curation.displayNameFn(providerId, 'live', OWNER)('UK| SPORTS')).toBe('UK| SPORTS');
   expect(view().groups[0]!.categories[0]!.displayName).toBe('UK| SPORTS');
+});
+
+test('resolution agrees with visibleCategoryIds, displayNameFn and newCount', async () => {
+  save({ ...UK_ONLY, categories: { '13': false } });
+  await sync([...BASE, ['42', 'MISC NEW']]);
+  const r = curation.resolution(providerId, 'live', OWNER);
+  expect(r.visibleIds).toEqual(curation.visibleCategoryIds(providerId, 'live', OWNER));
+  expect(r.visibleIds).toEqual(new Set([idOf('11'), idOf('12')]));
+  expect(r.newCount).toBe(curation.newCount(providerId, 'live', OWNER));
+  expect(r.newCount).toBe(1);
+  const name = curation.displayNameFn(providerId, 'live', OWNER);
+  for (const n of ['UK| SPORTS', 'US| NEWS', 'MISC', 'UK|']) expect(r.displayName(n)).toBe(name(n));
+  expect(r.displayName('UK| SPORTS')).toBe('SPORTS');
 });
 
 test('view groups by tag with friendly names and hints', async () => {
