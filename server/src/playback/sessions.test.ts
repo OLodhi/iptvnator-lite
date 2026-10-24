@@ -1,11 +1,14 @@
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { buildFfmpegArgs } from './ffmpegArgs.ts';
+import type { HlsPlan } from './policy.ts';
 import type { ProbeResult } from './probe.ts';
-import { createSessionManager, defaultIsReady, PlaybackError } from './sessions.ts';
+import { createSessionManager, defaultIsReady, PlaybackError, pruneSegments } from './sessions.ts';
 import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from './sessions.ts';
 
 const H264 = { codec: 'h264', codecTag: null, width: 1280, height: 720, interlaced: false, fieldOrder: 'progressive' };
@@ -180,6 +183,15 @@ function writePlaylist(outDir: string, first: number, last: number): void {
   for (let i = first; i <= last; i++) text += `#EXTINF:3.000000,\nseg_${String(i).padStart(5, '0')}.ts\n`;
   writeFileSync(join(outDir, 'index.m3u8'), text);
 }
+
+/** Writes the segment files themselves (writePlaylist only lists them). */
+function writeSegments(outDir: string, first: number, last: number, ext = 'ts'): void {
+  for (let i = first; i <= last; i++) writeFileSync(join(outDir, `seg_${String(i).padStart(5, '0')}.${ext}`), 'x');
+}
+const SEGMENT_FILE = /^seg_(\d+)\.(ts|m4s)$/;
+const segmentFiles = (dir: string) => readdirSync(dir).filter((f) => SEGMENT_FILE.test(f)).sort();
+const segmentNames = (first: number, last: number, ext = 'ts') =>
+  Array.from({ length: last - first + 1 }, (_, i) => `seg_${String(first + i).padStart(5, '0')}.${ext}`);
 
 describe('session manager', () => {
   test('shares a live session between two clients', async () => {
@@ -867,6 +879,105 @@ describe('session manager', () => {
     expect(argAfter(h.children[2]!.args, '-start_number')).toBe('5');
   });
 
+  // Ruling R33: a relaunched FFmpeg writes a fresh playlist and deletes only its own segments, so the
+  // session deletes the ones the previous run left behind.
+  test("after a live relaunch the previous run's segments go once the new playlist is up and a 10 s grace has passed", async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+    writeSegments(outDir, 0, 4);
+    writeSegments(outDir, 3, 4, 'm4s');
+    writeFileSync(join(outDir, 'init.mp4'), 'x'); // the relaunch rewrites it
+    writeFileSync(join(outDir, 'seg_00001.ts.tmp'), 'x'); // not a segment name
+    writePlaylist(outDir, 0, 4);
+    await vi.advanceTimersByTimeAsync(12_000);
+    h.children[0]!.exit(0); // reconnects at once, from segment 5
+    await flush();
+    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('5');
+
+    // Until the new run has written its playlist, players are still on the old one.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(segmentFiles(outDir)).toHaveLength(7);
+
+    writeSegments(outDir, 5, 6);
+    writeSegments(outDir, 5, 5, 'm4s');
+    writePlaylist(outDir, 5, 6);
+    await vi.advanceTimersByTimeAsync(9_900); // a player may still be fetching the old run's last segments
+    expect(segmentFiles(outDir)).toHaveLength(10);
+    await vi.advanceTimersByTimeAsync(5_200); // past the grace and the next housekeeping pass
+    expect(readdirSync(outDir).sort()).toEqual([
+      'index.m3u8',
+      'init.mp4',
+      'seg_00001.ts.tmp',
+      'seg_00005.m4s',
+      'seg_00005.ts',
+      'seg_00006.ts',
+    ]);
+    expect(h.logs).toContainEqual({ level: 'info', m: 'removed old segments', o: { sessionId: s.sessionId, below: 5, deleted: 7 } });
+    expect(alive(h.m, s.sessionId)).toBe(true);
+  });
+
+  test('a restart after a failure prunes too, and a session that stops before the grace is up deletes nothing more', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+    writeSegments(outDir, 0, 2);
+    writePlaylist(outDir, 0, 2);
+    h.children[0]!.exit(1); // a quick failure: restarted after the 1 s backoff, from segment 3
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('3');
+    writeSegments(outDir, 3, 3);
+    writePlaylist(outDir, 3, 3);
+    await vi.advanceTimersByTimeAsync(15_100);
+    expect(segmentFiles(outDir)).toEqual(['seg_00003.ts']);
+
+    h.children[1]!.exit(1); // another failure: restarted after 2 s, from segment 4
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(argAfter(h.children[2]!.args, '-start_number')).toBe('4');
+    writeSegments(outDir, 4, 4);
+    writePlaylist(outDir, 4, 4);
+    await vi.advanceTimersByTimeAsync(5_000); // the new playlist has been seen; the grace is running
+    const released = h.m.release(s.sessionId, 'A');
+    await vi.advanceTimersByTimeAsync(100);
+    await released;
+    await vi.waitFor(() => expect(existsSync(outDir)).toBe(false));
+
+    // Whatever appears there now is not the stopped session's to delete.
+    mkdirSync(outDir);
+    writeSegments(outDir, 0, 3);
+    writePlaylist(outDir, 9, 9);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(segmentFiles(outDir)).toEqual(segmentNames(0, 3));
+    expect(h.logs.filter((l) => l.m === 'removed old segments')).toHaveLength(1);
+  });
+
+  test('runs shorter than the grace still have the runs before them pruned', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+    let most = 0;
+    for (let run = 0; run < 6; run++) {
+      // Five segments at once, then 12 s until the input "ends" and FFmpeg is relaunched.
+      writeSegments(outDir, 5 * run, 5 * run + 4);
+      writePlaylist(outDir, 5 * run, 5 * run + 4);
+      for (let t = 0; t < 12_000; t += 1_000) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        most = Math.max(most, segmentFiles(outDir).length);
+      }
+      h.children[run]!.exit(0);
+      await flush();
+    }
+    expect(h.spawn).toHaveBeenCalledTimes(7);
+    // At most the current run and the two before it, which are still in their grace periods.
+    expect(most).toBeLessThanOrEqual(15);
+
+    writeSegments(outDir, 30, 34);
+    writePlaylist(outDir, 30, 34);
+    await vi.advanceTimersByTimeAsync(15_100);
+    expect(segmentFiles(outDir)).toEqual(segmentNames(30, 34));
+    expect(alive(h.m, s.sessionId)).toBe(true);
+  });
+
   // Ruling R29: a finite live playlist (ENDLIST) is swapped for the provider's continuous TS stream.
   test('a live playlist with a finite duration switches to the continuous stream, for the session and its relaunches', async () => {
     const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? LIVE_TS : FINITE_HLS));
@@ -1020,6 +1131,73 @@ describe('session manager', () => {
     const ok = await h.m.start(live(1, `Az_9-${'x'.repeat(59)}`)); // 64 characters
     expect(ok.url).toContain(`/Az_9-${'x'.repeat(59)}/index.m3u8`);
     expect(h.m.touch(ok.sessionId, 'a b')).toBe(false);
+  });
+});
+
+describe('pruneSegments', () => {
+  test('deletes only segment files numbered below the cut, and a missing directory is nothing to do', () => {
+    const dir = join(transcodeDir, 'prune');
+    mkdirSync(dir);
+    writeSegments(dir, 8, 12);
+    writeSegments(dir, 9, 10, 'm4s');
+    for (const other of ['init.mp4', 'index.m3u8', 'seg_00001.ts.tmp', 'seg_x.ts', 'seg_00002.mp4']) writeFileSync(join(dir, other), 'x');
+
+    expect(pruneSegments(dir, 10)).toEqual({ deleted: 3, failed: 0 }); // seg 8 and 9 (.ts), seg 9 (.m4s)
+    expect(readdirSync(dir).sort()).toEqual([
+      'index.m3u8',
+      'init.mp4',
+      'seg_00001.ts.tmp',
+      'seg_00002.mp4',
+      'seg_00010.m4s',
+      'seg_00010.ts',
+      'seg_00011.ts',
+      'seg_00012.ts',
+      'seg_x.ts',
+    ]);
+    expect(pruneSegments(join(transcodeDir, 'gone'), 10)).toEqual({ deleted: 0, failed: 0 });
+  });
+});
+
+const realFfmpeg = process.env.TV_FFMPEG_PATH;
+
+// Drives pruneSegments directly (as the session manager does after a relaunch), with two real FFmpeg runs.
+describe.skipIf(!realFfmpeg)('pruneSegments with real FFmpeg', () => {
+  const media = (name: string) => join(import.meta.dirname, '../../../tools/fake-xtream/media', name);
+  const copyTs: HlsPlan = { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false };
+  const copyHevc: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, audio: null };
+  const listed = (dir: string) =>
+    readFileSync(join(dir, 'index.m3u8'), 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l !== '' && !l.startsWith('#'));
+
+  test.each([
+    { input: 'raw.ts', plan: copyTs, ext: 'ts' },
+    { input: 'hevc.mkv', plan: copyHevc, ext: 'm4s' },
+  ])("a relaunch into the same dir leaves the first run's segments ($ext), which the prune removes", ({ input, plan, ext }) => {
+    const outDir = join(transcodeDir, `relaunch-${ext}`);
+    mkdirSync(outDir);
+    const run = (startNumber: number) => {
+      const args = buildFfmpegArgs({ url: media(input), userAgent: UA, plan, live: true, startAtSec: 0, outDir, startNumber });
+      const r = spawnSync(realFfmpeg!, args, { encoding: 'utf8', windowsHide: true });
+      expect(r.status, r.stderr).toBe(0); // each run exits at the end of its (finite) input
+    };
+
+    run(0);
+    const first = segmentFiles(outDir);
+    expect(first.length).toBeGreaterThanOrEqual(2);
+    expect(first.every((f) => f.endsWith(`.${ext}`))).toBe(true);
+    const next = Math.max(...first.map((f) => Number(SEGMENT_FILE.exec(f)![1]))) + 1; // as a relaunch continues
+
+    run(next);
+    const second = listed(outDir);
+    expect(second.length).toBeGreaterThanOrEqual(2);
+    expect(second.every((f) => Number(SEGMENT_FILE.exec(f)![1]) >= next)).toBe(true); // a fresh playlist
+    expect(segmentFiles(outDir)).toEqual([...first, ...second].sort()); // FFmpeg alone leaves the first run's behind
+
+    expect(pruneSegments(outDir, next)).toEqual({ deleted: first.length, failed: 0 });
+    expect(segmentFiles(outDir)).toEqual([...second].sort());
+    for (const f of second) expect(existsSync(join(outDir, f)), f).toBe(true);
+    if (ext === 'm4s') expect(existsSync(join(outDir, 'init.mp4'))).toBe(true);
   });
 });
 

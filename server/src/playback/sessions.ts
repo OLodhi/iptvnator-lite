@@ -93,10 +93,43 @@ const HEALTHY_RESET_MS = 60_000; // a live process producing segments this long 
 // earlier failures. Anything quicker is a failure, so an input read faster than real time can't tight-loop.
 const RECONNECT_MIN_SEGMENTS = 2;
 const RECONNECT_MIN_RUN_MS = 10_000;
+// R33: a relaunched live FFmpeg writes a fresh playlist, and delete_segments only removes what that run
+// listed, so the session deletes the previous runs' segments itself. It waits this long after the new
+// playlist appears (checked on each housekeeping pass), for players still fetching the old run's last ones.
+const OLD_SEGMENT_GRACE_MS = 10_000;
+const SEGMENT_FILE = /^seg_(\d+)\.(?:ts|m4s)$/;
 // A plain file name: no separators, no drive or stream colons, not '.' or '..'.
 const PLAIN_FILE = /^[\w-][\w.-]*$/;
 // Session dirs are named by randomUUID(); nothing else in transcodeDir is ever removed.
 const SESSION_DIR = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Deletes the segment files (`seg_<n>.ts` / `seg_<n>.m4s`) in `outDir` numbered below `below`; nothing
+ * else (`init.mp4`, the playlist) is touched. A missing directory has nothing to delete; a file that
+ * can't be deleted is counted in `failed` and left for a later pass or the session's end.
+ */
+export function pruneSegments(outDir: string, below: number): { deleted: number; failed: number } {
+  let names: string[];
+  try {
+    names = readdirSync(outDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { deleted: 0, failed: 0 };
+    throw err;
+  }
+  let deleted = 0;
+  let failed = 0;
+  for (const name of names) {
+    const m = SEGMENT_FILE.exec(name);
+    if (!m || Number(m[1]) >= below) continue;
+    try {
+      rmSync(join(outDir, name), { force: true });
+      deleted++;
+    } catch {
+      failed++;
+    }
+  }
+  return { deleted, failed };
+}
 
 /** True once FFmpeg has written a playlist that lists at least one segment. */
 export async function defaultIsReady(outDir: string): Promise<boolean> {
@@ -133,6 +166,9 @@ type Session = {
   lastSegment: number; // live watchdog: highest segment seen,
   advancedAt: number; // when it last went up,
   healthySince: number | null; // and when the current process first produced one
+  // R33, one per relaunch: delete segments numbered below `below` once a playlist lists one at or above
+  // it (the new run's, first seen at `seenAt`) and the grace has passed.
+  prunes: { below: number; seenAt: number | null }[];
   clients: Map<string, number>; // viewer → last seen
   stopped: Promise<void> | null;
 };
@@ -175,6 +211,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const housekeeping = setInterval(() => {
     void reap(); // first, so the watchdog doesn't restart what nobody watches
     watchdog();
+    pruneOldRuns();
   }, HOUSEKEEPING_MS);
   housekeeping.unref();
 
@@ -227,6 +264,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     s.clients.clear();
     clearTimeout(s.restartTimer ?? undefined);
     s.restartTimer = null;
+    s.prunes = []; // the whole directory is about to go
     const stopped = (async () => {
       await killAndWait(s);
       if (s.outDir) await removeDir(s.outDir);
@@ -340,6 +378,36 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     } catch (err) {
       log.warn({ sessionId: s.id, err: errorText(err) }, 'ffmpeg restart failed');
       void stopSession(s, 'upstream failed');
+      return;
+    }
+    // Each relaunch gets its own pass, so runs shorter than the grace still get their predecessors deleted.
+    s.prunes.push({ below: startNumber, seenAt: null });
+  }
+
+  /** R33: deletes the segments earlier live runs left behind, once the newer playlist is up and the grace is over. */
+  function pruneOldRuns(): void {
+    const now = deps.now();
+    for (const s of sessions.values()) {
+      if (s.prunes.length === 0 || !s.outDir) continue;
+      const newest = lastSegment(s.outDir);
+      let below = -1;
+      s.prunes = s.prunes.filter((p) => {
+        if (p.seenAt === null) {
+          if (newest < p.below) return true; // players are still on the old playlist
+          p.seenAt = now;
+        }
+        if (now - p.seenAt < OLD_SEGMENT_GRACE_MS) return true;
+        below = Math.max(below, p.below);
+        return false;
+      });
+      if (below < 0) continue;
+      try {
+        const { deleted, failed } = pruneSegments(s.outDir, below);
+        if (deleted > 0) log.info({ sessionId: s.id, below, deleted }, 'removed old segments');
+        if (failed > 0) log.warn({ sessionId: s.id, below, failed }, 'could not remove some old segments');
+      } catch (err) {
+        log.warn({ sessionId: s.id, err: errorText(err) }, 'could not remove old segments');
+      }
     }
   }
 
@@ -571,6 +639,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       lastSegment: -1,
       advancedAt: 0,
       healthySince: null,
+      prunes: [],
       clients: new Map([[req.clientId, deps.now()]]),
       stopped: null,
     };
