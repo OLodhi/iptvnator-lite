@@ -163,6 +163,20 @@ describe('createProber', () => {
     expect(ffprobe.runs()).toBe(2);
   });
 
+  test('skipCache neither reads nor writes the cache', async () => {
+    const db = openDb(':memory:');
+    const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+    const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+    const result = parseFfprobe(fixture('h264-mkv'));
+    const shift = 'http://provider.test/timeshift/someuser/secret/60/2026-07-01:19-00/1.ts';
+
+    expect(await prober.probe(shift, 'ua', undefined, { skipCache: true })).toEqual({ result, cached: false });
+    expect(rows(db)).toEqual([]);
+    await prober.probe(shift, 'ua'); // cached as usual without the option
+    expect(await prober.probe(shift, 'ua', undefined, { skipCache: true })).toEqual({ result, cached: false });
+    expect(ffprobe.runs()).toBe(3);
+  });
+
   test.each(['{"formatName":"hls",', 'null', '[]', '{"formatName":"hls"}'])(
     'a cached row that does not parse as a probe result (%s) is a miss: probed again and overwritten',
     async (corrupt) => {

@@ -69,6 +69,14 @@ const playSchema = {
     clientId: { type: 'string', pattern: CLIENT_ID.source },
     episodeRemoteId: { type: 'string', minLength: 1 },
     startAtSec: { type: 'number', minimum: 0 },
+    catchup: {
+      type: 'object',
+      required: ['startSec', 'stopSec'],
+      properties: {
+        startSec: { type: 'integer', minimum: 0 },
+        stopSec: { type: 'integer', minimum: 0 },
+      },
+    },
   },
 };
 

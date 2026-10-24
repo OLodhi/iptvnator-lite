@@ -21,10 +21,13 @@ const MP4 = 'mov,mp4,m4a,3gp,3g2,mj2';
 const MKV = 'matroska,webm';
 const aac = [{ codec: 'aac' }];
 
-const cases: [string, ProbeResult, 'live' | 'movie' | 'episode', boolean, unknown][] = [
+const cases: [string, ProbeResult, 'live' | 'movie' | 'episode' | 'catchup', boolean, unknown][] = [
   ['mkv h264 aac movie', probe(MKV, {}, aac), 'movie', false,
     { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false }],
   ['mp4 h264 aac movie', probe(MP4, {}, aac), 'movie', false, { mode: 'direct' }],
+  ['mp4 h264 aac episode', probe(MP4, {}, aac), 'episode', false, { mode: 'direct' }],
+  ['mp4 h264 aac catch-up is never direct', probe(MP4, {}, aac), 'catchup', false,
+    { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false }],
   ['mp4 h264 aac live', probe(MP4, {}, aac), 'live', false,
     { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false }],
   ['mpegts mpeg2 mp2 live', probe('mpegts', { codec: 'mpeg2video' }, [{ codec: 'mp2' }]), 'live', false,

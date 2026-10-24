@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { buildFfmpegArgs } from './ffmpegArgs.ts';
 import type { HlsPlan } from './policy.ts';
-import type { ProbeOutcome, ProbeResult } from './probe.ts';
+import type { ProbeOptions, ProbeOutcome, ProbeResult } from './probe.ts';
 import { createSessionManager, defaultIsReady, PlaybackError, pruneSegments } from './sessions.ts';
 import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from './sessions.ts';
 
@@ -26,6 +26,8 @@ const MP4_MOVIE: ProbeResult = {
 /** What the prober returns: a result from a fresh ffprobe run, or one from its cache. */
 const fresh = (result: ProbeResult): ProbeOutcome => ({ result, cached: false });
 const fromCache = (result: ProbeResult): ProbeOutcome => ({ result, cached: true });
+/** The probe options for every kind but catch-up. */
+const USE_CACHE: ProbeOptions = { skipCache: false };
 
 const UA = 'TiviMate/4.7.0';
 const live = (n: number, clientId: string): StartRequest => ({
@@ -47,6 +49,19 @@ const movie = (n: number, clientId: string, ext = 'mkv'): StartRequest => ({
   kind: 'movie',
   contentKey: `movie:${n}`,
   sourceUrl: `http://provider.test/movie/user/secret/${n}.${ext}`,
+  userAgent: UA,
+  startAtSec: 0,
+  clientId,
+  quality: 'original',
+});
+/** A timeshift TS whose own duration (the whole recording, say) is not the programme's. */
+const TIMESHIFT_TS: ProbeResult = { ...LIVE_TS, durationSec: 1795.4 };
+const catchup = (clientId: string): StartRequest => ({
+  providerId: 1,
+  kind: 'catchup',
+  contentKey: 'catchup:1:1782928800',
+  sourceUrl: 'http://provider.test/timeshift/user/secret/60/2026-07-01:19-00/1.ts',
+  durationHintSec: 3600,
   userAgent: UA,
   startAtSec: 0,
   clientId,
@@ -591,7 +606,7 @@ describe('session manager', () => {
     const mkv = movie(1, 'A');
     const outcome = expect(h.m.start(mkv)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
     await flush();
-    expect(probe.mock.calls).toEqual([[mkv.sourceUrl, UA, RELAY_URL]]);
+    expect(probe.mock.calls).toEqual([[mkv.sourceUrl, UA, RELAY_URL, USE_CACHE]]);
     expect(h.events).toEqual(['relay:register', 'spawn:1']); // registered before the probe; FFmpeg reads through it too
     h.children[0]!.exit(1); // the start fails after a cached probe, which is forgotten (R34)
     await outcome;
@@ -620,7 +635,7 @@ describe('session manager', () => {
     const s = await start;
     expect(s.mode).toBe('direct');
     expect(h.events).toEqual(['relay:register', 'relay:unregister']);
-    expect(h.probe.mock.calls).toEqual([[req.sourceUrl, UA, RELAY_URL]]);
+    expect(h.probe.mock.calls).toEqual([[req.sourceUrl, UA, RELAY_URL, USE_CACHE]]);
     expect(h.m.directSource(s.sessionId)).toEqual({ url: req.sourceUrl, userAgent: UA }); // the proxy reads the provider
     await h.m.release(s.sessionId, 'A');
     expect(relay.unregister).toHaveBeenCalledTimes(1);
@@ -634,9 +649,9 @@ describe('session manager', () => {
     const movieM3u8 = { ...movie(3, 'C'), sourceUrl: 'http://provider.test/movie/user/secret/3.m3u8' };
     for (const req of [liveM3u8, liveTs, movieM3u8]) await h.m.start(req);
     expect(h.probe.mock.calls).toEqual([
-      [liveM3u8.sourceUrl, UA, undefined],
-      [liveTs.sourceUrl, UA, undefined],
-      [movieM3u8.sourceUrl, UA, undefined],
+      [liveM3u8.sourceUrl, UA, undefined, USE_CACHE],
+      [liveTs.sourceUrl, UA, undefined, USE_CACHE],
+      [movieM3u8.sourceUrl, UA, undefined, USE_CACHE],
     ]);
     expect(relay.register).not.toHaveBeenCalled();
   });
@@ -653,8 +668,8 @@ describe('session manager', () => {
     const php = { ...movie(4, 'A'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
     await h.m.start(php);
     expect(probe.mock.calls).toEqual([
-      [php.sourceUrl, UA, RELAY_URL],
-      [php.sourceUrl, UA, undefined],
+      [php.sourceUrl, UA, RELAY_URL, USE_CACHE],
+      [php.sourceUrl, UA, undefined, USE_CACHE],
     ]);
     expect(h.events).toEqual(['relay:register', 'relay:unregister', 'spawn:1']);
     expect(argAfter(h.children[0]!.args, '-i')).toBe(php.sourceUrl);
@@ -714,6 +729,44 @@ describe('session manager', () => {
     h.children[0]!.exit(1); // FFmpeg gives up before the stream is ready
     await outcome;
     expect(h.events).toEqual(['relay:register', 'spawn:1', 'exit:1', 'relay:unregister']);
+  });
+
+  test('catch-up uses VOD semantics with the duration hint and the relay', async () => {
+    const relay = stubRelay(() => {});
+    const h = harness({ relay, probe: async () => fresh(TIMESHIFT_TS) });
+    const a = await h.m.start({ ...catchup('A'), startAtSec: 120 }); // a start position is ignored
+    const b = await h.m.start(catchup('B'));
+
+    expect(a).toMatchObject({ mode: 'hls', durationSec: 3600, startAtSec: 0 });
+    expect(b.sessionId).not.toBe(a.sessionId); // one per viewer, like any VOD
+    expect(relay.register).toHaveBeenCalledWith({ url: catchup('A').sourceUrl, userAgent: UA });
+    const args = h.children[0]!.args;
+    expect(argAfter(args, '-i')).toBe(RELAY_URL);
+    expect(argAfter(args, '-hls_playlist_type')).toBe('event');
+    expect(args).not.toContain('-ss');
+
+    // A finished FFmpeg is not relaunched, and a viewer is kept for the VOD idle time, not the live one.
+    h.children[0]!.exit(0);
+    const left = h.m.release(b.sessionId, 'B');
+    await vi.advanceTimersByTimeAsync(30_000);
+    await left;
+    expect(alive(h.m, a.sessionId)).toBe(true);
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(alive(h.m, a.sessionId)).toBe(false);
+  });
+
+  test('catch-up probes skip the cache', async () => {
+    const probe = vi.fn(async (url: string, _userAgent: string, _readFrom?: string, _opts?: ProbeOptions) =>
+      fresh(url.endsWith('.mkv') ? MKV_MOVIE : TIMESHIFT_TS),
+    );
+    const h = harness({ relay: stubRelay(() => {}), probe });
+    await h.m.start(catchup('A'));
+    await h.m.start(movie(1, 'B'));
+    expect(probe.mock.calls).toEqual([
+      [catchup('A').sourceUrl, UA, RELAY_URL, { skipCache: true }], // a timeshift URL is single-use
+      [movie(1, 'B').sourceUrl, UA, RELAY_URL, USE_CACHE],
+    ]);
   });
 
   test('logs ffmpeg stderr and urls with credentials redacted', async () => {

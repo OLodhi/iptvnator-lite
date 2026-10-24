@@ -108,7 +108,14 @@ export type GridRow = { item: CatalogItem; programmes: Programme[]; hasGuide: bo
 export type GuideSource = { key: string; name: string };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
-export type PlayRequest = { itemId: number; episodeRemoteId?: string; startAtSec?: number; clientId: string };
+export type PlayRequest = {
+  itemId: number;
+  episodeRemoteId?: string;
+  startAtSec?: number;
+  clientId: string;
+  /** Plays a past (or airing) programme on a live channel instead; UTC epoch seconds. */
+  catchup?: { startSec: number; stopSec: number };
+};
 /**
  * `url` is server-relative and names the viewer: `/api/sessions/<sessionId>/<clientId>/index.m3u8` (HLS)
  * or `/api/sessions/<sessionId>/<clientId>/direct`.

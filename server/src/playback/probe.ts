@@ -21,12 +21,15 @@ export type ProbeResult = {
 /** A probe's result, and whether it came from the probe cache rather than a fresh ffprobe run. */
 export type ProbeOutcome = { result: ProbeResult; cached: boolean };
 
+/** `skipCache`: the cache is neither read nor written, for a URL that is good for one request only (a timeshift). */
+export type ProbeOptions = { skipCache?: boolean };
+
 export interface Prober {
   /**
    * Probes the stream at `url`. `readFrom`, when given, is where ffprobe actually reads it (a session's relay URL);
    * the result is still cached, logged and forgotten by `url`, as a relay URL lasts only as long as its session.
    */
-  probe(url: string, userAgent: string, readFrom?: string): Promise<ProbeOutcome>;
+  probe(url: string, userAgent: string, readFrom?: string, opts?: ProbeOptions): Promise<ProbeOutcome>;
   /** Forgets any cached result for `url`, so its next probe runs ffprobe again (R34). */
   invalidate(url: string): void;
 }
@@ -76,8 +79,8 @@ export function parseFfprobe(json: unknown): ProbeResult {
 
 /** Wraps a probe so each result is logged as one line: container, video, audio, duration and whether it was cached (URL redacted). */
 export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] {
-  return async (url, userAgent, readFrom) => {
-    const outcome = await probe(url, userAgent, readFrom);
+  return async (url, userAgent, readFrom, opts) => {
+    const outcome = await probe(url, userAgent, readFrom, opts);
     const { result: r, cached } = outcome;
     const v = r.video;
     log.info(
@@ -176,13 +179,13 @@ export function createProber(deps: {
 
   // Rows are keyed by the redacted URL, so no credentials are stored.
   return {
-    async probe(url, userAgent, readFrom) {
+    async probe(url, userAgent, readFrom, opts) {
       const key = redactUrl(url);
-      const cached = fromCache(key);
+      const cached = opts?.skipCache ? null : fromCache(key);
       if (cached) return { result: cached, cached: true };
 
       const result = parseFfprobe(await runFfprobe(readFrom ?? url, userAgent));
-      putStmt.run(key, JSON.stringify(result), now());
+      if (!opts?.skipCache) putStmt.run(key, JSON.stringify(result), now());
       return { result, cached: false };
     },
     invalidate(url) {

@@ -16,7 +16,7 @@ const COPY_AUDIO = new Set(['aac', 'ac3', 'eac3', 'mp3']);
 
 export function choosePlan(
   probe: ProbeResult,
-  ctx: { kind: 'live' | 'movie' | 'episode'; transcodeInterlaced: boolean },
+  ctx: { kind: 'live' | 'movie' | 'episode' | 'catchup'; transcodeInterlaced: boolean },
 ): PlaybackPlan {
   const video = probe.video;
   const firstAudio = probe.audio[0];
@@ -24,7 +24,9 @@ export function choosePlan(
   const container = probe.formatName.includes('mp4') || probe.formatName.includes('mov');
   const videoOk = video !== null && (video.codec === 'h264' || (video.codec === 'hevc' && video.codecTag === 'hvc1'));
   const audioOk = firstAudio === undefined || DIRECT_AUDIO.has(firstAudio.codec);
-  if (ctx.kind !== 'live' && container && videoOk && audioOk) return { mode: 'direct' };
+  // Only a file can be proxied as is: a live or catch-up stream always goes through FFmpeg.
+  const file = ctx.kind === 'movie' || ctx.kind === 'episode';
+  if (file && container && videoOk && audioOk) return { mode: 'direct' };
 
   const deinterlace = video !== null && video.interlaced && ctx.transcodeInterlaced;
   let videoAction: HlsPlan['video'];

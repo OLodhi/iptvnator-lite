@@ -48,12 +48,16 @@ export type SessionManagerDeps = {
 
 export type StartRequest = {
   providerId: number;
-  kind: 'live' | 'movie' | 'episode';
+  /** Catch-up plays like a VOD title (per viewer, read through the relay), from its start. */
+  kind: 'live' | 'movie' | 'episode' | 'catchup';
   contentKey: string;
   sourceUrl: string;
   /** Live only: the provider's continuous stream, used instead if `sourceUrl` is a finite playlist (R29). */
   fallbackSourceUrl?: string;
+  /** The title's duration, when known better than its probe can tell (a catch-up programme's length). */
+  durationHintSec?: number;
   userAgent: string;
+  /** Ignored for live and catch-up. */
   startAtSec: number;
   clientId: string;
   quality: 'original';
@@ -159,6 +163,7 @@ type Session = {
   // starting: probing/spawning, not yet joinable; running: registered; stopping: on its way out.
   state: 'starting' | 'running' | 'stopping';
   mode: 'hls' | 'direct';
+  durationHintSec: number | null;
   durationSec: number | null;
   plan: HlsPlan | null;
   inputFormat: string; // ffprobe's format_name for the source
@@ -495,7 +500,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    * error passes through as is.
    */
   function probeRace(s: Session, url: string, expired: Promise<never>, readFrom?: string): Promise<ProbeResult> {
-    const probing = deps.probe(url, s.userAgent, readFrom).then(({ result, cached }) => {
+    // A timeshift URL is good for one request only: a cached result for it says nothing about the next.
+    const opts = { skipCache: s.kind === 'catchup' };
+    const probing = deps.probe(url, s.userAgent, readFrom, opts).then(({ result, cached }) => {
       if (cached) s.cachedProbes.push(url);
       return result;
     });
@@ -590,7 +597,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
       s.inputFormat = probe.formatName;
-      s.durationSec = s.kind === 'live' ? null : probe.durationSec;
+      s.durationSec = s.kind === 'live' ? null : (s.durationHintSec ?? probe.durationSec);
       if (plan.mode === 'direct') {
         s.mode = 'direct';
         await letGoOfRelay(s); // the direct proxy holds the provider connection from here on
@@ -656,9 +663,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   async function startNow(req: StartRequest): Promise<StartedSession> {
     const live = req.kind === 'live';
+    const startAtSec = live || req.kind === 'catchup' ? 0 : req.startAtSec;
     const key = live
       ? `${req.providerId}|${req.contentKey}|${req.quality}`
-      : `${req.clientId}|${req.contentKey}|${req.startAtSec}`;
+      : `${req.clientId}|${req.contentKey}|${startAtSec}`;
     await preempt(req.clientId, live ? key : null);
 
     // Steps 2 and 3. Every await here re-checks from the top; the final pass through and the
@@ -697,9 +705,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       kind: req.kind,
       sourceUrl: req.sourceUrl,
       userAgent: req.userAgent,
-      startAtSec: live ? 0 : req.startAtSec,
+      startAtSec,
       state: 'starting',
       mode: 'hls',
+      durationHintSec: req.durationHintSec ?? null,
       durationSec: null,
       plan: null,
       inputFormat: '',

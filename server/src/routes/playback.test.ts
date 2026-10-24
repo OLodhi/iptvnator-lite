@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { PlayResponse } from '@tv/shared';
 import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
+import { formatInZone } from '../../../tools/fake-xtream/src/guide.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { buildApp } from '../app.ts';
@@ -103,6 +104,18 @@ async function makeWorld(
   return { app, origin, db, providers, catalogue, seriesInfo, sessions, providerId, itemId };
 }
 
+/** The hour before this one: it has aired, and is inside live 1's 2-day archive. */
+function lastHour(): { startSec: number; stopSec: number } {
+  const startSec = Math.floor(Date.now() / 3_600_000) * 3600 - 3600;
+  return { startSec, stopSec: startSec + 3600 };
+}
+
+/** A timeshift start as the fake's provider (Europe/London) reads it: 'YYYY-MM-DD:HH-MM'. */
+function londonStart(startSec: number): string {
+  const wall = formatInZone(startSec * 1000, 'Europe/London');
+  return `${wall.slice(0, 10)}:${wall.slice(11, 13)}-${wall.slice(14, 16)}`;
+}
+
 const playBody = (w: World, body: Record<string, unknown>) =>
   w.app.inject({ method: 'POST', url: '/api/play', payload: body });
 
@@ -147,6 +160,9 @@ describe('playback routes', () => {
       { itemId: id, clientId: 'x'.repeat(65) },
       { itemId: id, clientId: 'A', startAtSec: -1 },
       { itemId: id, clientId: 'A', episodeRemoteId: '' },
+      { itemId: id, clientId: 'A', catchup: { startSec: 1.5, stopSec: 3600 } },
+      { itemId: id, clientId: 'A', catchup: { startSec: 0, stopSec: -1 } },
+      { itemId: id, clientId: 'A', catchup: { startSec: 0 } },
     ];
     for (const body of bodies) {
       const res = await playBody(w, body);
@@ -195,6 +211,32 @@ describe('playback routes', () => {
         sourceUrl: `${fake.url}/series/u/p/201.mkv`,
       }),
     );
+  });
+
+  test('POST /api/play starts catch-up on a live channel and records the channel in history', async () => {
+    const start = vi.spyOn(sessions, 'start').mockImplementation(async (req) => started(req.clientId, req.startAtSec));
+    w.db.prepare('DELETE FROM history').run();
+    const catchup = lastHour();
+    const { startSec } = catchup;
+    const res = await playBody(w, { itemId: w.itemId('live', 1), clientId: 'A', catchup });
+    expect(res.statusCode).toBe(200);
+    expect(start).toHaveBeenLastCalledWith({
+      providerId: w.providerId,
+      kind: 'catchup',
+      contentKey: `catchup:1:${startSec}`,
+      sourceUrl: `${fake.url}/timeshift/u/p/60/${londonStart(startSec)}/1.ts`,
+      durationHintSec: 3600,
+      userAgent: UA,
+      startAtSec: 0,
+      clientId: 'A',
+      quality: 'original',
+    });
+    expect(w.db.prepare('SELECT kind, remote_id AS remoteId FROM history').all()).toEqual([{ kind: 'live', remoteId: '1' }]);
+
+    const noArchive = await playBody(w, { itemId: w.itemId('live', 2), clientId: 'A', catchup });
+    expect(noArchive.statusCode).toBe(400);
+    expect(noArchive.json()).toEqual({ code: 'VALIDATION', message: "This channel doesn't support catch-up" });
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   test('POST /api/play answers 404 for an unknown item or episode and 400 for a series without one', async () => {
@@ -588,7 +630,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
           ffmpegPath: config.ffmpegPath,
           transcodeDir: config.transcodeDir,
           spawn: spawnFfmpeg(log),
-          probe: (url, userAgent, readFrom) => prober.probe(url, userAgent, readFrom),
+          probe: (url, userAgent, readFrom, opts) => prober.probe(url, userAgent, readFrom, opts),
           invalidateProbe: (url) => prober.invalidate(url),
           transcodeInterlaced: false,
           maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
@@ -618,7 +660,13 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     rmSync(scratch, { recursive: true, force: true });
   });
 
-  type Play = { itemId: number; clientId: string; episodeRemoteId?: string; startAtSec?: number };
+  type Play = {
+    itemId: number;
+    clientId: string;
+    episodeRemoteId?: string;
+    startAtSec?: number;
+    catchup?: { startSec: number; stopSec: number };
+  };
 
   async function play(body: Play) {
     const res = await playBody(w, body);
@@ -870,6 +918,34 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     expect(logs.slice(logsBefore).filter((l) => /HTTP error 403|moov atom not found/.test(l))).toEqual([]);
   });
 
+  test('plays a catch-up programme', async () => {
+    const catchup = lastHour();
+    const shiftsBefore = fake.timeshiftRequests().length;
+    const r = await playOk({ itemId: w.itemId('live', 1), clientId: 'A', catchup });
+    expect(r).toMatchObject({ mode: 'hls', durationSec: 3600, startAtSec: 0 });
+    const pl = await w.app.inject(r.url);
+    expect(pl.statusCode).toBe(200);
+    expect(pl.body).toContain('#EXT-X-PLAYLIST-TYPE:EVENT');
+    expect((await w.app.inject(firstSegment(pl.body, r.url))).statusCode).toBe(200);
+    const start = londonStart(catchup.startSec);
+    expect(fake.timeshiftRequests().slice(shiftsBefore)[0]).toEqual({ id: '1', start, durationMin: 60, ext: 'ts' });
+  });
+
+  test('catch-up after live on a one-connection provider', async () => {
+    const logsBefore = logs.length;
+    await playOk({ itemId: w.itemId('live', 1), clientId: 'A' });
+    // Switch while the live FFmpeg holds the one connection.
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBeGreaterThanOrEqual(1), { timeout: 8_000, interval: 2 });
+    // Counted from the switch: an uncached probe of the HLS channel has ffprobe prefetch a segment on a second
+    // connection, which the fake refuses (and ffprobe survives).
+    const refusedBefore = fake.refusedMediaRequests().length;
+
+    const r = await playOk({ itemId: w.itemId('live', 1), clientId: 'A', catchup: lastHour() });
+    expect(r).toMatchObject({ mode: 'hls', durationSec: 3600 }); // the catch-up, not the live session again
+    expect(logs.slice(logsBefore).filter((l) => /HTTP error 403/.test(l))).toEqual([]);
+    expect(fake.refusedMediaRequests().slice(refusedBefore)).toEqual([]);
+  });
+
   test('dead channel fails cleanly', async () => {
     const res = await play({ itemId: w.itemId('live', 999), clientId: 'A' });
     expect(res.statusCode).toBe(502);
@@ -1026,7 +1102,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
           ffmpegPath: config.ffmpegPath,
           transcodeDir: config.transcodeDir,
           spawn: spawnFfmpeg(log),
-          probe: (url, userAgent, readFrom) => prober.probe(url, userAgent, readFrom),
+          probe: (url, userAgent, readFrom, opts) => prober.probe(url, userAgent, readFrom, opts),
           invalidateProbe: (url) => prober.invalidate(url),
           transcodeInterlaced: false,
           maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
