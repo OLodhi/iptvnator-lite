@@ -2,12 +2,13 @@ import { dirname, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
+import { generateCatalogue, smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream, FakeXtreamOptions } from '../../../tools/fake-xtream/src/server.ts';
 import { syncCatalogue } from '../catalogue/sync.ts';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
+import { ProviderError } from '../providers/errors.ts';
 import { createProviderService } from '../providers/service.ts';
 import { createXtreamClient } from '../providers/xtream/client.ts';
 import type { XtreamClient } from '../providers/xtream/client.ts';
@@ -24,6 +25,23 @@ const DAY = 86_400;
 const HOUR = 3600;
 // Nine days ahead, so the eight-day cut-off has programmes to drop.
 const WIDE = { pastDays: 3, futureDays: 9, programmeMinutes: 60 };
+// One-minute programmes, so batches are written while a refresh is still running.
+const MINUTELY = { pastDays: 3, futureDays: 2, programmeMinutes: 1 };
+const AUTH_FAILED = () => new ProviderError('PROVIDER_AUTH_FAILED', 'The provider rejected the credentials');
+
+const at = (sec: number) => `${new Date(sec * 1000).toISOString().slice(0, 19).replace(/[-T:]/g, '')} +0000`;
+const xmlChannel = (id: string, name: string) => `<channel id="${id}"><display-name>${name}</display-name></channel>`;
+const xmlProgramme = (channel: string, start = NOW, minutes = 60) =>
+  `<programme start="${at(start)}" stop="${at(start + minutes * 60)}" channel="${channel}"><title>T</title></programme>`;
+/** The client, but its xmltv.php is this hand-written document. */
+const feeding = (client: XtreamClient, xml: string): XtreamClient => ({
+  ...client,
+  xmltv: async () => Readable.from([Buffer.from(xml)]),
+});
+const hundredChannels = () => generateCatalogue({ live: 100, movie: 0, series: 0, categoriesPerKind: 2 });
+/** Provider listings every minute from now, enough to fill a batch. */
+const minuteListings = (n = 2500) =>
+  Array.from({ length: n }, (_, i) => ({ title: 'T', description: null, start: NOW + i * 60, stop: NOW + i * 60 + 60 }));
 
 let fakes: FakeXtream[] = [];
 let db: Db;
@@ -127,20 +145,21 @@ describe('refreshGuide from xmltv', () => {
 
   test("wanted keys are fixed at the first programme and include every item's guide id", async () => {
     const real = await setup();
-    const at = (sec: number) => `${new Date(sec * 1000).toISOString().slice(0, 19).replace(/[-T:]/g, '')} +0000`;
-    const prog = (channel: string) =>
-      `<programme start="${at(NOW)}" stop="${at(NOW + HOUR)}" channel="${channel}"><title>T</title></programme>`;
-    // No <channel> for item 1's id (and in another case); a channel for item 3's name only after programmes began.
-    const late = '<channel id="late"><display-name>MPEG-2 Channel</display-name></channel>';
-    const xml = `<tv>${prog('HLS.UK')}${late}${prog('late')}</tv>`;
-    const client: XtreamClient = { ...real, xmltv: async () => Readable.from([Buffer.from(xml)]) };
-    const r = await refresh(client);
+    // hls.uk is declared but its programmes say HLS.UK; raw.uk (item 2's id) is never declared; nothing wants
+    // other.uk; a channel for item 3's name arrives only after programmes began.
+    const xml =
+      `<tv>${xmlChannel('hls.uk', 'HLS Channel')}${xmlChannel('other.uk', 'Other Channel')}` +
+      `${xmlProgramme('HLS.UK')}${xmlProgramme('RAW.UK')}${xmlProgramme('other.uk')}${xmlProgramme('other.uk', NOW + HOUR)}` +
+      `${xmlChannel('late', 'MPEG-2 Channel')}${xmlProgramme('late')}</tv>`;
+    const r = await refresh(feeding(real, xml));
 
-    expect(r).toMatchObject({ source: 'xmltv', channels: 1, programmes: 1, skipped: 1 });
-    expect(column('SELECT channel_key FROM programmes')).toEqual(['HLS.UK']);
-    // The late channel still links once the guide is committed; only its earlier programme was not kept.
+    // Skipped: both other.uk programmes and the late channel's.
+    expect(r).toMatchObject({ source: 'xmltv', channels: 3, programmes: 2, skipped: 3, linked: 2 });
+    // Stored under the declared id when there is one, else as the programme names it.
+    expect(column('SELECT channel_key FROM programmes ORDER BY 1')).toEqual(['RAW.UK', 'hls.uk']);
+    expect(link('1')).toEqual({ key: 'hls.uk', method: 'id' });
+    // The late channel still links once the guide is committed; only its programme was not kept.
     expect(link('3')).toEqual({ key: 'late', method: 'normalised' });
-    expect(r.linked).toBe(1);
   });
 
   test('a failed prune after a good commit still succeeds', async () => {
@@ -220,6 +239,94 @@ describe('refreshGuide fallback to the provider EPG', () => {
     expect(times).toHaveLength(4);
     for (let i = 1; i < times.length; i++) expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(140);
   });
+
+  test('a guide with no wanted programmes falls back and leaves nothing of its own behind', async () => {
+    const real = await setup();
+    const xml = `<tv>${xmlChannel('other.uk', 'Other Channel')}${xmlChannel('nobody.uk', 'Nobody')}${xmlProgramme('other.uk')}</tv>`;
+    const written: string[] = [];
+    const spy: GuideStore = {
+      ...store,
+      insertChannels(p, g, rows) {
+        written.push(...rows.map((r) => r.key));
+        store.insertChannels(p, g, rows);
+      },
+      // Pruning after the commit would clear an orphan too; without it, only the abandon can.
+      pruneGenerations: async () => 0,
+    };
+    const r = await refresh(feeding(real, xml), { store: spy });
+
+    expect(r.source).toBe('provider');
+    expect(written).toContain('other.uk'); // the xmltv generation did write rows before it was abandoned
+    expect(column('SELECT key FROM guide_channels ORDER BY key')).toEqual(['stream:1', 'stream:2']);
+    expect(column('SELECT DISTINCT channel_key FROM programmes ORDER BY 1')).toEqual(['stream:1', 'stream:2']);
+  });
+
+  test('an xmltv auth failure skips the fallback', async () => {
+    await setup();
+    const wrong = createXtreamClient({ serverUrl: fakes[0]!.url, username: 'u', password: 'wrong' }, { userAgent: UA });
+    let epgCalls = 0;
+    const client: XtreamClient = {
+      ...wrong,
+      epgTable(streamId, o) {
+        epgCalls++;
+        return wrong.epgTable(streamId, o);
+      },
+    };
+    await expect(refresh(client)).rejects.toMatchObject({ name: 'ProviderError', code: 'PROVIDER_AUTH_FAILED' });
+    expect(epgCalls).toBe(0);
+    expect(store.state(providerId)).toMatchObject({ generation: 0, failures: 1, lastError: 'The provider rejected the credentials' });
+  });
+
+  test('an auth failure in the fallback stops every worker', async () => {
+    const real = await setup({ guide: 'none', catalogue: hundredChannels() });
+    let calls = 0;
+    const client: XtreamClient = {
+      ...real,
+      async epgTable() {
+        if (++calls > 2) throw AUTH_FAILED();
+        return [];
+      },
+    };
+    await expect(refresh(client, { fallbackConcurrency: 2 })).rejects.toMatchObject({ code: 'PROVIDER_AUTH_FAILED' });
+    expect(calls).toBeLessThanOrEqual(4); // of 100 channels
+    expect(store.state(providerId)).toMatchObject({
+      generation: 0,
+      failures: 1,
+      lastError: 'XMLTV: The provider returned HTTP 404; provider EPG: The provider rejected the credentials',
+    });
+  });
+
+  test('ten failed channels in a row, before any success, trip the breaker', async () => {
+    const real = await setup({ guide: 'none', catalogue: hundredChannels() });
+    let calls = 0;
+    const client: XtreamClient = {
+      ...real,
+      async epgTable() {
+        calls++;
+        throw new Error('socket hang up');
+      },
+    };
+    const err = await refresh(client, { fallbackConcurrency: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ code: 'PROVIDER_UNREACHABLE' });
+    expect(calls).toBe(10);
+    expect(store.state(providerId)).toMatchObject({ generation: 0, failures: 1 });
+  });
+
+  test('failed channels after a success are only channels without listings', async () => {
+    const real = await setup({ guide: 'none', catalogue: hundredChannels() });
+    let calls = 0;
+    const client: XtreamClient = {
+      ...real,
+      async epgTable() {
+        if (++calls > 1) throw new Error('socket hang up');
+        return [{ title: 'News', description: null, start: NOW, stop: NOW + HOUR }];
+      },
+    };
+    const r = await refresh(client, { fallbackConcurrency: 1 });
+    expect(calls).toBe(100);
+    expect(r).toMatchObject({ source: 'provider', channels: 1, programmes: 1 });
+  });
 });
 
 describe('refreshGuide failures keep the current guide', () => {
@@ -247,7 +354,71 @@ describe('refreshGuide failures keep the current guide', () => {
     expect(err).toBeInstanceOf(GuideError);
     expect((err as Error).message).toBe('No guide data from the provider');
     expectUnchanged(before);
-    expect(store.state(providerId)).toMatchObject({ failures: 1, lastError: 'No guide data from the provider' });
+    expect(store.state(providerId)?.failures).toBe(1);
+    expect(store.state(providerId)?.lastError).toMatch(/^XMLTV: .+; provider EPG: No guide data from the provider$/);
+  });
+
+  test('a guide cut off after batches were written keeps the current one', async () => {
+    const before = await goodGuide();
+    const quiet = await clientFor({ listings: false });
+    // 500 filler channels and 2,100 in-window programmes, so a batch of each is written before the cut.
+    const filler = Array.from({ length: 500 }, (_, i) => xmlChannel(`filler${i}`, `Filler ${i}`)).join('');
+    const minutes = Array.from({ length: 2100 }, (_, i) => xmlProgramme('hls.uk', NOW + i * 60, 1)).join('');
+    const xml = `<tv>${xmlChannel('hls.uk', 'HLS Channel')}${xmlChannel('raw.uk', 'Raw TS Channel')}${filler}${minutes}<programme start="${at(NOW)}" st`;
+    const written = { channels: 0, programmes: 0 };
+    const spy: GuideStore = {
+      ...store,
+      insertChannels(p, g, rows) {
+        store.insertChannels(p, g, rows);
+        written.channels += rows.length;
+      },
+      insertProgrammes(p, g, rows) {
+        const n = store.insertProgrammes(p, g, rows);
+        written.programmes += n;
+        return n;
+      },
+    };
+    await expect(refresh(feeding(quiet, xml), { store: spy })).rejects.toThrow(GuideError);
+    expect(written).toEqual({ channels: 500, programmes: 2000 });
+    expectUnchanged(before);
+    expect(store.state(providerId)?.failures).toBe(1);
+  });
+
+  test('a fallback that fails after writing a batch keeps the current one', async () => {
+    const before = await goodGuide();
+    const real = await clientFor({ guide: 'none' });
+    const client: XtreamClient = { ...real, epgTable: async () => minuteListings() };
+    let batches = 0;
+    const spy: GuideStore = {
+      ...store,
+      insertProgrammes(p, g, rows) {
+        if (++batches > 1) throw new Error('disk full');
+        return store.insertProgrammes(p, g, rows);
+      },
+    };
+    await expect(refresh(client, { store: spy })).rejects.toThrow('disk full');
+    expect(batches).toBeGreaterThanOrEqual(2); // the first was written; each worker may fail one
+    expectUnchanged(before);
+    expect(store.state(providerId)).toMatchObject({
+      failures: 1,
+      lastError: 'XMLTV: The provider returned HTTP 404; provider EPG: disk full',
+    });
+  });
+
+  test('a failed relink rolls the commit back and keeps the current one', async () => {
+    const before = await goodGuide();
+    db.exec("CREATE TEMP TRIGGER no_links BEFORE INSERT ON guide_links BEGIN SELECT RAISE(ABORT, 'links exploded'); END");
+    await expect(refresh(await clientFor())).rejects.toThrow('links exploded');
+    expectUnchanged(before);
+    // The old guide is still reachable through its links.
+    const reachable = count(
+      `SELECT COUNT(*) FROM guide_links l JOIN guide_state s ON s.provider_id = l.provider_id
+         JOIN programmes p ON p.provider_id = l.provider_id AND p.generation = s.generation AND p.channel_key = l.channel_key
+        WHERE l.item_id = ?`,
+      itemId('1'),
+    );
+    expect(reachable).toBe(240);
+    expect(store.state(providerId)).toMatchObject({ failures: 1, lastError: 'links exploded' });
   });
 
   test('a stalled download times out and keeps the current one', async () => {
@@ -260,22 +431,72 @@ describe('refreshGuide failures keep the current guide', () => {
     expect(store.state(providerId)?.failures).toBe(1);
   });
 
-  test('a total failure rethrows the cause and records it without credentials', async () => {
-    const client = await setup({ guide: 'none' });
+  test('a total failure rethrows the cause and records both reasons without credentials', async () => {
+    const real = await setup();
+    const client: XtreamClient = {
+      ...real,
+      xmltv: () => Promise.reject(new Error('could not fetch http://h/xmltv.php?username=u&password=s3cret')),
+    };
     const cause = new Error('could not list http://h/live/u/s3cret/1.ts?username=u&password=s3cret');
     const visibleLiveItemIds = () => {
       throw cause;
     };
     await expect(refresh(client, { visibleLiveItemIds })).rejects.toBe(cause);
-    const state = store.state(providerId)!;
-    expect(state).toMatchObject({ generation: 0, failures: 1 });
-    expect(state.lastError).toContain('could not list');
-    expect(state.lastError).not.toContain('s3cret');
+    expect(store.state(providerId)).toMatchObject({
+      generation: 0,
+      failures: 1,
+      lastError:
+        'XMLTV: could not fetch http://h/xmltv.php?username=***&password=***; ' +
+        'provider EPG: could not list http://h/live/***/***/1.ts?username=***&password=***',
+    });
+  });
+
+  test('abort during the fallback stops every worker cleanly', async () => {
+    const real = await setup({ guide: 'none' });
+    const ac = new AbortController();
+    let calls = 0;
+    let inFlight = 0;
+    const client: XtreamClient = {
+      ...real,
+      async epgTable(streamId, o) {
+        const n = ++calls;
+        if (n === 3) ac.abort(); // a worker has finished a channel, and a batch was written, by now
+        inFlight++;
+        try {
+          if (n > 2) return await real.epgTable(streamId, o);
+          await new Promise((r) => setTimeout(r, 10));
+          return minuteListings();
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    let generation = 0;
+    let written = 0;
+    const spy: GuideStore = {
+      ...store,
+      insertProgrammes(p, g, rows) {
+        generation = g;
+        const n = store.insertProgrammes(p, g, rows);
+        written += n;
+        return n;
+      },
+    };
+
+    await expect(refresh(client, { store: spy, signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(inFlight).toBe(0);
+    expect(written).toBeGreaterThan(0);
+    const callsAtRejection = calls;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(callsAtRejection);
+    expect(count('SELECT COUNT(*) FROM programmes WHERE generation = ?', generation)).toBe(0);
+    expect(count('SELECT COUNT(*) FROM guide_channels WHERE generation = ?', generation)).toBe(0);
+    expect(store.currentGeneration(providerId)).toBe(0);
+    expect(store.state(providerId)?.failures).toBe(0);
   });
 
   test('abort stops the refresh cleanly', async () => {
-    // One-minute programmes, so batches are written while the parse is still running.
-    const real = await setup({ guideWindow: { pastDays: 3, futureDays: 2, programmeMinutes: 1 } });
+    const real = await setup({ guideWindow: MINUTELY });
     const ac = new AbortController();
     let generation = 0;
     const abortingStore: GuideStore = {

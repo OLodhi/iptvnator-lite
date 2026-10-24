@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Db } from '../db/db.ts';
+import { ProviderError } from '../providers/errors.ts';
 import type { XtreamClient } from '../providers/xtream/client.ts';
 import type { Listing } from '../providers/xtream/normalise.ts';
 import { silentLog } from '../util/log.ts';
@@ -32,6 +33,8 @@ export const GUIDE_FUTURE_SEC = 8 * 86_400;
 const DAY_SEC = 86_400;
 const CHANNEL_BATCH = 500;
 const PROGRAMME_BATCH = 2000;
+/** The fallback gives up after this many failed channels in a row while none has answered yet. */
+const FALLBACK_BREAKER = 10;
 
 type Deps = {
   db: Db;
@@ -56,6 +59,7 @@ type Wanted = { exact: Map<string, number>; lower: Map<string, number> };
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 const errorText = (e: unknown): string => redactUrl(e instanceof Error ? e.message : String(e));
+const isAuthFailure = (e: unknown): boolean => e instanceof ProviderError && e.code === 'PROVIDER_AUTH_FAILED';
 /** A channel keeps a day of past programmes, or its catch-up days if longer. */
 const pastWindowSec = (catchupDays: number | null | undefined): number => Math.max(1, catchupDays ?? 0) * DAY_SEC;
 
@@ -75,25 +79,41 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
   try {
     counts = await ingestXmltv(deps, generation, nowSec);
     if (counts.programmes === 0) throw new GuideError('The XMLTV guide had no programmes for these channels');
-  } catch (e) {
+  } catch (xmltvError) {
     await store.abandonGeneration(providerId, generation);
     // The caller stopped us: not a provider failure, so no fallback and no failure recorded.
     signal?.throwIfAborted();
-    log.warn({ providerId, error: errorText(e) }, 'XMLTV guide failed; trying the provider EPG');
+    if (isAuthFailure(xmltvError)) {
+      // The fallback would send the same credentials.
+      store.recordFailure(providerId, errorText(xmltvError));
+      throw xmltvError;
+    }
+    log.warn({ providerId, error: errorText(xmltvError) }, 'XMLTV guide failed; trying the provider EPG');
     source = 'provider';
     generation = store.beginGeneration(providerId, nowSec);
     try {
       counts = await ingestProvider(deps, generation, nowSec);
-    } catch (e2) {
+    } catch (fallbackError) {
       await store.abandonGeneration(providerId, generation);
       signal?.throwIfAborted();
-      store.recordFailure(providerId, errorText(e2));
-      throw e2;
+      store.recordFailure(providerId, `XMLTV: ${errorText(xmltvError)}; provider EPG: ${errorText(fallbackError)}`);
+      throw fallbackError;
     }
   }
 
-  store.commitGeneration(providerId, generation, { fetchedAt: nowSec, source });
-  const { linked } = relinkGuide(db, providerId);
+  // One transaction (relink's own nests as a savepoint): readers never see the new guide with the old links.
+  let linked: number;
+  try {
+    ({ linked } = db.transaction(() => {
+      store.commitGeneration(providerId, generation, { fetchedAt: nowSec, source });
+      return relinkGuide(db, providerId);
+    })());
+  } catch (e) {
+    // Rolled back, so the generation is still above the current one and abandoning it proceeds.
+    await store.abandonGeneration(providerId, generation);
+    store.recordFailure(providerId, errorText(e));
+    throw e;
+  }
   try {
     await store.pruneGenerations(providerId);
   } catch (e) {
@@ -186,8 +206,13 @@ async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Prom
   const manual = loadManualMaps(db, providerId);
   const catchup = loadCatchupDays(db, providerId);
   const writer = createWriter(deps.store, providerId, generation, signal);
-  const seen: GuideChannelRow[] = [];
-  let wanted: Wanted | null = null;
+  // The channels for matching, until the first programme fixes the wanted keys.
+  let seen: GuideChannelRow[] | null = [];
+  let wanted: Wanted = { exact: new Map(), lower: new Map() };
+  // Declared channel ids, exact and by lower case (smallest on ties), so a programme whose channel attribute
+  // differs from its channel's id only in case is stored under that id, where relinking will point.
+  const declared = new Set<string>();
+  const declaredByLower = new Map<string, string>();
   let dropped = 0;
 
   const source = maybeGunzip(await deps.client.xmltv({ signal, idleTimeoutMs: deps.xmltvIdleTimeoutMs }));
@@ -195,19 +220,28 @@ async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Prom
     channel(c) {
       signal?.throwIfAborted();
       const row = { key: c.id, name: c.names[0] ?? c.id, names: c.names };
-      if (!wanted) seen.push(row);
+      seen?.push(row);
+      declared.add(c.id);
+      const lower = c.id.toLowerCase();
+      const prior = declaredByLower.get(lower);
+      if (prior === undefined || c.id < prior) declaredByLower.set(lower, c.id);
       writer.channel(row);
     },
     programme(p) {
       signal?.throwIfAborted();
-      wanted ??= wantedKeys(items, seen, manual, catchup);
-      const pastSec = wanted.exact.get(p.channel) ?? wanted.lower.get(p.channel.toLowerCase());
+      if (seen) {
+        wanted = wantedKeys(items, seen, manual, catchup);
+        seen = null;
+      }
+      const lower = p.channel.toLowerCase();
+      const pastSec = wanted.exact.get(p.channel) ?? wanted.lower.get(lower);
       if (pastSec === undefined || !inWindow(p.start, p.stop, pastSec, nowSec)) {
         dropped++;
         return;
       }
+      const channelKey = declared.has(p.channel) ? p.channel : (declaredByLower.get(lower) ?? p.channel);
       return writer.programme({
-        channelKey: p.channel, start: p.start, stop: p.stop, title: p.title,
+        channelKey, start: p.start, stop: p.stop, title: p.title,
         subtitle: p.subtitle, description: p.description, category: p.category,
       });
     },
@@ -219,7 +253,8 @@ async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Prom
 /**
  * The provider's per-channel listings for the first visible live items, stored as `stream:<remoteId>` channels.
  * Workers share one queue; each waits `fallbackGapMs` between its own requests. A channel whose request fails
- * simply has no listings.
+ * simply has no listings, except that an auth failure stops everything, and so do `FALLBACK_BREAKER` failures
+ * before any channel has answered.
  */
 async function ingestProvider(deps: Deps, generation: number, nowSec: number): Promise<Counts> {
   const { db, client, providerId, signal } = deps;
@@ -235,7 +270,10 @@ async function ingestProvider(deps: Deps, generation: number, nowSec: number): P
   const writer = createWriter(deps.store, providerId, generation, signal);
   let dropped = 0;
   let next = 0;
+  let answered = false;
+  let unanswered = 0;
   let failed = false;
+  let failure: unknown;
 
   const worker = async () => {
     for (let first = true; !failed; first = false) {
@@ -246,10 +284,15 @@ async function ingestProvider(deps: Deps, generation: number, nowSec: number): P
       let listings: Listing[];
       try {
         listings = await client.epgTable(item.remoteId, { signal, tz: deps.timezone });
-      } catch {
+      } catch (e) {
         signal?.throwIfAborted();
+        if (isAuthFailure(e)) throw e;
+        if (!answered && ++unanswered >= FALLBACK_BREAKER) {
+          throw new ProviderError('PROVIDER_UNREACHABLE', `The provider EPG failed for ${FALLBACK_BREAKER} channels in a row`);
+        }
         continue;
       }
+      answered = true;
       const pastSec = pastWindowSec(item.catchupDays);
       const kept = listings.filter((l) => inWindow(l.start, l.stop, pastSec, nowSec));
       dropped += listings.length - kept.length;
@@ -265,17 +308,17 @@ async function ingestProvider(deps: Deps, generation: number, nowSec: number): P
       }
     }
   };
-  // Wait for every worker before failing, so none writes into a generation that is being abandoned.
-  const results = await Promise.allSettled(
+  // The first failure stops the other workers; wait for all of them before failing, so none writes into a
+  // generation that is being abandoned.
+  await Promise.all(
     Array.from({ length: Math.max(1, deps.fallbackConcurrency ?? 2) }, () =>
       worker().catch((e: unknown) => {
+        if (!failed) failure = e;
         failed = true;
-        throw e;
       }),
     ),
   );
-  const rejected = results.find((r) => r.status === 'rejected');
-  if (rejected) throw rejected.reason;
+  if (failed) throw failure;
   await writer.flush();
   if (writer.written.programmes === 0) throw new GuideError('No guide data from the provider');
   return { ...writer.written, skipped: dropped };
