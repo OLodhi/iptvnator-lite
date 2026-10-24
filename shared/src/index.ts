@@ -39,6 +39,17 @@ export type AddProviderRequest = {
   password: string;
 };
 export type Category = { id: number; name: string; itemCount: number };
+/** The programme airing now on a live channel; times are UTC epoch seconds. */
+export type NowProgramme = { title: string; startSec: number; stopSec: number };
+export type Programme = {
+  id: number;
+  title: string;
+  subtitle: string | null;
+  description: string | null;
+  category: string | null;
+  startSec: number;
+  stopSec: number;
+};
 export type CatalogItem = {
   id: number;
   providerId: number;
@@ -52,6 +63,8 @@ export type CatalogItem = {
   displayName: string;
   /** Whether the current user has favourited it. */
   favourite: boolean;
+  /** Live items in lists only: what is airing now, or null when nothing is. Absent for movies and series. */
+  now?: NowProgramme | null;
 };
 export type TagStyle = 'tagged' | 'mixed' | 'untagged';
 export type CurationCategory = {

@@ -12,6 +12,7 @@ import type { CatalogueRepo } from './catalogue/repo.ts';
 import type { SeriesInfoCache } from './catalogue/seriesInfo.ts';
 import type { SessionManager } from './playback/sessions.ts';
 import type { CurationService } from './curation/service.ts';
+import { createGuideQueries } from './guide/query.ts';
 import { createPresenter } from './browse/presenter.ts';
 import { createSearch } from './catalogue/search.ts';
 import { browseRoutes } from './routes/browse.ts';
@@ -60,7 +61,7 @@ export type AppDeps = {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
-  const presenter = createPresenter(deps);
+  const presenter = createPresenter({ ...deps, guide: createGuideQueries(deps.db), now: Date.now });
   const search = createSearch(deps.db);
   const logos =
     deps.logos ?? createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });

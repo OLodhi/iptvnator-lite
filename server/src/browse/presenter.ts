@@ -1,5 +1,6 @@
 import type { BrowseCategory, BrowseView, CatalogItem, ContinueItem, Kind } from '@tv/shared';
 import type { CatalogueRepo, ItemDetail, StoredItem } from '../catalogue/repo.ts';
+import type { GuideQueries } from '../guide/query.ts';
 import type { CurationService, Resolution } from '../curation/service.ts';
 import type { PersonalService } from '../personal/service.ts';
 
@@ -19,8 +20,26 @@ export function createPresenter(deps: {
   curation: CurationService;
   personal: PersonalService;
   catalogue: CatalogueRepo;
+  /** Adds the airing programme to live items; without it they carry no `now`. */
+  guide?: GuideQueries;
+  /** Milliseconds, like the other `now` deps. */
+  now?: () => number;
 }): Presenter {
-  const { curation, personal, catalogue } = deps;
+  const { curation, personal, catalogue, guide } = deps;
+  const clock = deps.now ?? Date.now;
+
+  /** One `nowFor` per provider in the batch; live items with no airing programme get `null`. */
+  function withNow(out: CatalogItem[]): CatalogItem[] {
+    if (!guide) return out;
+    const nowSec = Math.floor(clock() / 1000);
+    const live = new Map<number, CatalogItem[]>();
+    for (const i of out) if (i.kind === 'live') live.set(i.providerId, [...(live.get(i.providerId) ?? []), i]);
+    for (const [providerId, group] of live) {
+      const airing = guide.nowFor(providerId, group.map((i) => i.id), nowSec);
+      for (const i of group) i.now = airing.get(i.id) ?? null;
+    }
+    return out;
+  }
 
   const present =
     (displayName: (name: string) => string, favourites: Set<number>) =>
@@ -39,11 +58,11 @@ export function createPresenter(deps: {
     });
 
   const itemsWith: Presenter['itemsWith'] = (resolution, favourites, stored) =>
-    stored.map(present(resolution.displayName, favourites));
+    withNow(stored.map(present(resolution.displayName, favourites)));
 
   function items(stored: StoredItem[], userId: number): CatalogItem[] {
     const fns = new Map<string, (i: StoredItem) => CatalogItem>();
-    return stored.map((i) => {
+    return withNow(stored.map((i) => {
       const key = `${i.providerId}:${i.kind}`;
       let fn = fns.get(key);
       if (!fn) {
@@ -51,7 +70,7 @@ export function createPresenter(deps: {
         fns.set(key, (fn = present(displayName, new Set(personal.favouriteItemIds(userId, i.providerId, i.kind)))));
       }
       return fn(i);
-    });
+    }));
   }
 
   const resolveItems = (ids: number[]): ItemDetail[] =>
@@ -72,6 +91,7 @@ export function createPresenter(deps: {
       const byId = new Map(categories.map((c) => [c.id, c]));
       const favouriteIds = personal.favouriteItemIds(userId, providerId, kind);
       const show = present(displayName, new Set(favouriteIds));
+      const showAll = (stored: ItemDetail[]): CatalogItem[] => withNow(stored.map((i) => show(i)));
 
       const continuing = kind === 'live' ? [] : personal.continueWatching(userId, providerId, kind, CONTINUE_LIMIT);
       const continueWatching: ContinueItem[] = [];
@@ -91,8 +111,8 @@ export function createPresenter(deps: {
         kind,
         categories,
         pinned: pinnedIds.map((id) => byId.get(id)).filter((c): c is BrowseCategory => c !== undefined),
-        recent: resolveItems(personal.recentItemIds(userId, providerId, kind, RECENT_LIMIT)).map((i) => show(i)),
-        favourites: resolveItems(favouriteIds.slice(0, FAVOURITES_LIMIT)).map((i) => show(i)),
+        recent: showAll(resolveItems(personal.recentItemIds(userId, providerId, kind, RECENT_LIMIT))),
+        favourites: showAll(resolveItems(favouriteIds.slice(0, FAVOURITES_LIMIT))),
         continueWatching,
         newCategories: newCount,
       };
