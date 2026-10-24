@@ -1,7 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { SavedPosition } from '@tv/shared';
 import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
@@ -30,6 +30,7 @@ let db: Db;
 let personal: PersonalService;
 let providerId: number;
 let failStart = false;
+const warnings: { o: object; m: string }[] = [];
 
 beforeAll(async () => {
   fake = await startFakeXtream({ mediaDir, catalogue: smallCatalogue() });
@@ -49,6 +50,7 @@ beforeAll(async () => {
       },
     }),
     curation: createCurationService({ db, now: Date.now }),
+    log: { info() {}, warn: (o, m) => void warnings.push({ o, m }) },
   });
   providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });
@@ -61,6 +63,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   failStart = false;
+  warnings.length = 0;
+  vi.restoreAllMocks();
   db.exec('DELETE FROM pins; DELETE FROM favourites; DELETE FROM history; DELETE FROM positions');
 });
 
@@ -146,4 +150,15 @@ test('a play that fails to start records nothing', async () => {
   const res = await send('POST', '/api/play', { itemId: item('live', 1), clientId: 'A' });
   expect(res.statusCode).toBe(409);
   expect(db.prepare('SELECT COUNT(*) FROM history').pluck().get()).toBe(0);
+});
+
+test('a history write that throws never fails a stream that has started', async () => {
+  vi.spyOn(personal, 'recordPlay').mockImplementation(() => {
+    throw new Error('database is locked');
+  });
+  const res = await send('POST', '/api/play', { itemId: item('live', 1), clientId: 'A' });
+  expect(res.statusCode).toBe(200);
+  expect(res.json()).toMatchObject({ sessionId: 's1', mode: 'hls' });
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]!.m).toBe('play: could not record history');
 });

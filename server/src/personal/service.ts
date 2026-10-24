@@ -43,6 +43,14 @@ type PositionRow = {
 };
 
 const EPISODE_PREFIX = 'episode:';
+const MOVIE_PREFIX = 'movie:';
+
+/** The expression sits on the positions side so the join can search items by its unique (provider, kind, remote id) index. */
+export const CONTINUE_MOVIES_SQL = `SELECT i.id AS itemId, NULL AS episodeRemoteId, p.position_sec AS positionSec, p.duration_sec AS durationSec
+     FROM positions p JOIN items i
+       ON i.provider_id = p.provider_id AND i.kind = 'movie' AND i.remote_id = substr(p.content_key, ${MOVIE_PREFIX.length + 1})
+     WHERE p.user_id = ? AND p.provider_id = ? AND p.finished = 0 AND p.content_key LIKE '${MOVIE_PREFIX}%'
+     ORDER BY p.updated_at DESC, p.rowid DESC LIMIT ?`;
 
 export function createPersonalService(deps: { db: Db; now: () => number }): PersonalService {
   const { db } = deps;
@@ -112,13 +120,7 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
     `SELECT ${POSITION_COLUMNS} FROM positions WHERE user_id = ? AND provider_id = ? AND series_remote_id = ?
      ORDER BY updated_at DESC, rowid DESC`,
   );
-  const continueMovies = db.prepare(
-    `SELECT i.id AS itemId, NULL AS episodeRemoteId, p.position_sec AS positionSec, p.duration_sec AS durationSec
-     FROM positions p JOIN items i
-       ON i.provider_id = p.provider_id AND i.kind = 'movie' AND 'movie:' || i.remote_id = p.content_key
-     WHERE p.user_id = ? AND p.provider_id = ? AND p.finished = 0
-     ORDER BY p.updated_at DESC, p.rowid DESC LIMIT ?`,
-  );
+  const continueMovies = db.prepare(CONTINUE_MOVIES_SQL);
   const continueSeries = db.prepare(
     `SELECT i.id AS itemId, substr(p.content_key, ${EPISODE_PREFIX.length + 1}) AS episodeRemoteId,
             p.position_sec AS positionSec, p.duration_sec AS durationSec

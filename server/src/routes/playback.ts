@@ -117,7 +117,12 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         quality: 'original',
       });
       // Only a stream that actually started counts as watched.
-      deps.personal.recordPlay(currentUserId(req), req.body.itemId, req.body.episodeRemoteId ?? null);
+      // Best-effort: a failed history write must not fail a stream that is already running.
+      try {
+        deps.personal.recordPlay(currentUserId(req), req.body.itemId, req.body.episodeRemoteId ?? null);
+      } catch (err) {
+        deps.log.warn({ itemId: req.body.itemId, err: String(err) }, 'play: could not record history');
+      }
       return started;
     });
 

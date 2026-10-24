@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
-import { createPersonalService, HISTORY_LIMIT } from './service.ts';
+import { CONTINUE_MOVIES_SQL, createPersonalService, HISTORY_LIMIT } from './service.ts';
 import type { PersonalService } from './service.ts';
 
 const USER = 1;
@@ -182,6 +182,21 @@ describe('positions', () => {
     expect(personal.positions(USER, again)).toHaveLength(1);
     expect(personal.continueWatching(USER, providerId, 'movie', 10).map((c) => c.itemId)).toEqual([again]);
     db.prepare('DELETE FROM items WHERE id = ?').run(again);
+    expect(personal.continueWatching(USER, providerId, 'movie', 10)).toEqual([]);
+  });
+
+  test('continue watching looks movies up by the items index, not a scan', () => {
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${CONTINUE_MOVIES_SQL}`).all(USER, providerId, 10) as { detail: string }[];
+    const details = plan.map((r) => r.detail);
+    const items = details.filter((d) => /^(SEARCH|SCAN) i( |$)/.test(d));
+    expect(items, details.join('\n')).toHaveLength(1);
+    expect(items[0]).toMatch(/^SEARCH i USING (COVERING )?INDEX \w+ \(provider_id=\? AND kind=\? AND remote_id=\?\)/);
+  });
+
+  test('an episode position is never mistaken for a movie', () => {
+    addItem('movie', 'de:201'); // what 'episode:201' looks like with a movie prefix cut off
+    const s = addItem('series', '10');
+    personal.savePosition(USER, { itemId: s, episodeRemoteId: '201', positionSec: 100, durationSec: 1000 });
     expect(personal.continueWatching(USER, providerId, 'movie', 10)).toEqual([]);
   });
 
