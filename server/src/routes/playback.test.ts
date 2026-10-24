@@ -14,6 +14,7 @@ import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { buildApp } from '../app.ts';
+import type { Config } from '../config.ts';
 import { createCatalogueRepo } from '../catalogue/repo.ts';
 import type { CatalogueRepo, ItemDetail } from '../catalogue/repo.ts';
 import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
@@ -32,6 +33,7 @@ import type { ProviderService } from '../providers/service.ts';
 import type { XtreamAccount, XtreamClient } from '../providers/xtream/client.ts';
 import { testConfig } from '../testing/config.ts';
 import { stubSessions } from '../testing/sessions.ts';
+import type { Log } from '../util/log.ts';
 import { playbackRoutes } from './playback.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
@@ -49,6 +51,8 @@ afterAll(async () => {
 
 type World = {
   app: FastifyInstance;
+  /** The same app on a real socket, for requests that must stay open or be cut off. */
+  origin: string;
   db: Db;
   providers: ProviderService;
   catalogue: CatalogueRepo;
@@ -58,18 +62,30 @@ type World = {
   itemId(kind: 'live' | 'movie' | 'series', remoteId: number): number;
 };
 
+type LogLine = { level: 'info' | 'warn'; m: string; o: object };
+
+function collectingLog(lines: LogLine[]) {
+  return {
+    info: (o: object, m: string) => void lines.push({ level: 'info', m, o }),
+    warn: (o: object, m: string) => void lines.push({ level: 'warn', m, o }),
+  };
+}
+
 /** A fresh app with the fake provider added and its small catalogue synced. */
 async function makeWorld(
   makeSessions: (db: Db, providers: ProviderService) => SessionManager,
-  config = testConfig(),
+  opts: { config?: Config; log?: Log } = {},
 ): Promise<World> {
+  const config = opts.config ?? testConfig();
   const db = openDb(':memory:');
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
   const catalogue = createCatalogueRepo(db);
   const seriesInfo = createSeriesInfoCache({ providers, catalogue });
   const sessions = makeSessions(db, providers);
   const sync = createSyncRunner({ db, providers });
-  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions });
+  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, log: opts.log });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  const origin = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });
   const lookup = db.prepare('SELECT id FROM items WHERE provider_id = ? AND kind = ? AND remote_id = ?').pluck();
@@ -78,7 +94,7 @@ async function makeWorld(
     if (id === undefined) throw new Error(`no ${kind} ${remoteId} in the synced catalogue`);
     return id;
   };
-  return { app, db, providers, catalogue, seriesInfo, sessions, providerId, itemId };
+  return { app, origin, db, providers, catalogue, seriesInfo, sessions, providerId, itemId };
 }
 
 const playBody = (w: World, body: Record<string, unknown>) =>
@@ -86,10 +102,11 @@ const playBody = (w: World, body: Record<string, unknown>) =>
 
 describe('playback routes', () => {
   const sessions = stubSessions();
+  const routeLogs: LogLine[] = [];
   let w: World;
 
   beforeAll(async () => {
-    w = await makeWorld(() => sessions);
+    w = await makeWorld(() => sessions, { log: collectingLog(routeLogs) });
   });
 
   afterAll(async () => {
@@ -98,6 +115,7 @@ describe('playback routes', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    routeLogs.length = 0;
   });
 
   const started = (clientId: string, startAtSec: number): PlayResponse => ({
@@ -319,6 +337,10 @@ describe('playback routes', () => {
       expect(failed.statusCode).toBe(502);
       expect(failed.json()).toMatchObject({ code: 'UPSTREAM_ERROR' });
       expect(failed.body).not.toMatch(/secretpass|127\.0\.0\.1|not here/);
+      // The provider failure reaches the server's log, redacted.
+      expect(routeLogs).toEqual([
+        { level: 'warn', m: 'direct stream: provider refused', o: { url: `${origin}/movie/***/***/404/5.mp4`, status: 404 } },
+      ]);
 
       expect((await w.app.inject('/api/sessions/sess/B/direct')).statusCode).toBe(404);
       expect((await w.app.inject('/api/sessions/other/A/direct')).statusCode).toBe(404);
@@ -326,7 +348,97 @@ describe('playback routes', () => {
       await new Promise((ok) => upstream.close(ok));
     }
   });
+
+  test('a viewer who leaves while the provider is still answering is not logged as a provider failure', async () => {
+    const upstream = await silentUpstream();
+    vi.spyOn(sessions, 'touch').mockReturnValue(true);
+    vi.spyOn(sessions, 'directSource').mockReturnValue({ url: `${upstream.origin}/movie/user/secret/5.mp4`, userAgent: UA });
+    try {
+      const viewer = httpGet(`${w.origin}/api/sessions/sess/A/direct`);
+      viewer.on('error', () => {});
+      await vi.waitFor(() => expect(upstream.open()).toBe(1)); // waiting for the provider's headers
+      viewer.destroy();
+      await vi.waitFor(() => expect(upstream.open()).toBe(0)); // the provider request was dropped too
+      await new Promise((ok) => setTimeout(ok, 50));
+      expect(routeLogs.filter((l) => l.level === 'warn')).toEqual([]);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("ending or replacing a viewer's session cuts their in-flight direct request first", async () => {
+    const upstream = await silentUpstream();
+    vi.spyOn(sessions, 'touch').mockReturnValue(true);
+    vi.spyOn(sessions, 'directSource').mockReturnValue({ url: `${upstream.origin}/movie/user/secret/5.mp4`, userAgent: UA });
+    // What the provider has open by the time the session manager is called. Without the cut, the old
+    // request would stay open until the proxy's 10 s re-check.
+    const openSoon = async (n: number) => {
+      await vi.waitFor(() => expect(upstream.open()).toBe(n), { timeout: 500 }).catch(() => {});
+      return upstream.open();
+    };
+    const openAtRelease: number[] = [];
+    vi.spyOn(sessions, 'release').mockImplementation(async () => void openAtRelease.push(await openSoon(0)));
+    const openAtStart: number[] = [];
+    vi.spyOn(sessions, 'start').mockImplementation(async (req) => {
+      openAtStart.push(await openSoon(1));
+      return started(req.clientId, 0);
+    });
+    try {
+      // DELETE: the viewer still waiting for the provider is told the session is gone.
+      const waiting = viewer(`${w.origin}/api/sessions/sess/A/direct`);
+      await vi.waitFor(() => expect(upstream.open()).toBe(1));
+      expect((await w.app.inject({ method: 'DELETE', url: '/api/sessions/sess/A' })).statusCode).toBe(204);
+      expect(openAtRelease).toEqual([0]);
+      expect(await waiting.status).toBe(404);
+
+      // POST /api/play for the same viewer: their old direct request is cut; other viewers' are not.
+      const old = viewer(`${w.origin}/api/sessions/sess/A/direct`);
+      const other = viewer(`${w.origin}/api/sessions/sess/B/direct`);
+      await vi.waitFor(() => expect(upstream.open()).toBe(2));
+      expect((await playBody(w, { itemId: w.itemId('live', 1), clientId: 'A' })).statusCode).toBe(200);
+      expect(openAtStart).toEqual([1]);
+      expect(await old.status).toBe(404);
+
+      other.req.destroy();
+      await vi.waitFor(() => expect(upstream.open()).toBe(0));
+      expect(routeLogs.filter((l) => l.level === 'warn')).toEqual([]);
+    } finally {
+      await upstream.close();
+    }
+  });
 });
+
+/** A viewer's GET that stays open until answered; `status` is -1 if the connection fails instead. */
+function viewer(url: string): { req: ClientRequest; status: Promise<number> } {
+  let req!: ClientRequest;
+  const status = new Promise<number>((ok) => {
+    req = httpGet(url, (res) => {
+      ok(res.statusCode!);
+      res.resume();
+    });
+    req.on('error', () => ok(-1));
+  });
+  return { req, status };
+}
+
+/** A provider stand-in that accepts requests but never answers; `open()` counts requests still connected. */
+async function silentUpstream() {
+  let open = 0;
+  const server = createServer((_req, res) => {
+    open++;
+    res.once('close', () => open--);
+  });
+  await new Promise<void>((ok) => server.listen(0, '127.0.0.1', ok));
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    open: () => open,
+    close: () =>
+      new Promise<void>((ok) => {
+        server.closeAllConnections();
+        server.close(() => ok());
+      }),
+  };
+}
 
 describe('resolveSourceUrl', () => {
   const item = (over: Partial<ItemDetail>): ItemDetail => ({
@@ -414,7 +526,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
           maxRestarts: 3,
           log,
         }),
-      config,
+      { config, log },
     );
   }, 30_000);
 
@@ -556,14 +668,36 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
       // FFmpeg's HLS reader prefetches the next segment on a second connection to the same channel and
       // copes with the refusal. A request refused because the other channel still held the connection
       // would mean the switch overlapped.
-      const crossChannel = fake
-        .refusedMediaRequests()
-        .slice(refusedBefore)
-        .filter((r) => r.heldBy.some((held) => channelOf(held) !== channelOf(r.path)));
-      expect(crossChannel).toEqual([]);
+      expect(crossStreamRefusals(refusedBefore)).toEqual([]);
     } finally {
       clearInterval(sampler);
     }
+  });
+
+  test('switches from a direct movie that is still streaming to live on a one-connection provider', async () => {
+    const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
+    expect(movie.mode).toBe('direct');
+    // Like Safari's open `bytes=X-` request: the movie holds the provider's only connection.
+    const held = await openPaused(w.origin + movie.url);
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(1));
+    const refusedBefore = fake.refusedMediaRequests().length;
+
+    const live = await playOk({ itemId: w.itemId('live', 1), clientId: 'A' });
+    expect(live.mode).toBe('hls');
+    expect(crossStreamRefusals(refusedBefore)).toEqual([]);
+    expect(await drain(held.res)).toBeLessThan(statSync(join(mediaDir, 'movie.mp4')).size);
+  });
+
+  test('releasing a direct session cuts its open stream straight away', async () => {
+    const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
+    const held = await openPaused(w.origin + movie.url);
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(1));
+
+    const res = await w.app.inject({ method: 'DELETE', url: `/api/sessions/${movie.sessionId}/A` });
+    expect(res.statusCode).toBe(204);
+    // Not left for the proxy's 10 s re-check.
+    await vi.waitFor(() => expect(fake.openMediaConnections()).toBe(0), { timeout: 1_000 });
+    await drain(held.res);
   });
 
   test('dead channel fails cleanly', async () => {
@@ -602,9 +736,10 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     // A real socket (inject buffers whole bodies) and a fast session re-check instead of every 10 s.
     const proxy = Fastify();
     const { catalogue, seriesInfo, providers, sessions } = w;
-    await proxy.register(playbackRoutes({ catalogue, seriesInfo, providers, sessions, userAgent: UA, touchIntervalMs: 100 }), {
-      prefix: '/api',
-    });
+    await proxy.register(
+      playbackRoutes({ catalogue, seriesInfo, providers, sessions, log, userAgent: UA, touchIntervalMs: 100 }),
+      { prefix: '/api' },
+    );
     await proxy.listen({ port: 0, host: '127.0.0.1' });
     const origin = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
     const size = statSync(join(mediaDir, 'movie.mp4')).size;
@@ -641,10 +776,19 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   });
 });
 
-/** The fake's live channel a media path belongs to: `/live/<user>/<pass>/<n>.<ext>`, or `/hls/...` for channel 1. */
-function channelOf(path: string): string {
-  if (path.startsWith('/hls/')) return '1';
-  return /^\/live\/[^/]+\/[^/]+\/(\d+)/.exec(path)?.[1] ?? path;
+/** Which of the fake's streams a media path belongs to: `live/<n>`, `movie/<n>`, ...; `/hls/...` is live channel 1. */
+function contentOf(path: string): string {
+  if (path.startsWith('/hls/')) return 'live/1';
+  const m = /^\/(live|movie|series)\/[^/]+\/[^/]+\/(\d+)/.exec(path);
+  return m ? `${m[1]}/${m[2]}` : path;
+}
+
+/** Requests the fake refused (since `from`) because a *different* stream held the connection. */
+function crossStreamRefusals(from: number) {
+  return fake
+    .refusedMediaRequests()
+    .slice(from)
+    .filter((r) => r.heldBy.some((held) => contentOf(held) !== contentOf(r.path)));
 }
 
 /** GETs a URL, reads the first chunk, then stops reading so the body backs up to the provider. */

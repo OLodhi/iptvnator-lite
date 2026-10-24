@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { openDb } from '../db/db.ts';
-import { createProber, parseFfprobe } from './probe.ts';
+import { createProber, parseFfprobe, withProbeLog } from './probe.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mediaDir = resolve(here, '../../../tools/fake-xtream/media');
@@ -17,9 +17,16 @@ describe('parseFfprobe', () => {
     expect(parseFfprobe(fixture('h264-mkv'))).toEqual({
       formatName: 'matroska,webm',
       durationSec: 60.021,
-      video: { codec: 'h264', codecTag: null, width: 640, height: 360, interlaced: false },
+      video: { codec: 'h264', codecTag: null, width: 640, height: 360, interlaced: false, fieldOrder: 'progressive' },
       audio: [{ index: 1, codec: 'aac', channels: 1 }],
     });
+  });
+
+  test('keeps the raw field order for the logs', () => {
+    expect(parseFfprobe(fixture('h264-interlaced-ts')).video?.fieldOrder).toBe('tt');
+    const f = fixture('h264-mkv');
+    delete f.streams[0].field_order;
+    expect(parseFfprobe(f).video?.fieldOrder).toBeNull();
   });
 
   test('keeps a real codec tag', () => {
@@ -59,6 +66,37 @@ describe('parseFfprobe', () => {
     const f = fixture('h264-mkv');
     f.streams = f.streams.slice(1);
     expect(parseFfprobe(f).video).toBeNull();
+  });
+});
+
+describe('withProbeLog', () => {
+  test('logs one redacted summary line per probe', async () => {
+    const lines: { o: object; m: string }[] = [];
+    const log = { info: (o: object, m: string) => void lines.push({ o, m }), warn: () => {} };
+    const result = parseFfprobe(fixture('h264-interlaced-ts'));
+    const probe = withProbeLog(async () => result, log);
+    const url = 'http://provider.test/live/someuser/secret/7.ts?username=someuser&password=secret';
+
+    expect(await probe(url, 'ua')).toBe(result);
+    expect(lines).toHaveLength(1);
+    const v = result.video!;
+    expect(lines[0]!.m).toBe('probed');
+    expect(lines[0]!.o).toEqual({
+      url: 'http://provider.test/live/***/***/7.ts?username=***&password=***',
+      container: result.formatName,
+      video: `${v.codec} ${v.width}x${v.height} tt`,
+      audio: result.audio.map((a) => a.codec).join(','),
+      durationSec: result.durationSec,
+    });
+    expect(JSON.stringify(lines)).not.toMatch(/secret|someuser/);
+  });
+
+  test('a probe that fails logs nothing and passes the error on', async () => {
+    const lines: unknown[] = [];
+    const log = { info: (o: object) => void lines.push(o), warn: (o: object) => void lines.push(o) };
+    const probe = withProbeLog(async () => Promise.reject(new Error('nope')), log);
+    await expect(probe('http://provider.test/live/u/secret/1.ts', 'ua')).rejects.toThrow('nope');
+    expect(lines).toEqual([]);
   });
 });
 

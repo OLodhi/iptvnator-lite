@@ -415,7 +415,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     for (const clientId of s.clients.keys()) s.clients.set(clientId, now);
     sessions.set(s.id, s);
     const { id: sessionId, providerId, kind, mode } = s;
-    log.info({ sessionId, providerId, kind, mode, url: redactUrl(s.sourceUrl) }, 'session started');
+    const plan = s.plan && {
+      segment: s.plan.segment,
+      video: s.plan.video,
+      audio: s.plan.audio?.action ?? 'none',
+      deinterlace: s.plan.deinterlace,
+    };
+    log.info({ sessionId, providerId, kind, mode, plan, url: redactUrl(s.sourceUrl) }, 'session started');
     // The child may have exited (having written a playlist) while we confirmed readiness.
     if (s.exit && s.child === null) {
       void s.exit.then((code) => {

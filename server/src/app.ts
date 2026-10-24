@@ -15,6 +15,8 @@ import { catalogueRoutes } from './routes/catalogue.ts';
 import { playbackRoutes } from './routes/playback.ts';
 import { providerRoutes } from './routes/providers.ts';
 import { syncRoutes } from './routes/sync.ts';
+import { silentLog } from './util/log.ts';
+import type { Log } from './util/log.ts';
 
 export type AppDeps = {
   config: Config;
@@ -24,11 +26,15 @@ export type AppDeps = {
   catalogue: CatalogueRepo;
   seriesInfo: SeriesInfoCache;
   sessions: SessionManager;
+  /** The server's own log (provider failures, sessions); silent if left out. */
+  log?: Log;
+  /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
+  httpLogLevel?: 'error' | 'warn' | 'info';
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
 
   await app.register(
     async (api) => {
@@ -44,6 +50,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
           seriesInfo: deps.seriesInfo,
           providers: deps.providers,
           sessions: deps.sessions,
+          log: deps.log ?? silentLog,
           userAgent: config.defaultUserAgent,
         }),
       );

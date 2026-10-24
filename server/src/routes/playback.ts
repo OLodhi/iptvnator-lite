@@ -11,6 +11,7 @@ import type { SessionManager } from '../playback/sessions.ts';
 import { resolveSourceUrl, SourceError } from '../playback/sourceUrl.ts';
 import { ProviderError } from '../providers/errors.ts';
 import type { ProviderService } from '../providers/service.ts';
+import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
 
 export type PlaybackRouteDeps = {
@@ -18,6 +19,7 @@ export type PlaybackRouteDeps = {
   seriesInfo: SeriesInfoCache;
   providers: ProviderService;
   sessions: SessionManager;
+  log: Log;
   /** Sent to the provider for every stream. */
   userAgent: string;
   /** How often a streaming direct response re-checks that its session is still running. */
@@ -25,6 +27,16 @@ export type PlaybackRouteDeps = {
 };
 
 type SessionParams = { id: string; clientId: string };
+
+/** A direct stream in flight: one viewer's request, and the provider request behind it. */
+type DirectProxy = {
+  sessionId: string;
+  clientId: string;
+  /** Ends it because its session is over (as opposed to the viewer leaving or the provider failing). */
+  stop(): void;
+  /** Resolves once the provider request has been aborted and its body closed. */
+  settled: Promise<void>;
+};
 
 const TOUCH_INTERVAL_MS = 10_000;
 const UPSTREAM_HEADERS_TIMEOUT_MS = 15_000;
@@ -55,7 +67,14 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
   async (app) => {
     const { sessions } = deps;
     const touchIntervalMs = deps.touchIntervalMs ?? TOUCH_INTERVAL_MS;
-    const proxies = new Set<AbortController>(); // in-flight direct upstream requests
+    const proxies = new Set<DirectProxy>();
+
+    /** Ends the matching direct streams and waits until their provider requests are closed. */
+    async function endProxies(match: (p: DirectProxy) => boolean): Promise<void> {
+      const ending = [...proxies].filter(match);
+      for (const p of ending) p.stop();
+      await Promise.all(ending.map((p) => p.settled));
+    }
 
     const notFound = (reply: FastifyReply) =>
       reply.code(404).send({ code: 'NOT_FOUND', message: 'Session or file not found' } satisfies ApiError);
@@ -79,12 +98,14 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
     });
 
     // Long direct streams would otherwise hold app.close() open until they finish.
-    app.addHook('preClose', async () => {
-      for (const upstream of proxies) upstream.abort();
-    });
+    app.addHook('preClose', () => endProxies(() => true));
 
     app.post<{ Body: PlayRequest }>('/play', { schema: { body: playSchema } }, async (req) => {
       const source = await resolveSourceUrl(deps, req.body);
+      // A direct stream this viewer still has open holds a provider connection that the session manager
+      // already counts as free once it preempts that session. Close it first, or a one-connection
+      // provider refuses the new stream.
+      await endProxies((p) => p.clientId === req.body.clientId);
       return sessions.start({
         ...source,
         userAgent: deps.userAgent,
@@ -100,7 +121,9 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
     });
 
     app.delete<{ Params: SessionParams }>('/sessions/:id/:clientId', async (req, reply) => {
-      await sessions.release(req.params.id, req.params.clientId);
+      const { id, clientId } = req.params;
+      await endProxies((p) => p.sessionId === id && p.clientId === clientId);
+      await sessions.release(id, clientId);
       return reply.code(204).send();
     });
 
@@ -114,7 +137,7 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         if (!sessions.touch(id, clientId)) return notFound(reply);
         const source = sessions.directSource(id);
         if (!source) return notFound(reply);
-        return proxyDirect(req, reply, source, () => sessions.touch(id, clientId));
+        return proxyDirect(req, reply, { sessionId: id, clientId }, source);
       },
     });
 
@@ -156,24 +179,55 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
     async function proxyDirect(
       req: FastifyRequest,
       reply: FastifyReply,
+      viewer: { sessionId: string; clientId: string },
       source: { url: string; userAgent: string },
-      stillWatching: () => boolean,
     ): Promise<FastifyReply> {
       const head = req.method === 'HEAD';
       const upstream = new AbortController();
-      proxies.add(upstream);
-      // Re-checked while streaming: a session that was released or reaped stops being read from the provider.
+      let body: Readable | null = null;
+      let stopped = false; // the session ended
+      let viewerGone = false; // the viewer hung up before the response was complete
+      let settle!: () => void;
+      const proxy: DirectProxy = {
+        ...viewer,
+        settled: new Promise<void>((ok) => {
+          settle = ok;
+        }),
+        stop() {
+          stopped = true;
+          // Mid-stream, cut the viewer's connection itself. (Merely destroying `body` can let the response
+          // end as if complete, leaving the viewer waiting on a keep-alive socket for the missing bytes.)
+          if (body) reply.raw.destroy();
+          upstream.abort();
+        },
+      };
+      proxies.add(proxy);
+      // Re-checked while streaming: a session that was reaped stops being read from the provider.
       const recheck = setInterval(() => {
-        if (!stillWatching()) upstream.abort();
+        if (!sessions.touch(viewer.sessionId, viewer.clientId)) proxy.stop();
       }, touchIntervalMs);
       recheck.unref();
-      const finish = () => {
+      const done = () => {
         clearInterval(recheck);
-        proxies.delete(upstream);
-        upstream.abort();
+        proxies.delete(proxy);
+        settle();
       };
-      // Fires when the response has been sent, or when the viewer has gone away mid-stream.
-      reply.raw.once('close', finish);
+      reply.raw.once('close', () => {
+        if (!reply.raw.writableFinished) viewerGone = true;
+        upstream.abort();
+      });
+      const discard = async (res: Response) => {
+        upstream.abort();
+        await res.body?.cancel().catch(() => {});
+        done();
+      };
+      /** Answers a request whose provider request ended early, blaming the provider only if it was at fault. */
+      const endEarly = (message: string, warn: () => void) => {
+        if (viewerGone || reply.raw.destroyed) return reply.hijack(); // nobody to answer, nothing to report
+        if (stopped) return notFound(reply);
+        warn();
+        return reply.code(502).send({ code: 'UPSTREAM_ERROR', message } satisfies ApiError);
+      };
 
       const headers: Record<string, string> = { 'user-agent': source.userAgent, 'accept-encoding': 'identity' };
       if (req.headers.range) headers.range = req.headers.range;
@@ -182,18 +236,19 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
       try {
         res = await fetch(source.url, { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal });
       } catch (err) {
-        finish();
-        req.log.warn({ url: redactUrl(source.url), err: redactUrl(String(err)) }, 'direct stream: provider unreachable');
-        return reply.code(502).send({ code: 'UPSTREAM_ERROR', message: 'The provider did not answer' } satisfies ApiError);
+        done();
+        return endEarly('The provider did not answer', () =>
+          deps.log.warn({ url: redactUrl(source.url), err: redactUrl(String(err)) }, 'direct stream: provider unreachable'),
+        );
       } finally {
         clearTimeout(headersTimer);
       }
 
-      if (res.status !== 200 && res.status !== 206 && res.status !== 416) {
-        finish();
-        req.log.warn({ url: redactUrl(source.url), status: res.status }, 'direct stream: provider refused');
-        const body: ApiError = { code: 'UPSTREAM_ERROR', message: `The provider answered ${res.status}` };
-        return reply.code(502).send(body);
+      if (stopped || viewerGone || (res.status !== 200 && res.status !== 206 && res.status !== 416)) {
+        await discard(res);
+        return endEarly(`The provider answered ${res.status}`, () =>
+          deps.log.warn({ url: redactUrl(source.url), status: res.status }, 'direct stream: provider refused'),
+        );
       }
       reply.code(res.status);
       for (const name of MIRRORED_HEADERS) {
@@ -201,9 +256,11 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         if (value !== null) reply.header(name, value);
       }
       if (head || res.status === 416 || !res.body) {
-        finish();
+        await discard(res);
         return reply.send();
       }
-      return reply.send(Readable.fromWeb(res.body as WebReadableStream<Uint8Array>));
+      body = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+      body.once('close', done); // ended, failed, cut short or stopped: the provider request is over
+      return reply.send(body);
     }
   };

@@ -1,11 +1,20 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { Db } from '../db/db.ts';
+import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
 
 export type ProbeResult = {
   formatName: string;
   durationSec: number | null;
-  video: { codec: string; codecTag: string | null; width: number; height: number; interlaced: boolean } | null;
+  video: {
+    codec: string;
+    codecTag: string | null;
+    width: number;
+    height: number;
+    interlaced: boolean;
+    /** ffprobe's raw `field_order` ('progressive', 'tt', ...), for the logs. */
+    fieldOrder: string | null;
+  } | null;
   audio: { index: number; codec: string; channels: number }[];
 };
 
@@ -47,11 +56,32 @@ export function parseFfprobe(json: unknown): ProbeResult {
           width: v.width ?? 0,
           height: v.height ?? 0,
           interlaced: INTERLACED.has(v.field_order ?? ''),
+          fieldOrder: v.field_order ?? null,
         }
       : null,
     audio: streams
       .filter((s) => s.codec_type === 'audio')
       .map((s) => ({ index: s.index ?? 0, codec: s.codec_name ?? 'unknown', channels: s.channels ?? 0 })),
+  };
+}
+
+/** Wraps a probe so each result is logged as one line: container, video, audio and duration (URL redacted). */
+export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] {
+  return async (url, userAgent) => {
+    const r = await probe(url, userAgent);
+    const v = r.video;
+    log.info(
+      {
+        url: redactUrl(url),
+        container: r.formatName,
+        // Results cached before fieldOrder existed have none.
+        video: v ? `${v.codec} ${v.width}x${v.height} ${v.fieldOrder ?? 'unknown'}` : 'none',
+        audio: r.audio.map((a) => a.codec).join(',') || 'none',
+        durationSec: r.durationSec,
+      },
+      'probed',
+    );
+    return r;
   };
 }
 

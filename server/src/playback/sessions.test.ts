@@ -8,7 +8,7 @@ import type { ProbeResult } from './probe.ts';
 import { createSessionManager, defaultIsReady, PlaybackError } from './sessions.ts';
 import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from './sessions.ts';
 
-const H264 = { codec: 'h264', codecTag: null, width: 1280, height: 720, interlaced: false };
+const H264 = { codec: 'h264', codecTag: null, width: 1280, height: 720, interlaced: false, fieldOrder: 'progressive' };
 const AAC = [{ index: 1, codec: 'aac', channels: 2 }];
 const LIVE_HLS: ProbeResult = { formatName: 'hls', durationSec: null, video: H264, audio: AAC };
 const MKV_MOVIE: ProbeResult = { formatName: 'matroska,webm', durationSec: 60, video: H264, audio: AAC };
@@ -512,6 +512,29 @@ describe('session manager', () => {
     expect(line?.o).toMatchObject({ line: expect.stringContaining('/live/***/***/1.m3u8') });
     expect(JSON.stringify(h.spawn.mock.calls)).toContain('secret'); // FFmpeg does get the real URL…
     expect(JSON.stringify(h.logs)).not.toContain('secret'); // …but no log line does.
+  });
+
+  test('the session started line names the chosen plan, without credentials', async () => {
+    const h = harness({
+      probe: async (url) =>
+        url.endsWith('.mp4') ? MP4_MOVIE : { ...LIVE_HLS, formatName: 'mpegts', video: { ...H264, codec: 'mpeg2video' } },
+    });
+    const liveSession = await h.m.start(live(1, 'A'));
+    const next = h.m.start(movie(2, 'A', 'mp4')); // preempts the live session, whose FFmpeg exits 50 ms after the kill
+    await vi.advanceTimersByTimeAsync(100);
+    const directSession = await next;
+
+    const started = h.logs.filter((l) => l.m === 'session started');
+    expect(started.map((l) => l.o)).toEqual([
+      expect.objectContaining({
+        sessionId: liveSession.sessionId,
+        kind: 'live',
+        mode: 'hls',
+        plan: { segment: 'ts', video: 'h264', audio: 'copy', deinterlace: false },
+      }),
+      expect.objectContaining({ sessionId: directSession.sessionId, kind: 'movie', mode: 'direct', plan: null }),
+    ]);
+    expect(JSON.stringify(started)).not.toContain('secret');
   });
 
   test('signals an ffmpeg that ignores the first kill again until it exits', async () => {
