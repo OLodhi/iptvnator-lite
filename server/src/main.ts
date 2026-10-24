@@ -64,6 +64,7 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   scheduler.stop();
+  logos.stop();
   try {
     // Together: closing the app aborts direct streams, and stopAll ends every FFmpeg.
     await Promise.allSettled([app.close(), sessions.stopAll()]);
@@ -77,4 +78,5 @@ process.on('SIGTERM', shutdown);
 
 await app.listen({ port: config.port, host: config.host });
 scheduler.start();
+logos.start();
 console.log(`Server listening on http://${config.host}:${config.port}`);

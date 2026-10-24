@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { PNG, startImageServer } from '../testing/imageServer.ts';
 import { createLogoCache } from './cache.ts';
 
@@ -87,4 +88,59 @@ test('rejects non-http(s) URLs', async () => {
     expect(await cache.get(url), url).toBeNull();
   }
   expect(called).toBe(0);
+});
+
+test('a failed rename returns null and leaves no temp file', async () => {
+  const cache = createLogoCache({ dir, now });
+  const key = createHash('sha256').update(`${server.url}/logo.png`).digest('hex');
+  fs.mkdirSync(path.join(dir, `${key}.png`)); // a directory in the way makes the final rename fail
+  expect(await cache.get(`${server.url}/logo.png`)).toBeNull();
+  expect(files()).toEqual([`${key}.png`]);
+});
+
+const put = (name: string, size: number, ageMs: number) => {
+  fs.writeFileSync(path.join(dir, name), Buffer.alloc(size));
+  const t = new Date(clock - ageMs);
+  fs.utimesSync(path.join(dir, name), t, t);
+};
+
+test('sweep removes temp files and files older than twice the TTL, keeping fresh ones', async () => {
+  const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+  put('a.png.1.2.tmp', 10, 0);
+  put('old.png', 20, 2001);
+  put('stale.png', 30, 1500); // expired but under 2x: kept
+  put('fresh.png', 40, 10);
+  expect(await cache.sweep()).toEqual({ deleted: 2, bytes: 30 });
+  expect(files().sort()).toEqual(['fresh.png', 'stale.png']);
+});
+
+test('sweep evicts the oldest files first when over the cap', async () => {
+  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 250 });
+  put('newest.png', 100, 1);
+  put('oldest.png', 100, 300);
+  put('middle.png', 100, 200);
+  expect(await cache.sweep()).toEqual({ deleted: 1, bytes: 100 });
+  expect(files().sort()).toEqual(['middle.png', 'newest.png']);
+  expect(await createLogoCache({ dir: path.join(dir, 'missing'), now }).sweep()).toEqual({ deleted: 0, bytes: 0 });
+});
+
+test('start sweeps now and daily; stop ends the timer', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }); // file I/O and waitFor stay real
+  try {
+    const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+    put('old1.png', 1, 5000);
+    cache.start();
+    await vi.waitFor(() => expect(files()).toEqual([])); // real file I/O: wait for it
+    put('old2.png', 1, 5000);
+    vi.advanceTimersByTime(86_400_000);
+    await vi.waitFor(() => expect(files()).toEqual([]));
+    cache.stop();
+    put('old3.png', 1, 5000);
+    vi.advanceTimersByTime(3 * 86_400_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(files()).toEqual(['old3.png']);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });

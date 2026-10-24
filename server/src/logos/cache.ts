@@ -10,7 +10,15 @@ export interface CachedLogo {
 export interface LogoCache {
   /** The cached image for `url` (fetched if missing or older than the TTL), or null if it is not a usable image. */
   get(url: string): Promise<CachedLogo | null>;
+  /** Deletes leftovers (.tmp), files older than twice the TTL, then the oldest files while the total is over the cap. */
+  sweep(): Promise<{ deleted: number; bytes: number }>;
+  /** Sweeps now and then daily, on a timer that does not keep the process alive. */
+  start(): void;
+  stop(): void;
 }
+
+export const DEFAULT_MAX_CACHE_BYTES = 500_000_000;
+const SWEEP_INTERVAL_MS = 86_400_000;
 
 const DAY_MS = 86_400_000;
 
@@ -43,12 +51,14 @@ export function createLogoCache(deps: {
   userAgent?: string;
   ttlMs?: number;
   maxBytes?: number;
+  maxCacheBytes?: number;
   timeoutMs?: number;
 }): LogoCache {
   const { dir, now, userAgent } = deps;
   const fetchFn = deps.fetchFn ?? fetch;
   const ttlMs = deps.ttlMs ?? 7 * DAY_MS;
   const maxBytes = deps.maxBytes ?? 2_000_000;
+  const maxCacheBytes = deps.maxCacheBytes ?? DEFAULT_MAX_CACHE_BYTES;
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const inFlight = new Map<string, Promise<CachedLogo | null>>();
 
@@ -57,7 +67,7 @@ export function createLogoCache(deps: {
       const file = path.join(dir, `${key}.${ext}`);
       try {
         const stat = await fs.stat(file);
-        if (now() - stat.mtimeMs < ttlMs) return { path: file, contentType };
+        if (stat.isFile() && now() - stat.mtimeMs < ttlMs) return { path: file, contentType };
       } catch {
         // not cached under this extension
       }
@@ -105,17 +115,77 @@ export function createLogoCache(deps: {
       await fs.mkdir(dir, { recursive: true });
       const file = path.join(dir, `${key}.${ext}`);
       const tmp = `${file}.${process.pid}.${now()}.tmp`;
-      await fs.writeFile(tmp, body);
-      const stamp = new Date(now());
-      await fs.utimes(tmp, stamp, stamp);
-      await fs.rename(tmp, file);
+      try {
+        await fs.writeFile(tmp, body);
+        const stamp = new Date(now());
+        await fs.utimes(tmp, stamp, stamp);
+        await fs.rename(tmp, file);
+      } catch (err) {
+        await fs.rm(tmp, { force: true });
+        throw err;
+      }
       return { path: file, contentType: CONTENT_TYPES[ext]! };
     } catch {
       return null;
     }
   }
 
+  async function sweep(): Promise<{ deleted: number; bytes: number }> {
+    let names: string[];
+    try {
+      names = await fs.readdir(dir);
+    } catch {
+      return { deleted: 0, bytes: 0 };
+    }
+    let deleted = 0;
+    let bytes = 0;
+    const remove = async (file: string, size: number): Promise<boolean> => {
+      try {
+        await fs.rm(file, { force: true });
+        deleted++;
+        bytes += size;
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const kept: { file: string; size: number; mtimeMs: number }[] = [];
+    for (const name of names) {
+      const file = path.join(dir, name);
+      let stat;
+      try {
+        stat = await fs.stat(file);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      if ((name.endsWith('.tmp') || now() - stat.mtimeMs > 2 * ttlMs) && (await remove(file, stat.size))) continue;
+      kept.push({ file, size: stat.size, mtimeMs: stat.mtimeMs });
+    }
+    let total = kept.reduce((sum, f) => sum + f.size, 0);
+    kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const f of kept) {
+      if (total <= maxCacheBytes) break;
+      if (await remove(f.file, f.size)) total -= f.size;
+    }
+    return { deleted, bytes };
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+
   return {
+    sweep,
+    start() {
+      if (timer) return;
+      const run = () => void sweep().catch(() => undefined);
+      run();
+      timer = setInterval(run, SWEEP_INTERVAL_MS);
+      timer.unref();
+    },
+    stop() {
+      clearInterval(timer);
+      timer = undefined;
+    },
     async get(url) {
       if (!/^https?:\/\//i.test(url)) return null;
       const key = createHash('sha256').update(url).digest('hex');
