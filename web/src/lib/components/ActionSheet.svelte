@@ -4,6 +4,15 @@
 
   let { open, title, actions, onClose }: Props = $props();
 
+  // The long-press release lands under the finger on iOS and would hit the backdrop.
+  let openedAt = 0;
+  $effect(() => {
+    if (open) openedAt = Date.now();
+  });
+  function backdropClick() {
+    if (Date.now() - openedAt >= 300) onClose();
+  }
+
   function choose(a: Action) {
     onClose();
     a.run();
@@ -13,7 +22,7 @@
 <svelte:window onkeydown={(e) => open && e.key === 'Escape' && onClose()} />
 
 {#if open}
-  <div class="backdrop" role="presentation" onclick={onClose}></div>
+  <div class="backdrop" role="presentation" onclick={backdropClick}></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-label={title}>
     <p class="sheet-title">{title}</p>
     {#each actions as a (a.label)}

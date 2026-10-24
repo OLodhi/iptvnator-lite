@@ -5,7 +5,7 @@ const MOVE_TOLERANCE_PX = 10;
 /**
  * Fires `onLongPress` after the pointer is held for `ms` (default 500) without moving more than 10 px,
  * and swallows the click that follows. Uses Pointer Events (iOS 13+) and blocks the native callout.
- * Pair with `-webkit-touch-callout: none; user-select: none` on the element.
+ * Applies `-webkit-touch-callout: none; user-select: none` to the node (restored on destroy).
  */
 export function longpress(node: HTMLElement, initial: LongPressParams) {
   let params = initial;
@@ -20,7 +20,15 @@ export function longpress(node: HTMLElement, initial: LongPressParams) {
     timer = undefined;
   };
 
+  const prevCallout = node.style.getPropertyValue('-webkit-touch-callout');
+  const prevSelect = node.style.userSelect;
+  const prevWebkitSelect = node.style.getPropertyValue('-webkit-user-select');
+  node.style.setProperty('-webkit-touch-callout', 'none');
+  node.style.setProperty('-webkit-user-select', 'none');
+  node.style.userSelect = 'none';
+
   const onDown = (e: PointerEvent) => {
+    if (e.button !== 0) return; // primary button only; touch and pen report 0
     cancel();
     clearTimeout(clearSuppress);
     suppressClick = false;
@@ -66,6 +74,9 @@ export function longpress(node: HTMLElement, initial: LongPressParams) {
     destroy() {
       cancel();
       clearTimeout(clearSuppress);
+      node.style.setProperty('-webkit-touch-callout', prevCallout);
+      node.style.setProperty('-webkit-user-select', prevWebkitSelect);
+      node.style.userSelect = prevSelect;
       node.removeEventListener('pointerdown', onDown);
       node.removeEventListener('pointermove', onMove);
       node.removeEventListener('pointerup', onUp);

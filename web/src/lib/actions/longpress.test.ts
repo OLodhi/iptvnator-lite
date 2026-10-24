@@ -83,3 +83,36 @@ test('honours a custom ms', () => {
   vi.advanceTimersByTime(100);
   expect(onLongPress).toHaveBeenCalledTimes(1);
 });
+
+test('pointercancel and pointerleave cancel a pending long press', () => {
+  fire('pointerdown');
+  vi.advanceTimersByTime(200);
+  fire('pointercancel');
+  vi.advanceTimersByTime(1000);
+  expect(onLongPress).not.toHaveBeenCalled();
+  fire('pointerdown');
+  vi.advanceTimersByTime(200);
+  fire('pointerleave');
+  vi.advanceTimersByTime(1000);
+  expect(onLongPress).not.toHaveBeenCalled();
+});
+
+test('only the primary button starts a long press', () => {
+  node.dispatchEvent(new MouseEvent('pointerdown', { button: 2, bubbles: true }));
+  vi.advanceTimersByTime(1000);
+  expect(onLongPress).not.toHaveBeenCalled();
+});
+
+test('applies no-callout/no-select styles and restores them on destroy', () => {
+  action.destroy?.();
+  node.style.userSelect = 'text';
+  // jsdom's CSSStyleDeclaration drops -webkit-touch-callout, so observe the calls instead.
+  const set = vi.spyOn(node.style, 'setProperty');
+  action = longpress(node, { onLongPress });
+  expect(set).toHaveBeenCalledWith('-webkit-touch-callout', 'none');
+  expect(node.style.userSelect).toBe('none');
+  set.mockClear();
+  action.destroy?.();
+  expect(set).toHaveBeenCalledWith('-webkit-touch-callout', '');
+  expect(node.style.userSelect).toBe('text');
+});
