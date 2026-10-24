@@ -258,15 +258,19 @@ describe('xtream guide and timeshift calls', () => {
   });
 
   test('xmltv does not idle out while the consumer applies backpressure', async () => {
+    let resumed!: () => void;
+    const consumerResumed = new Promise<void>((r) => (resumed = r));
     await withServer(
       (_req, res) => {
         res.writeHead(200);
         res.write('x'.repeat(2_000_000));
-        setTimeout(() => res.end('<tv/>'), 700);
+        // Ends only once the consumer reads again, so load cannot make the end race the pause.
+        void consumerResumed.then(() => setTimeout(() => res.end('<tv/>'), 50));
       },
       async (url) => {
         const stream = await clientFor(url, 5000).xmltv({ idleTimeoutMs: 200 });
-        await new Promise((r) => setTimeout(r, 500)); // not reading
+        await new Promise((r) => setTimeout(r, 800)); // not reading, four idle timeouts long
+        resumed();
         let n = 0;
         for await (const c of stream) n += (c as Buffer).length;
         expect(n).toBe(2_000_005);

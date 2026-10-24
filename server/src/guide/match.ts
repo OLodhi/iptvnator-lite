@@ -21,7 +21,7 @@ export function normaliseChannelName(name: string): string {
     .replace(/&/g, ' and ')
     .replace(/\+/g, ' plus ')
     .replace(/[([]([^)\]]*)[)\]]/g, (m, inner: string) =>
-      inner.split(/[^a-z0-9]+/).every((w) => w === '' || NOISE.has(w)) ? ' ' : m,
+      inner.split(/[^\p{L}\p{N}]+/u).every((w) => w === '' || NOISE.has(w)) ? ' ' : m,
     )
     .replace(/[^\p{L}\p{N}]+/gu, ' ');
   return s
@@ -35,14 +35,15 @@ export function isSeparatorName(name: string): boolean {
   return /^\s*(?:[#=*-]\s*){3,}/.test(name);
 }
 
-/** Strips the item's own category tag, whichever pattern the name uses. */
+/** Strips the item's own category tag, whichever pattern the name uses; else any known leading tag. */
 function stripItemTag(name: string, tag: string | null): string {
-  if (!tag) return name;
-  for (const p of PATTERNS) {
-    const stripped = stripTag(name, tag, p);
-    if (stripped !== name) return stripped;
+  if (tag) {
+    for (const p of PATTERNS) {
+      const stripped = stripTag(name, tag, p);
+      if (stripped !== name) return stripped;
+    }
   }
-  return name;
+  return stripAnyTag(name);
 }
 
 /** Strips a leading tag of any known pattern; the provider writes its tagged names as display-names. */
@@ -85,6 +86,8 @@ export function computeLinks(input: {
     for (const n of c.names) {
       add(byName, n, c.key);
       add(byNameLower, n.toLowerCase(), c.key);
+      // Both forms: the colon and dash patterns are loose, so "Sky: Sports" must stay findable as itself.
+      add(byNorm, normaliseChannelName(n), c.key);
       add(byNorm, normaliseChannelName(stripAnyTag(n)), c.key);
     }
   }
@@ -114,6 +117,8 @@ export function computeLinks(input: {
       norms.add(own);
       normOf.set(item.id, own);
     }
+    const raw = normaliseChannelName(item.name);
+    if (raw) norms.add(raw);
     if (item.epgChannelId) {
       const fromId = normaliseChannelName(item.epgChannelId);
       if (fromId) norms.add(fromId);
@@ -196,7 +201,7 @@ export function relinkGuide(db: Db, providerId: number): { linked: number; byMet
     links = new Map();
     for (const item of items) {
       const key = `stream:${item.remoteId}`;
-      if (keys.has(key)) links.set(item.id, { key, method: 'provider' });
+      if (keys.has(key) && !isSeparatorName(item.name)) links.set(item.id, { key, method: 'provider' });
     }
   } else {
     const keysWithProgrammes = new Set(

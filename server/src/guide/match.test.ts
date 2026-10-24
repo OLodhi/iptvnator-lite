@@ -56,6 +56,34 @@ describe('computeLinks', () => {
     expect(run([item(3, 'KIDS| CBeebies', { tag: 'KIDS' })], [ch('cb', 'KIDS| CBEEBIES HD')]).get(3)?.key).toBe('cb');
     expect(run([item(4, 'Foo')], [ch('x', '|EN| Foo')]).get(4)).toEqual({ key: 'x', method: 'normalised' });
   });
+  test('loose colon and dash display-names stay findable as themselves', () => {
+    const channels = [ch('sky', 'Sky: Sports'), ch('mtv', 'MTV - Hits')];
+    const links = run([item(1, 'Sky: Sports HD'), item(2, 'MTV - Hits FHD')], channels);
+    expect(links.get(1)).toEqual({ key: 'sky', method: 'normalised' });
+    expect(links.get(2)).toEqual({ key: 'mtv', method: 'normalised' });
+  });
+  test('ordinary short names are not mangled', () => {
+    const names = ['E4', '4Music', '5 STAR', 'W'];
+    const channels = names.map((n, i) => ch(`k${i}`, n));
+    const links = run(names.map((n, i) => item(i + 1, `${n} HD`)), channels);
+    names.forEach((_, i) => expect(links.get(i + 1)).toEqual({ key: `k${i}`, method: 'normalised' }));
+  });
+  test('an item whose category tag differs from its own falls back to any known tag', () => {
+    const links = run([item(1, '|EN| Foo', { tag: null }), item(2, '|EN| Bar', { tag: 'UK' })], [
+      ch('foo', '|EN| Foo HD'), ch('bar', 'Bar'),
+    ]);
+    expect(links.get(1)).toEqual({ key: 'foo', method: 'normalised' });
+    expect(links.get(2)).toEqual({ key: 'bar', method: 'normalised' });
+  });
+  test('bracketed non-Latin text is kept', () => {
+    expect(normaliseChannelName('Channel (Ελληνικά)')).toBe('channel ελληνικα');
+    expect(normaliseChannelName('Channel [日本]')).toBe('channel 日本');
+    expect(normaliseChannelName('Channel (HD)')).toBe('channel');
+  });
+  test('an exact id match beats a case-insensitive one', () => {
+    const links = run([item(1, 'X', { epgChannelId: 'bbc1.uk' })], [ch('BBC1.UK'), ch('bbc1.uk')]);
+    expect(links.get(1)).toEqual({ key: 'bbc1.uk', method: 'id' });
+  });
   test('ambiguous normalised names prefer the tag country', () => {
     const channels = [ch('BBC1.ie', 'BBC One'), ch('BBC1.uk', 'BBC One')];
     expect(run([item(1, 'UK| BBC 1 HD', { tag: 'UK' })], channels).get(1)?.key).toBe('BBC1.uk');
@@ -137,8 +165,21 @@ describe('relinkGuide', () => {
   });
 
   test('provider-source guides link by stream id', () => {
-    commit('provider', [{ key: 'stream:b', name: 'B', names: ['B'] }]);
+    commit('provider', [{ key: 'stream:b', name: 'B', names: ['B'] }, { key: 'stream:c', name: 'C', names: ['C'] }]);
     expect(relinkGuide(db, P)).toMatchObject({ linked: 1, byMethod: { provider: 1 } });
-    expect(links()).toEqual([{ id: 2, key: 'stream:b', method: 'provider' }]);
+    expect(links()).toEqual([{ id: 2, key: 'stream:b', method: 'provider' }]); // separator row c stays unlinked
+  });
+
+  test('replaces stale links and leaves other providers alone', () => {
+    db.prepare("INSERT INTO providers (id, kind, name, config, created_at) VALUES (2, 'xtream', 'Q', '{}', 0)").run();
+    db.prepare("INSERT INTO items (id, provider_id, kind, remote_id, name, position, seen_at) VALUES (9, 2, 'live', 'z', 'Z', 1, 0)").run();
+    db.prepare("INSERT INTO guide_links (item_id, provider_id, channel_key, method) VALUES (9, 2, 'zz', 'id')").run();
+    commit('xmltv', [{ key: 'BBC1.uk', name: 'x', names: [] }]);
+    relinkGuide(db, P);
+    expect(links().map((l) => (l as { id: number }).id)).toEqual([1, 2, 9]);
+    db.prepare("UPDATE items SET epg_channel_id = 'gone' WHERE id = 1").run();
+    db.prepare("UPDATE items SET name = 'Nothing' WHERE id = 2").run();
+    relinkGuide(db, P);
+    expect(links()).toEqual([{ id: 9, key: 'zz', method: 'id' }]);
   });
 });
