@@ -71,8 +71,10 @@ test('imports hidden categories as default rules for the matching provider', () 
   });
   expect(run(file)).toEqual({ categoriesMatched: 4, hiddenApplied: 2, favouritesImported: 0 });
   expect(rules('live')).toEqual([
+    { type: 'category', target: '3', visible: 1 }, // not in the file and showing: kept showing
+    { type: 'category', target: '4', visible: 1 },
     { type: 'category', target: '5', visible: 0 },
-    { type: 'tag', target: 'UK', visible: 1 },
+    { type: 'tag', target: 'UK', visible: 1 }, // UK 2, not in the file either, follows it
   ]);
   expect(rules('movie')).toEqual([
     { type: 'category', target: '10', visible: 1 },
@@ -94,6 +96,7 @@ test('hiding every US category and no UK one is a tag rule, not one rule per cat
   });
   expect(run(file)).toEqual({ categoriesMatched: 4, hiddenApplied: 2, favouritesImported: 0 });
   expect(rules('live')).toEqual([
+    { type: 'category', target: '5', visible: 1 }, // not in the file and showing: kept showing
     { type: 'tag', target: 'UK', visible: 1 },
     { type: 'tag', target: 'US', visible: 0 },
   ]);
@@ -117,9 +120,29 @@ test('the group majority sets the tag rule, a tie shows, and the minority become
   expect(run(file)).toEqual({ categoriesMatched: 4, hiddenApplied: 3, favouritesImported: 0 });
   expect(rules('live')).toEqual([
     { type: 'category', target: '1', visible: 0 },
+    { type: 'category', target: '5', visible: 1 }, // not in the file and showing: kept showing
     { type: 'tag', target: 'UK', visible: 1 },
     { type: 'tag', target: 'US', visible: 0 },
   ]);
+});
+
+test('a category the file does not mention and that is visible stays visible; the file hides and shows the rest', () => {
+  const file = fixture({
+    categories: [
+      { type: 'live', xtreamId: 1 }, // UK, shown
+      { type: 'live', xtreamId: 5, hidden: true }, // untagged, hidden
+      { type: 'movies', xtreamId: 11, hidden: true }, // untagged, hidden
+    ],
+  });
+  const visibleBefore = (kind: 'live' | 'movie') => services().curation.visibleCategoryIds(providerId, kind, USER);
+  expect(visibleBefore('live').size).toBe(5); // no rules yet: everything shows
+  expect(run(file)).toEqual({ categoriesMatched: 3, hiddenApplied: 2, favouritesImported: 0 });
+  const visible = (kind: 'live' | 'movie') =>
+    [...services().curation.visibleCategoryIds(providerId, kind, USER)].sort((a, b) => a - b);
+  const ids = (...keys: string[]) => keys.map((k) => categoryId.get(k)!).sort((a, b) => a - b);
+  // UK 2 follows its group; US 3 and 4 (no group rule from the file) and the untagged movie 10 keep showing.
+  expect(visible('live')).toEqual(ids('live:1', 'live:2', 'live:3', 'live:4'));
+  expect(visible('movie')).toEqual(ids('movie:10'));
 });
 
 test('imports favourites by stream id and skips the ones we do not have', () => {

@@ -111,21 +111,25 @@ export function importIptvnator(
   const { serverUrl, username } = provider.config;
   const theirs = readTheirs(input.file, serverUrl, username);
 
-  const ours = deps.db.prepare('SELECT remote_id AS remoteId, tag FROM categories WHERE provider_id = ? AND kind = ?');
+  const ours = deps.db.prepare('SELECT id, remote_id AS remoteId, tag FROM categories WHERE provider_id = ? AND kind = ?');
   const item = deps.db.prepare('SELECT id FROM items WHERE provider_id = ? AND kind = ? AND remote_id = ?').pluck();
   const result: ImportResult = { categoriesMatched: 0, hiddenApplied: 0, favouritesImported: 0 };
 
   // One transaction: a failure part-way leaves no rules or favourites behind (the saves nest as savepoints).
   deps.db.transaction(() => {
     for (const kind of KINDS) {
-      const tagOf = new Map(
-        (ours.all(input.providerId, kind) as { remoteId: string; tag: string | null }[]).map((c) => [c.remoteId, c.tag]),
-      );
+      const rows = ours.all(input.providerId, kind) as { id: number; remoteId: string; tag: string | null }[];
+      const tagOf = new Map(rows.map((c) => [c.remoteId, c.tag]));
       const matched = theirs.categories
         .filter((c) => c.kind === kind && tagOf.has(c.remoteId))
         .map((c) => ({ remoteId: c.remoteId, tag: tagOf.get(c.remoteId)!, visible: !c.hidden }));
       if (matched.length === 0) continue;
       const { update, hidden } = curationFor(matched);
+      // A visible category the file does not mention keeps showing, with a rule of its own as the picker would write:
+      // under the saved rules it would otherwise be hidden. (Save drops it where its group's new switch shows it.)
+      const mentioned = new Set(matched.map((c) => c.remoteId));
+      const visibleNow = deps.curation.visibleCategoryIds(input.providerId, kind, input.userId);
+      for (const c of rows) if (!mentioned.has(c.remoteId) && visibleNow.has(c.id)) update.categories[c.remoteId] = true;
       deps.curation.save(input.providerId, kind, update, null);
       result.categoriesMatched += matched.length;
       result.hiddenApplied += hidden;
