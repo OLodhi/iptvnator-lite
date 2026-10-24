@@ -17,6 +17,12 @@ export function messageFor(err: Pick<ApiClientError, 'code' | 'details'>): strin
     case 'STREAM_START_TIMEOUT':
     case 'UPSTREAM_ERROR':
       return "This channel isn't responding right now.";
+    case 'NOT_IPTVNATOR':
+      return "That file isn't an IPTVnator database.";
+    case 'NO_MATCHING_PLAYLIST':
+      return "That IPTVnator file doesn't contain this provider.";
+    case 'IMPORT_TOO_LARGE':
+      return 'That file is too large to import.';
     default:
       return 'Something went wrong. Please try again.';
   }

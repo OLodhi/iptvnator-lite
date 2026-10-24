@@ -14,6 +14,12 @@ test('messageFor gives plain-English copy per code', () => {
   expect(messageFor(err('SOMETHING_ELSE'))).toBe('Something went wrong. Please try again.');
 });
 
+test('messageFor explains import failures', () => {
+  expect(messageFor(err('NOT_IPTVNATOR'))).toBe("That file isn't an IPTVnator database.");
+  expect(messageFor(err('NO_MATCHING_PLAYLIST'))).toBe("That IPTVnator file doesn't contain this provider.");
+  expect(messageFor(err('IMPORT_TOO_LARGE'))).toBe('That file is too large to import.');
+});
+
 test('messageFor handles a connection limit without details', () => {
   expect(messageFor(err('PROVIDER_CONNECTION_LIMIT'))).toBe('Your provider allows only a limited number of streams at a time, and it’s in use.');
 });

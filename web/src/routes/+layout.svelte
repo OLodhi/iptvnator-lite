@@ -9,7 +9,7 @@
     { href: '/browse/movie', label: 'Movies' },
     { href: '/browse/series', label: 'Series' },
     { href: '/search', label: 'Search' },
-    { href: '/settings/providers', label: 'Settings', match: '/settings' }
+    { href: '/settings', label: 'Settings' }
   ];
 </script>
 
@@ -19,6 +19,6 @@
 
 <nav class="tabbar" aria-label="Sections">
   {#each tabs as tab}
-    <a href={tab.href} aria-current={page.url.pathname.startsWith(tab.match ?? tab.href) ? 'page' : undefined}>{tab.label}</a>
+    <a href={tab.href} aria-current={page.url.pathname.startsWith(tab.href) ? 'page' : undefined}>{tab.label}</a>
   {/each}
 </nav>

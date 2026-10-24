@@ -1,8 +1,59 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import type { AddProviderRequest, ProviderSummary, SyncStatus } from '@tv/shared';
+  import { onDestroy, onMount } from 'svelte';
+  import type { AddProviderRequest, ImportResult, ProviderSummary, SyncStatus } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
+  import { importIptvnator, refresh } from '$lib/me';
+  import { firstProvider } from '$lib/provider';
+
+  let provider = $state<ProviderSummary | null>(null);
+  let loaded = $state(false);
+  let imported = $state<ImportResult | null>(null);
+  let importing = $state(false);
+  let refreshing = $state(false);
+
+  onMount(async () => {
+    try {
+      provider = (await firstProvider()) ?? null;
+    } catch {
+      // fall back to the add form
+    }
+    loaded = true;
+  });
+
+  const fail = (err: unknown) => (err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.');
+
+  async function refreshNow() {
+    if (!provider) return;
+    refreshing = true;
+    error = '';
+    sync = null;
+    try {
+      await refresh(provider.id);
+      poll(provider.id);
+    } catch (err) {
+      error = fail(err);
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  async function chooseFile(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // allow choosing the same file again
+    if (!file || !provider) return;
+    importing = true;
+    error = '';
+    imported = null;
+    try {
+      imported = await importIptvnator(provider.id, file);
+    } catch (err) {
+      error = fail(err);
+    } finally {
+      importing = false;
+    }
+  }
 
   let serverUrl = $state('');
   let username = $state('');
@@ -43,9 +94,10 @@
     try {
       const body: AddProviderRequest = { kind: 'xtream', serverUrl: serverUrl.trim(), username: username.trim(), password };
       if (name.trim()) body.name = name.trim();
-      const provider = await api<ProviderSummary>('/api/providers', { method: 'POST', body: JSON.stringify(body) });
+      const added = await api<ProviderSummary>('/api/providers', { method: 'POST', body: JSON.stringify(body) });
       password = '';
-      poll(provider.id);
+      provider = added;
+      poll(added.id);
     } catch (err) {
       error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
@@ -54,7 +106,37 @@
   }
 </script>
 
-<h1>Add your provider</h1>
+{#if provider}
+  <h1>Providers</h1>
+  <div class="card">
+    <p class="pname">{provider.name}</p>
+    <p class="muted">
+      {provider.lastSyncedAt ? `Updated ${new Date(provider.lastSyncedAt).toLocaleString()}` : 'Not loaded yet'}
+    </p>
+    <button type="button" class="primary" disabled={refreshing || sync?.state === 'running'} onclick={refreshNow}>
+      {refreshing || sync?.state === 'running' ? 'Refreshing…' : 'Refresh now'}
+    </button>
+    <p class="muted"><a href="/settings/categories">Choose categories</a></p>
+  </div>
+
+  <h2>Import from IPTVnator</h2>
+  <div class="card">
+    <p class="muted">
+      On your PC this is in your user folder under <code>.iptvnator\databases\iptvnator.db</code>.
+    </p>
+    <label class="filebtn">
+      <span>{importing ? 'Importing…' : 'Choose iptvnator.db'}</span>
+      <input type="file" accept=".db,.sqlite,application/octet-stream" disabled={importing} onchange={chooseFile} />
+    </label>
+    {#if imported}
+      <p role="status">
+        Matched {imported.categoriesMatched} categories, hid {imported.hiddenApplied}, imported {imported.favouritesImported}
+        {imported.favouritesImported === 1 ? 'favourite' : 'favourites'}.
+      </p>
+    {/if}
+  </div>
+{:else if loaded}
+  <h1>Add your provider</h1>
 
 <form onsubmit={submit}>
   <label>Server address
@@ -81,6 +163,7 @@
   </label>
   <button class="primary" type="submit" disabled={busy}>{busy ? 'Connecting…' : 'Add provider'}</button>
 </form>
+{/if}
 
 {#if error}
   <p class="error" role="alert">{error}</p>
@@ -98,3 +181,39 @@
     <p class="error" role="alert">Loading your channels didn't finish. Please try again.</p>
   {/if}
 {/if}
+
+<style>
+  .card {
+    display: grid;
+    gap: 10px;
+    padding: 16px;
+    border-radius: 12px;
+    background: var(--surface);
+  }
+  .card p {
+    margin: 0;
+  }
+  .pname {
+    font-weight: 600;
+    font-size: 1.1rem;
+  }
+  .filebtn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--row-height);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  .filebtn input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+</style>
