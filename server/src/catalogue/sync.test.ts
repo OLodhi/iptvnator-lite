@@ -184,6 +184,46 @@ test('refresh with an empty kind prunes nothing', async () => {
   ]);
 });
 
+test("an empty category list keeps the kind's style, tags and links, and files nothing under Uncategorised", async () => {
+  const tagged = generateCatalogue({ live: 40, movie: 0, series: 0, categoriesPerKind: 20 });
+  fake.setCatalogue(tagged);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  const style = () => db.prepare("SELECT style, pattern FROM catalogue_styles WHERE kind = 'live'").get();
+  const categories = () => db.prepare("SELECT remote_id, name, tag FROM categories WHERE kind = 'live' ORDER BY id").all();
+  const links = () =>
+    db
+      .prepare(
+        `SELECT c.remote_id AS category, i.remote_id AS item FROM item_categories ic
+         JOIN categories c ON c.id = ic.category_id JOIN items i ON i.id = ic.item_id WHERE i.kind = 'live' ORDER BY ic.rowid`,
+      )
+      .all();
+  const before = { style: style(), categories: categories(), links: links() };
+  expect(before.style).toEqual({ style: 'tagged', pattern: 'pipe' });
+  expect(before.links).toHaveLength(40);
+
+  fake.setCatalogue({ ...tagged, live: { ...tagged.live, categories: [] } }); // the same items
+  const r = await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(r.live).toMatchObject({ items: 40, removed: 0, skippedPrune: true });
+  expect(style()).toEqual(before.style);
+  expect(categories()).toEqual(before.categories);
+  expect(count("SELECT COUNT(*) FROM categories WHERE remote_id = '__none__'")).toBe(0);
+  expect(links()).toEqual(before.links);
+});
+
+test('a kind the provider never categorises still files new items under Uncategorised', async () => {
+  const c = smallCatalogue();
+  c.live.categories = [];
+  fake.setCatalogue(c);
+  await syncCatalogue({ db, client, providerId, kinds: ['live'] });
+  expect(linksOf('live', '1')).toEqual(['__none__']);
+  c.live.items.push({ id: 60, name: 'Newcomer', categoryId: '1' });
+  fake.setCatalogue(c);
+  // Uncategorised is ours, not the provider's: an empty list from a provider that never sent one is no hiccup.
+  const r = await syncCatalogue({ db, client, providerId, kinds: ['live'], now: later });
+  expect(r.live.skippedPrune).toBe(false);
+  expect(linksOf('live', '60')).toEqual(['__none__']);
+});
+
 test('refresh that fails mid-stream prunes nothing', async () => {
   await syncCatalogue({ db, client, providerId });
   const links = count('SELECT COUNT(*) FROM item_categories');

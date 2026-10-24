@@ -46,7 +46,10 @@ function prepare(db: Db) {
        ON CONFLICT (provider_id, kind) DO UPDATE SET style = excluded.style, pattern = excluded.pattern`,
     ),
     countItems: db.prepare('SELECT COUNT(*) FROM items WHERE provider_id = ? AND kind = ?').pluck(),
-    countCategories: db.prepare('SELECT COUNT(*) FROM categories WHERE provider_id = ? AND kind = ?').pluck(),
+    // The provider's own categories: Uncategorised is ours.
+    countCategories: db
+      .prepare(`SELECT COUNT(*) FROM categories WHERE provider_id = ? AND kind = ? AND remote_id <> '${NONE_ID}'`)
+      .pluck(),
     deleteLinks: db.prepare(
       `DELETE FROM item_categories WHERE rowid IN (
          SELECT ic.rowid FROM item_categories ic JOIN categories c ON c.id = ic.category_id
@@ -91,6 +94,9 @@ async function syncKind(
   const rawCategories = await client.getCategories(kind);
   const itemsBefore = st.countItems.get(providerId, kind) as number;
   const categoriesBefore = st.countCategories.get(providerId, kind) as number;
+  // An empty category list for a kind that had categories is a provider hiccup, like an empty item list: the kind's
+  // tag style, categories, tags and links stay as they are, and nothing is filed under Uncategorised.
+  const categoriesMissing = rawCategories.length === 0 && categoriesBefore > 0;
 
   // A tag only counts when at least two categories share it (P2-R4); a lone match is just a word.
   const names = rawCategories.map((c) => c.name.trim());
@@ -107,7 +113,7 @@ async function syncKind(
 
   let categoryCount = 0;
   db.transaction(() => {
-    st.upsertStyle.run(providerId, kind, style, pattern);
+    if (!categoriesMissing) st.upsertStyle.run(providerId, kind, style, pattern);
     rawCategories.forEach((c, position) => {
       const id = st.upsertCategory.pluck().get({
         providerId, kind, remoteId: c.remoteId, name: c.name, position, seenAt: startedAt, tag: tagFor(c.name.trim()),
@@ -148,7 +154,7 @@ async function syncKind(
         st.link.run(categoryId, itemId, position, startedAt);
         linked++;
       }
-      if (linked === 0) st.link.run(uncategorised(), itemId, position, startedAt);
+      if (linked === 0 && !categoriesMissing) st.link.run(uncategorised(), itemId, position, startedAt);
     });
   });
 
@@ -170,7 +176,7 @@ async function syncKind(
 
   // Only a fully streamed kind may remove anything, and an empty answer for a kind that had data is
   // treated as a provider hiccup rather than a request to delete everything.
-  if ((total === 0 && itemsBefore > 0) || (rawCategories.length === 0 && categoriesBefore > 0)) {
+  if ((total === 0 && itemsBefore > 0) || categoriesMissing) {
     log.warn(
       { providerId, kind, items: total, categories: rawCategories.length, itemsBefore, categoriesBefore },
       'provider returned an empty list; pruning skipped',
