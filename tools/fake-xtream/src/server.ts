@@ -22,8 +22,12 @@ export type FakeXtream = {
   url: string;
   close(): Promise<void>;
   openMediaConnections(): number;
+  /** Media requests refused because the connection limit was reached (oldest first), with the paths holding it. */
+  refusedMediaRequests(): RefusedRequest[];
   setCatalogue(c: FakeCatalogue): void;
 };
+
+export type RefusedRequest = { path: string; heldBy: string[] };
 
 // Media is mapped by stream id; the requested extension is ignored (ruling R1).
 const MEDIA: Record<'live' | 'movie' | 'series', Record<string, string>> = {
@@ -47,7 +51,8 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
   const maxConnections = opts.maxConnections ?? 1;
   const mediaDir = resolve(opts.mediaDir);
   let catalogue = opts.catalogue ?? smallCatalogue();
-  let open = 0;
+  const open = new Map<ServerResponse, string>(); // open media responses → request path
+  const refused: RefusedRequest[] = [];
   let baseUrl = '';
 
   const server: Server = createServer((req, res) => {
@@ -67,10 +72,11 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
       if (decodeURIComponent(user) !== username || decodeURIComponent(pass) !== password) return status(res, 403);
       const file = MEDIA[kind][id];
       if (!file) return status(res, 404);
-      return serveMedia(req, res, join(mediaDir, ...file.split('/')), file.endsWith('.m3u8'));
+      const as = file.endsWith('.m3u8') ? 'playlist' : kind === 'live' ? 'live' : 'file';
+      return serveMedia(req, res, join(mediaDir, ...file.split('/')), as);
     }
     const seg = /^\/hls\/([^/]+)$/.exec(path);
-    if (seg) return serveMedia(req, res, join(mediaDir, 'hls', basename(seg[1]!)), false);
+    if (seg) return serveMedia(req, res, join(mediaDir, 'hls', basename(seg[1]!)), 'file');
     return status(res, 404);
   }
 
@@ -79,32 +85,51 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
   }
 
   /** Counts a connection as open from now until the response closes. Returns false when over the limit. */
-  function acquire(res: ServerResponse): boolean {
-    if (open >= maxConnections) return false;
-    open++;
+  function acquire(req: IncomingMessage, res: ServerResponse): boolean {
+    const path = new URL(req.url ?? '/', 'http://fake').pathname;
+    if (open.size >= maxConnections) {
+      refused.push({ path, heldBy: [...open.values()] });
+      return false;
+    }
+    open.set(res, path);
     res.once('close', () => {
-      open--;
+      open.delete(res);
     });
     return true;
   }
 
-  async function serveMedia(req: IncomingMessage, res: ServerResponse, file: string, playlist: boolean): Promise<void> {
+  /**
+   * `live` is served like a provider's live TS stream: no length and no ranges, so it isn't seekable.
+   * (A seekable input makes FFmpeg open a second connection for each seek, which a live stream never gets.)
+   */
+  async function serveMedia(
+    req: IncomingMessage,
+    res: ServerResponse,
+    file: string,
+    as: 'playlist' | 'live' | 'file',
+  ): Promise<void> {
     let size: number;
     try {
       size = (await stat(file)).size;
     } catch {
       return status(res, 404);
     }
-    if (!acquire(res)) return status(res, 403);
+    if (!acquire(req, res)) return status(res, 403);
     const type = CONTENT_TYPES[file.split('.').pop() ?? ''] ?? 'application/octet-stream';
 
-    if (playlist) {
+    if (as === 'playlist') {
       const text = (await readFile(file, 'utf8'))
         .split(/\r?\n/)
         .map((l) => (l && !l.startsWith('#') ? `/hls/${basename(l)}` : l))
         .join('\n');
       res.writeHead(200, { 'content-type': type, 'content-length': Buffer.byteLength(text) });
       res.end(text);
+      return;
+    }
+    if (as === 'live') {
+      res.writeHead(200, { 'content-type': type });
+      const stream = createReadStream(file);
+      pipeline(stream, res, () => stream.destroy());
       return;
     }
 
@@ -152,7 +177,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
             status: 'Active',
             exp_date: String(Math.floor(Date.now() / 1000) + 30 * 86400),
             is_trial: '0',
-            active_cons: String(open),
+            active_cons: String(open.size),
             created_at: '1600000000',
             max_connections: String(maxConnections),
             allowed_output_formats: ['m3u8', 'ts'],
@@ -279,7 +304,8 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
         server.close(() => ok());
         server.closeAllConnections();
       }),
-    openMediaConnections: () => open,
+    openMediaConnections: () => open.size,
+    refusedMediaRequests: () => refused.map((r) => ({ path: r.path, heldBy: [...r.heldBy] })),
     setCatalogue: (c) => {
       catalogue = c;
     },

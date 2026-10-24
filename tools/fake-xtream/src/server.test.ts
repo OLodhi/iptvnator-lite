@@ -64,13 +64,47 @@ describe('fake xtream', () => {
     const a = await fetch(`${fake.url}/live/u/p/2.ts`);
     expect(a.status).toBe(200);
     expect(fake.openMediaConnections()).toBe(1);
+    const refusedBefore = fake.refusedMediaRequests().length;
     const b = await fetch(`${fake.url}/live/u/p/2.ts`);
     expect(b.status).toBe(403);
+    expect(fake.refusedMediaRequests().slice(refusedBefore)).toEqual([{ path: '/live/u/p/2.ts', heldBy: ['/live/u/p/2.ts'] }]);
     await a.body?.cancel();
     await vi_waitFor(() => fake.openMediaConnections() === 0);
     const c = await fetch(`${fake.url}/live/u/p/2.ts`);
     expect(c.status).toBe(200);
     await c.body?.cancel();
+    await vi_waitFor(() => fake.openMediaConnections() === 0);
+  });
+
+  test('HLS playlist and segment requests count against the connection limit', async () => {
+    const held = await fetch(`${fake.url}/live/u/p/2.ts`); // body left unread, so the connection stays open
+    expect(fake.openMediaConnections()).toBe(1);
+    const refusedBefore = fake.refusedMediaRequests().length;
+    expect((await fetch(`${fake.url}/live/u/p/1.m3u8`)).status).toBe(403);
+    expect((await fetch(`${fake.url}/hls/seg000.ts`)).status).toBe(403);
+    expect(fake.refusedMediaRequests().slice(refusedBefore)).toEqual([
+      { path: '/live/u/p/1.m3u8', heldBy: ['/live/u/p/2.ts'] },
+      { path: '/hls/seg000.ts', heldBy: ['/live/u/p/2.ts'] },
+    ]);
+    await held.body?.cancel();
+    await vi_waitFor(() => fake.openMediaConnections() === 0);
+
+    const playlist = await fetch(`${fake.url}/live/u/p/1.m3u8`);
+    expect(playlist.status).toBe(200);
+    await playlist.text();
+    const seg = await fetch(`${fake.url}/hls/seg000.ts`);
+    expect(seg.status).toBe(200);
+    await seg.arrayBuffer();
+    await vi_waitFor(() => fake.openMediaConnections() === 0);
+  });
+
+  test('serves live TS like a live stream: no length and no ranges', async () => {
+    const res = await fetch(`${fake.url}/live/u/p/2.ts`, { headers: { Range: 'bytes=0-99' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('video/mp2t');
+    expect(res.headers.get('content-length')).toBeNull();
+    expect(res.headers.get('accept-ranges')).toBeNull();
+    await res.body?.cancel();
     await vi_waitFor(() => fake.openMediaConnections() === 0);
   });
 

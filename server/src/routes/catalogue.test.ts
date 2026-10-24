@@ -13,6 +13,7 @@ import { syncCatalogue } from '../catalogue/sync.ts';
 import { openDb } from '../db/db.ts';
 import { createProviderService } from '../providers/service.ts';
 import { testConfig } from '../testing/config.ts';
+import { stubSessions } from '../testing/sessions.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
 
@@ -29,6 +30,7 @@ async function sync(): Promise<void> {
     config, db, providers, catalogue,
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
+    sessions: stubSessions(),
   });
   providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });

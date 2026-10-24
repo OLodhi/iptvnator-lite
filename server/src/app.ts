@@ -10,13 +10,20 @@ import { healthRoutes } from './routes/health.ts';
 import type { SyncRunner } from './catalogue/syncRunner.ts';
 import type { CatalogueRepo } from './catalogue/repo.ts';
 import type { SeriesInfoCache } from './catalogue/seriesInfo.ts';
+import type { SessionManager } from './playback/sessions.ts';
 import { catalogueRoutes } from './routes/catalogue.ts';
+import { playbackRoutes } from './routes/playback.ts';
 import { providerRoutes } from './routes/providers.ts';
 import { syncRoutes } from './routes/sync.ts';
 
-export type AppDeps = { config: Config; db: Db; providers: ProviderService; sync: SyncRunner;
+export type AppDeps = {
+  config: Config;
+  db: Db;
+  providers: ProviderService;
+  sync: SyncRunner;
   catalogue: CatalogueRepo;
   seriesInfo: SeriesInfoCache;
+  sessions: SessionManager;
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -31,6 +38,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         catalogueRoutes({ catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, providers: deps.providers }),
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
+      await api.register(
+        playbackRoutes({
+          catalogue: deps.catalogue,
+          seriesInfo: deps.seriesInfo,
+          providers: deps.providers,
+          sessions: deps.sessions,
+          userAgent: config.defaultUserAgent,
+        }),
+      );
     },
     { prefix: '/api' },
   );

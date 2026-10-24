@@ -11,6 +11,7 @@ import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { openDb } from '../db/db.ts';
 import { createProviderService } from '../providers/service.ts';
 import { testConfig } from '../testing/config.ts';
+import { stubSessions } from '../testing/sessions.ts';
 
 const mediaDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tools/fake-xtream/media');
 const SECRET = 'p-secret-123';
@@ -29,6 +30,7 @@ beforeAll(async () => {
     config, db, providers, catalogue,
     sync: createSyncRunner({ db, providers }),
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
+    sessions: stubSessions(),
   });
 });
 

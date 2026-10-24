@@ -7,7 +7,17 @@ import type { SyncRunner } from './catalogue/syncRunner.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { openDb } from './db/db.ts';
+import { createProber } from './playback/probe.ts';
+import { createSessionManager, defaultIsReady } from './playback/sessions.ts';
+import { spawnFfmpeg } from './playback/spawn.ts';
 import { createProviderService } from './providers/service.ts';
+
+// One JSON line per event. Callers redact provider URLs before they get here.
+const line = (level: string, o: object, msg: string) => JSON.stringify({ time: new Date().toISOString(), level, msg, ...o });
+const log = {
+  info: (o: object, msg: string) => console.log(line('info', o, msg)),
+  warn: (o: object, msg: string) => console.warn(line('warn', o, msg)),
+};
 
 const config = loadConfig(process.env);
 fs.mkdirSync(config.dataDir, { recursive: true });
@@ -22,12 +32,36 @@ const providers = createProviderService({
 sync = createSyncRunner({ db, providers });
 const catalogue = createCatalogueRepo(db);
 const seriesInfo = createSeriesInfoCache({ providers, catalogue });
-const app = await buildApp({ config, db, providers, sync, catalogue, seriesInfo });
+const prober = createProber({ ffprobePath: config.ffprobePath, db });
+const sessions = createSessionManager({
+  ffmpegPath: config.ffmpegPath,
+  transcodeDir: config.transcodeDir,
+  spawn: spawnFfmpeg(log),
+  probe: (url, userAgent) => prober.probe(url, userAgent),
+  transcodeInterlaced: config.transcodeInterlaced,
+  maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
+  isReady: defaultIsReady,
+  now: Date.now,
+  liveIdleMs: 20_000,
+  vodIdleMs: 60_000,
+  readyTimeoutMs: 15_000,
+  stallTimeoutMs: 20_000,
+  maxRestarts: 3,
+  log,
+});
+const app = await buildApp({ config, db, providers, sync, catalogue, seriesInfo, sessions });
 
+let shuttingDown = false;
 async function shutdown(): Promise<void> {
-  await app.close();
-  db.close();
-  process.exit(0);
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    // Together: closing the app aborts direct streams, and stopAll ends every FFmpeg.
+    await Promise.allSettled([app.close(), sessions.stopAll()]);
+  } finally {
+    db.close();
+    process.exit(0);
+  }
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

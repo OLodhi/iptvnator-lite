@@ -1,0 +1,209 @@
+import { open, readFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { ApiError, PlayRequest } from '@tv/shared';
+import type { CatalogueRepo } from '../catalogue/repo.ts';
+import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
+import { CLIENT_ID, PlaybackError } from '../playback/sessions.ts';
+import type { SessionManager } from '../playback/sessions.ts';
+import { resolveSourceUrl, SourceError } from '../playback/sourceUrl.ts';
+import { ProviderError } from '../providers/errors.ts';
+import type { ProviderService } from '../providers/service.ts';
+import { redactUrl } from '../util/redact.ts';
+
+export type PlaybackRouteDeps = {
+  catalogue: CatalogueRepo;
+  seriesInfo: SeriesInfoCache;
+  providers: ProviderService;
+  sessions: SessionManager;
+  /** Sent to the provider for every stream. */
+  userAgent: string;
+  /** How often a streaming direct response re-checks that its session is still running. */
+  touchIntervalMs?: number;
+};
+
+type SessionParams = { id: string; clientId: string };
+
+const TOUCH_INTERVAL_MS = 10_000;
+const UPSTREAM_HEADERS_TIMEOUT_MS = 15_000;
+// Only what FFmpeg writes into a session dir: playlists, segments and the fMP4 init file.
+// Plain names only, so nothing can climb out of the dir (the session manager checks again).
+const SESSION_FILE = /^(?:[\w-]+\.(m3u8|ts|m4s)|init\.(mp4))$/;
+const FILE_TYPES: Record<string, string> = {
+  m3u8: 'application/vnd.apple.mpegurl',
+  ts: 'video/mp2t',
+  m4s: 'video/iso.segment',
+  mp4: 'video/mp4',
+};
+// Everything else the provider sends (cookies, server names, ...) stays on the server.
+const MIRRORED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+
+const playSchema = {
+  type: 'object',
+  required: ['itemId', 'clientId'],
+  properties: {
+    itemId: { type: 'integer' },
+    clientId: { type: 'string', pattern: CLIENT_ID.source },
+    episodeRemoteId: { type: 'string', minLength: 1 },
+    startAtSec: { type: 'number', minimum: 0 },
+  },
+};
+
+export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
+  async (app) => {
+    const { sessions } = deps;
+    const touchIntervalMs = deps.touchIntervalMs ?? TOUCH_INTERVAL_MS;
+    const proxies = new Set<AbortController>(); // in-flight direct upstream requests
+
+    const notFound = (reply: FastifyReply) =>
+      reply.code(404).send({ code: 'NOT_FOUND', message: 'Session or file not found' } satisfies ApiError);
+
+    app.setErrorHandler((err: Error, _req, reply) => {
+      if ((err as { validation?: unknown }).validation) {
+        return reply.code(400).send({ code: 'VALIDATION', message: err.message } satisfies ApiError);
+      }
+      if (err instanceof SourceError) {
+        return reply.code(err.code === 'NOT_FOUND' ? 404 : 400).send({ code: err.code, message: err.message } satisfies ApiError);
+      }
+      if (err instanceof PlaybackError) {
+        const body: ApiError = { code: err.code, message: err.message };
+        if (err.code === 'PROVIDER_CONNECTION_LIMIT') return reply.code(409).send({ ...body, details: err.details });
+        return reply.code(502).send(body);
+      }
+      if (err instanceof ProviderError) {
+        return reply.code(502).send({ code: err.code, message: err.message } satisfies ApiError);
+      }
+      throw err;
+    });
+
+    // Long direct streams would otherwise hold app.close() open until they finish.
+    app.addHook('preClose', async () => {
+      for (const upstream of proxies) upstream.abort();
+    });
+
+    app.post<{ Body: PlayRequest }>('/play', { schema: { body: playSchema } }, async (req) => {
+      const source = await resolveSourceUrl(deps, req.body);
+      return sessions.start({
+        ...source,
+        userAgent: deps.userAgent,
+        startAtSec: req.body.startAtSec ?? 0,
+        clientId: req.body.clientId,
+        quality: 'original',
+      });
+    });
+
+    app.post<{ Params: SessionParams }>('/sessions/:id/:clientId/heartbeat', async (req, reply) => {
+      if (!sessions.touch(req.params.id, req.params.clientId)) return notFound(reply);
+      return reply.code(204).send();
+    });
+
+    app.delete<{ Params: SessionParams }>('/sessions/:id/:clientId', async (req, reply) => {
+      await sessions.release(req.params.id, req.params.clientId);
+      return reply.code(204).send();
+    });
+
+    // Registered before the file route it would otherwise look like. HEAD is explicit: Fastify's automatic
+    // HEAD route would read (and discard) the whole movie from the provider.
+    app.route<{ Params: SessionParams }>({
+      method: ['GET', 'HEAD'],
+      url: '/sessions/:id/:clientId/direct',
+      handler: async (req, reply) => {
+        const { id, clientId } = req.params;
+        if (!sessions.touch(id, clientId)) return notFound(reply);
+        const source = sessions.directSource(id);
+        if (!source) return notFound(reply);
+        return proxyDirect(req, reply, source, () => sessions.touch(id, clientId));
+      },
+    });
+
+    app.get<{ Params: SessionParams & { file: string } }>('/sessions/:id/:clientId/:file', async (req, reply) => {
+      const { id, clientId, file } = req.params;
+      const match = SESSION_FILE.exec(file);
+      const ext = match?.[1] ?? match?.[2];
+      if (!ext || !sessions.touch(id, clientId)) return notFound(reply);
+      const path = sessions.resolveFile(id, file);
+      if (!path) return notFound(reply);
+
+      if (ext === 'm3u8') {
+        // Small, and rewritten by FFmpeg every segment: read it whole rather than stream a moving file.
+        let playlist: Buffer;
+        try {
+          playlist = await readFile(path);
+        } catch {
+          return notFound(reply);
+        }
+        return reply.type(FILE_TYPES[ext]!).header('cache-control', 'no-cache').send(playlist);
+      }
+      let handle: FileHandle;
+      let size: number;
+      try {
+        handle = await open(path, 'r');
+      } catch {
+        return notFound(reply); // not written yet, or already deleted from the live window
+      }
+      try {
+        size = (await handle.stat()).size;
+      } catch {
+        await handle.close();
+        return notFound(reply);
+      }
+      return reply.type(FILE_TYPES[ext]!).header('content-length', size).send(handle.createReadStream());
+    });
+
+    /** Streams the provider's file to the viewer, passing Range through, for as long as the session lives. */
+    async function proxyDirect(
+      req: FastifyRequest,
+      reply: FastifyReply,
+      source: { url: string; userAgent: string },
+      stillWatching: () => boolean,
+    ): Promise<FastifyReply> {
+      const head = req.method === 'HEAD';
+      const upstream = new AbortController();
+      proxies.add(upstream);
+      // Re-checked while streaming: a session that was released or reaped stops being read from the provider.
+      const recheck = setInterval(() => {
+        if (!stillWatching()) upstream.abort();
+      }, touchIntervalMs);
+      recheck.unref();
+      const finish = () => {
+        clearInterval(recheck);
+        proxies.delete(upstream);
+        upstream.abort();
+      };
+      // Fires when the response has been sent, or when the viewer has gone away mid-stream.
+      reply.raw.once('close', finish);
+
+      const headers: Record<string, string> = { 'user-agent': source.userAgent, 'accept-encoding': 'identity' };
+      if (req.headers.range) headers.range = req.headers.range;
+      const headersTimer = setTimeout(() => upstream.abort(), UPSTREAM_HEADERS_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(source.url, { method: head ? 'HEAD' : 'GET', headers, signal: upstream.signal });
+      } catch (err) {
+        finish();
+        req.log.warn({ url: redactUrl(source.url), err: redactUrl(String(err)) }, 'direct stream: provider unreachable');
+        return reply.code(502).send({ code: 'UPSTREAM_ERROR', message: 'The provider did not answer' } satisfies ApiError);
+      } finally {
+        clearTimeout(headersTimer);
+      }
+
+      if (res.status !== 200 && res.status !== 206 && res.status !== 416) {
+        finish();
+        req.log.warn({ url: redactUrl(source.url), status: res.status }, 'direct stream: provider refused');
+        const body: ApiError = { code: 'UPSTREAM_ERROR', message: `The provider answered ${res.status}` };
+        return reply.code(502).send(body);
+      }
+      reply.code(res.status);
+      for (const name of MIRRORED_HEADERS) {
+        const value = res.headers.get(name);
+        if (value !== null) reply.header(name, value);
+      }
+      if (head || res.status === 416 || !res.body) {
+        finish();
+        return reply.send();
+      }
+      return reply.send(Readable.fromWeb(res.body as WebReadableStream<Uint8Array>));
+    }
+  };

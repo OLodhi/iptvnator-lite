@@ -139,10 +139,12 @@ test('runner reports running then idle with the result', async () => {
 test('sync routes start a sync and report status', async () => {
   const { buildApp } = await import('../app.ts');
   const { testConfig } = await import('../testing/config.ts');
+  const { stubSessions } = await import('../testing/sessions.ts');
   const sync = createSyncRunner({ db, providers });
   const catalogue = createCatalogueRepo(db);
   const seriesInfo = createSeriesInfoCache({ providers, catalogue });
-  const app = await buildApp({ config: testConfig(), db, providers, sync, catalogue, seriesInfo });
+  const sessions = stubSessions();
+  const app = await buildApp({ config: testConfig(), db, providers, sync, catalogue, seriesInfo, sessions });
   const post = await app.inject({ method: 'POST', url: `/api/providers/${providerId}/sync` });
   expect(post.statusCode).toBe(202);
   expect(post.json()).toEqual({ started: true });

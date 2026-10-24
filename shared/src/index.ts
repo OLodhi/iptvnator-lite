@@ -37,7 +37,11 @@ export type CatalogItem = {
 export type Page<T> = { items: T[]; nextCursor: string | null };
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
-/** `url` is server-relative: `/api/sessions/<id>/index.m3u8` (HLS) or `/api/sessions/<id>/direct`. */
+export type PlayRequest = { itemId: number; episodeRemoteId?: string; startAtSec?: number; clientId: string };
+/**
+ * `url` is server-relative and names the viewer: `/api/sessions/<sessionId>/<clientId>/index.m3u8` (HLS)
+ * or `/api/sessions/<sessionId>/<clientId>/direct`.
+ */
 export type PlayResponse = {
   sessionId: string;
   mode: 'hls' | 'direct';
