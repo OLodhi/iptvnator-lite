@@ -5,6 +5,7 @@ import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { syncCatalogue } from '../catalogue/sync.ts';
+import { backoffMs, guideJob } from '../catalogue/scheduler.ts';
 import { createSyncRunner } from '../catalogue/syncRunner.ts';
 import { createCurationService } from '../curation/service.ts';
 import { openDb } from '../db/db.ts';
@@ -137,14 +138,48 @@ test('onSynced relinks and starts the first guide refresh', async () => {
   }
   expect(r.status(providerId)).toMatchObject({ state: 'idle', source: 'xmltv', linkedChannels: 2 });
 
-  // With a guide already stored, a later sync only relinks.
+  // With a guide already stored, a later sync only relinks: no new refresh, links rebuilt.
   const before = store.state(providerId)?.attemptedAt;
+  const calls = xmltvCalls;
+  db.prepare('DELETE FROM guide_links WHERE provider_id = ?').run(providerId);
+  expect(r.status(providerId).linkedChannels).toBe(0);
   const again = createSyncRunner({ db, providers, onSynced: afterSync(r, store), log });
   again.start(providerId);
   for (let i = 0; i < 400 && again.status(providerId).state === 'running'; i++) await new Promise((res) => setTimeout(res, 25));
   expect(again.status(providerId).state).toBe('idle');
   expect(r.running(providerId)).toBe(false);
+  expect(r.status(providerId).linkedChannels).toBe(2);
   expect(store.state(providerId)?.attemptedAt).toBe(before);
+  expect(xmltvCalls).toBe(calls);
+});
+
+test('a failure before the refresh starts is recorded and anchors the backoff', async () => {
+  let attempts = 0;
+  const broken = {
+    ...providers,
+    clientFor: () => {
+      attempts++;
+      throw new Error('no client http://h/x?username=alice&password=hunter2');
+    },
+  } as unknown as ProviderService;
+  const r = makeRunner({ providers: broken });
+  providers.markSynced(providerId, NOW_MS - 1000);
+  const job = guideJob({ providers, guide: r, store });
+  expect(job.due(providerId, NOW_MS)).toBe(true);
+
+  r.start(providerId);
+  await settled(r);
+  expect(store.state(providerId)).toMatchObject({ failures: 1, attemptedAt: NOW_MS / 1000, fetchedAt: null });
+  expect(job.due(providerId, NOW_MS + backoffMs(1) - 1)).toBe(false);
+  expect(job.due(providerId, NOW_MS + backoffMs(1))).toBe(true);
+
+  r.start(providerId);
+  await settled(r);
+  expect(attempts).toBe(2);
+  expect(store.state(providerId)).toMatchObject({ failures: 2, attemptedAt: NOW_MS / 1000 });
+  expect(job.due(providerId, NOW_MS + backoffMs(2) - 1)).toBe(false);
+  expect(job.due(providerId, NOW_MS + backoffMs(2))).toBe(true);
+  expect(JSON.stringify([r.status(providerId), lines])).not.toMatch(/hunter2|alice/);
 });
 
 test('stop aborts a running refresh', async () => {
@@ -156,6 +191,8 @@ test('stop aborts a running refresh', async () => {
   await r.stop();
   expect(r.running(providerId)).toBe(false);
   // An abort is not a failure.
+  expect(lines.map((l) => l.msg)).toContain('guide refresh aborted');
+  expect(lines.map((l) => l.msg)).not.toContain('guide refresh failed');
   expect(store.state(providerId)?.failures ?? 0).toBe(0);
   expect(r.status(providerId).state).toBe('idle');
   r.start(providerId);

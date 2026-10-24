@@ -88,8 +88,8 @@ describe('guide store', () => {
   });
 
   test('recordFailure counts and commit resets', () => {
-    store.recordFailure(P, 'boom');
-    store.recordFailure(P, 'bang');
+    store.recordFailure(P, 'boom', 100);
+    store.recordFailure(P, 'bang', 100);
     expect(store.state(P)).toMatchObject({ generation: 0, failures: 2, lastError: 'bang' });
     commit(store.beginGeneration(P, 1));
     expect(store.state(P)).toMatchObject({ generation: 1, failures: 0, lastError: null });
@@ -143,7 +143,7 @@ describe('guide store', () => {
     const g = store.beginGeneration(P, 1);
     store.insertProgrammes(P, g, [prog('a', 0)]);
     commit(g);
-    store.recordFailure(P, 'boom');
+    store.recordFailure(P, 'boom', 100);
     expect(store.state(P)).toMatchObject({ generation: g, fetchedAt: 500, source: 'xmltv', failures: 1 });
     expect(count('programmes', g)).toBe(1);
   });

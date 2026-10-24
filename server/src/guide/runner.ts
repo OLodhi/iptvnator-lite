@@ -44,18 +44,12 @@ export function createGuideRunner(deps: {
 
   async function run(providerId: number, signal: AbortSignal): Promise<void> {
     const startedAt = now();
+    const failuresBefore = deps.store.state(providerId)?.failures ?? 0;
     try {
-      let client;
-      try {
-        client = deps.providers.clientFor(providerId);
-      } catch (err) {
-        deps.store.recordFailure(providerId, errorText(err));
-        throw err;
-      }
-      const result = await refreshGuide({
+      await refreshGuide({
         db: deps.db,
         store: deps.store,
-        client,
+        client: deps.providers.clientFor(providerId),
         providerId,
         timezone: deps.providers.account(providerId)?.timezone ?? null,
         visibleLiveItemIds: () => deps.visibleLiveItemIds(providerId),
@@ -63,14 +57,19 @@ export function createGuideRunner(deps: {
         log,
         signal,
       });
-      log.info({ providerId, ...result, durationMs: now() - startedAt }, 'guide refreshed');
     } catch (err) {
       if (signal.aborted) {
         log.info({ providerId }, 'guide refresh aborted');
         return;
       }
-      // refreshGuide records the failure itself and rethrows the original error, which may name a URL.
-      log.warn({ providerId, err: errorText(err), durationMs: now() - startedAt }, 'guide refresh failed');
+      const error = errorText(err);
+      // refreshGuide records its own failures; one thrown before that (no client, no generation) is recorded here,
+      // which also anchors the scheduler's backoff.
+      if ((deps.store.state(providerId)?.failures ?? 0) === failuresBefore) {
+        deps.store.recordFailure(providerId, error, Math.floor(now() / 1000));
+      }
+      // refreshGuide rethrows the original error, which may name a URL.
+      log.warn({ providerId, err: error, durationMs: now() - startedAt }, 'guide refresh failed');
     }
   }
 
@@ -113,7 +112,10 @@ export function createGuideRunner(deps: {
 /** What a catalogue sync calls when it finishes: re-match from the stored guide, and fetch one if there is none. */
 export function afterSync(guide: GuideRunner, store: GuideStore): (providerId: number) => void {
   return (providerId) => {
-    guide.relink(providerId);
-    if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
+    try {
+      guide.relink(providerId);
+    } finally {
+      if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
+    }
   };
 }

@@ -24,5 +24,7 @@ test('lists visible live items by category then item position, once each', () =>
   link.run(10, 2, 1);
   const curation = createCurationService({ db, now: Date.now });
   expect(visibleLiveItemIds(db, curation, 1, DEFAULT_USER_ID)).toEqual([3, 1, 2]);
+  curation.hideCategory(11, null);
+  expect(visibleLiveItemIds(db, curation, 1, DEFAULT_USER_ID)).toEqual([1, 2]);
   expect(visibleLiveItemIds(db, curation, 99, DEFAULT_USER_ID)).toEqual([]);
 });

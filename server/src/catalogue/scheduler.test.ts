@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SyncStatus } from '@tv/shared';
 import type { ProviderService } from '../providers/service.ts';
-import { backoffMs, catalogueJob, createRefreshScheduler } from './scheduler.ts';
+import { backoffMs, catalogueJob, createRefreshScheduler, guideJob } from './scheduler.ts';
 import type { RefreshJob } from './scheduler.ts';
+import type { GuideRunner } from '../guide/runner.ts';
+import type { GuideStateRow, GuideStore } from '../guide/store.ts';
 import type { SyncRunner } from './syncRunner.ts';
 
 const HOUR = 3_600_000;
@@ -130,4 +132,47 @@ describe('refresh scheduler', () => {
     expect(started).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+describe('guide job', () => {
+  const state = (over: Partial<GuideStateRow>): GuideStateRow => ({
+    generation: 1, fetchedAt: null, attemptedAt: null, source: null, failures: 0, lastError: null, ...over,
+  });
+  function guide(lastSyncedAt: number | null, row: GuideStateRow | null) {
+    const providers = { list: () => [{ id: 7, lastSyncedAt }], get: () => ({ id: 7, lastSyncedAt }) } as unknown as ProviderService;
+    const store = { state: () => row } as unknown as GuideStore;
+    const runner = { running: () => false, start() {} } as unknown as GuideRunner;
+    return guideJob({ providers, guide: runner, store });
+  }
+  const sec = (ms: number) => Math.floor(ms / 1000);
+
+  it('waits for the first catalogue sync', () => {
+    expect(guide(null, null).due(7, NOW)).toBe(false);
+  });
+  it('is due once synced with no guide state', () => {
+    expect(guide(NOW - HOUR, null).due(7, NOW)).toBe(true);
+    expect(guide(NOW - HOUR, state({ fetchedAt: null })).due(7, NOW)).toBe(true);
+  });
+  it('is not due for a guide under 24 h old, and due after (the store keeps seconds)', () => {
+    expect(guide(NOW - HOUR, state({ fetchedAt: sec(NOW - 23 * HOUR) })).due(7, NOW)).toBe(false);
+    expect(guide(NOW - HOUR, state({ fetchedAt: sec(NOW - 25 * HOUR) })).due(7, NOW)).toBe(true);
+  });
+  it('after failures waits for the backoff from the last attempt, even when the data is fresh', () => {
+    const row = state({ fetchedAt: sec(NOW - HOUR), failures: 2, attemptedAt: sec(NOW) });
+    const job = guide(NOW - 48 * HOUR, row);
+    expect(job.due(7, NOW + 2 * HOUR - 1000)).toBe(false);
+    expect(job.due(7, NOW + 2 * HOUR)).toBe(true);
+  });
+});
+
+it('redacts credentials in a provider check failure', () => {
+  const warnings: string[] = [];
+  const bad = job({
+    due: () => {
+      throw new Error('GET http://h/get.php?username=alice&password=hunter2 failed');
+    },
+  });
+  createRefreshScheduler({ jobs: [bad], now: () => NOW, log: { info() {}, warn: (o) => void warnings.push(JSON.stringify(o)) } }).tick();
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).not.toMatch(/hunter2|alice/);
 });

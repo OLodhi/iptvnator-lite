@@ -85,7 +85,7 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
     signal?.throwIfAborted();
     if (isAuthFailure(xmltvError)) {
       // The fallback would send the same credentials.
-      store.recordFailure(providerId, errorText(xmltvError));
+      store.recordFailure(providerId, errorText(xmltvError), nowSec);
       throw xmltvError;
     }
     log.warn({ providerId, error: errorText(xmltvError) }, 'XMLTV guide failed; trying the provider EPG');
@@ -96,7 +96,7 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
     } catch (fallbackError) {
       await store.abandonGeneration(providerId, generation);
       signal?.throwIfAborted();
-      store.recordFailure(providerId, `XMLTV: ${errorText(xmltvError)}; provider EPG: ${errorText(fallbackError)}`);
+      store.recordFailure(providerId, `XMLTV: ${errorText(xmltvError)}; provider EPG: ${errorText(fallbackError)}`, nowSec);
       throw fallbackError;
     }
   }
@@ -111,7 +111,7 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
   } catch (e) {
     // Rolled back, so the generation is still above the current one and abandoning it proceeds.
     await store.abandonGeneration(providerId, generation);
-    store.recordFailure(providerId, errorText(e));
+    store.recordFailure(providerId, errorText(e), nowSec);
     throw e;
   }
   try {

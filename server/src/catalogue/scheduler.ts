@@ -99,7 +99,7 @@ export function guideJob(deps: { providers: ProviderService; guide: GuideRunner;
     due(id, now) {
       if (deps.providers.get(id)?.lastSyncedAt == null) return false;
       const state = deps.store.state(id);
-      // The store keeps seconds.
+      // The store keeps seconds. A failure overrides staleness: a failed refresh retries on backoff even if the data is fresh.
       if (state && state.failures > 0 && state.attemptedAt !== null) {
         return now - state.attemptedAt * 1000 >= backoffMs(state.failures);
       }

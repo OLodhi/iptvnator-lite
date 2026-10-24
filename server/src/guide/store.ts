@@ -40,7 +40,8 @@ export interface GuideStore {
   insertProgrammes(providerId: number, generation: number, rows: ProgrammeRow[]): number;
   /** Throws unless `generation` is newer than the current one, so a stale caller cannot roll the guide back. */
   commitGeneration(providerId: number, generation: number, meta: { fetchedAt: number; source: 'xmltv' | 'provider' }): void;
-  recordFailure(providerId: number, error: string): void;
+  /** Counts a failed refresh and stamps the attempt (`now`, seconds), so the scheduler's backoff has an anchor. */
+  recordFailure(providerId: number, error: string, now: number): void;
   abandonGeneration(providerId: number, generation: number): Promise<void>;
   /** Removes every generation older than the current one; returns the rows removed. */
   pruneGenerations(providerId: number): Promise<number>;
@@ -86,8 +87,9 @@ export function createGuideStore(db: Db): GuideStore {
          source = excluded.source, failures = 0, last_error = NULL`,
   );
   const fail = db.prepare(
-    `INSERT INTO guide_state (provider_id, failures, last_error) VALUES (?, 1, ?)
-       ON CONFLICT (provider_id) DO UPDATE SET failures = failures + 1, last_error = excluded.last_error`,
+    `INSERT INTO guide_state (provider_id, failures, last_error, attempted_at) VALUES (?, 1, ?, ?)
+       ON CONFLICT (provider_id) DO UPDATE SET failures = failures + 1, last_error = excluded.last_error,
+         attempted_at = excluded.attempted_at`,
   );
 
   const currentGeneration = (providerId: number): number =>
@@ -146,8 +148,8 @@ export function createGuideStore(db: Db): GuideStore {
       }
       commit.run(providerId, generation, meta.fetchedAt, meta.source);
     },
-    recordFailure(providerId, error) {
-      fail.run(providerId, error);
+    recordFailure(providerId, error, now) {
+      fail.run(providerId, error, now);
     },
     async abandonGeneration(providerId, generation) {
       const proceed = () => generation > currentGeneration(providerId);
