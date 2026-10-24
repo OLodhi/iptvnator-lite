@@ -20,7 +20,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   return {
     port: Number(env.TV_PORT ?? 8686),
     host: env.TV_HOST ?? '0.0.0.0',
-    dataDir: env.TV_DATA_DIR ?? './data',
+    // Against the repo root, not the cwd: `npm start` (in server/) and `node server/src/main.ts` share one database.
+    dataDir: env.TV_DATA_DIR ?? path.join(repoRoot, 'data'),
     transcodeDir: env.TV_TRANSCODE_DIR ?? path.join(os.tmpdir(), 'tv-sessions'),
     ffmpegPath: env.TV_FFMPEG_PATH ?? 'ffmpeg',
     ffprobePath: env.TV_FFPROBE_PATH ?? 'ffprobe',
