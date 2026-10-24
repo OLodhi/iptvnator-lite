@@ -15,15 +15,21 @@ export type XmltvHandlers = {
 
 const TIME_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?\s*(?:([+-])(\d{2}):?(\d{2}))?$/;
 
-/** XMLTV time to epoch seconds. A missing offset means UTC. */
+/** XMLTV time to epoch seconds. A missing offset means UTC. Out-of-range fields give null. */
 export function parseXmltvTime(s: string): number | null {
   const m = TIME_RE.exec(s.trim());
   if (!m) return null;
   const [, y, mo, d, h, mi, sec, sign, oh, om] = m;
-  const ms = Date.UTC(+y!, +mo! - 1, +d!, +h!, +mi!, +(sec ?? 0));
-  if (Number.isNaN(ms)) return null;
-  const offset = sign ? (sign === '-' ? -1 : 1) * (+oh! * 3600 + +om! * 60) : 0;
-  return ms / 1000 - offset;
+  const month = +mo!, day = +d!, hour = +h!, minute = +mi!, second = +(sec ?? 0);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+  let offset = 0;
+  if (sign) {
+    if (+om! > 59) return null;
+    const abs = +oh! * 3600 + +om! * 60;
+    if (abs > 14 * 3600) return null;
+    offset = sign === '-' ? -abs : abs;
+  }
+  return Date.UTC(+y!, month - 1, day, hour, minute, second) / 1000 - offset;
 }
 
 /** Passes the source through, gunzipping it when it starts with the gzip magic bytes. No byte is lost. */
@@ -50,54 +56,75 @@ export function maybeGunzip(source: Readable): Readable {
       yield* replay();
     }
   }
-  return Readable.from(sniff(), { objectMode: false });
+  const out = Readable.from(sniff(), { objectMode: false });
+  // Whoever destroys or finishes the wrapper releases the underlying (provider) stream too.
+  // Readable.from's own teardown waits on the pending read, which can be the stalled provider, so hook _destroy first.
+  const teardown = out._destroy.bind(out);
+  out._destroy = (err, cb) => { source.destroy(); teardown(err, cb); };
+  return out;
 }
 
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 
+type Field = 'title' | 'subtitle' | 'description' | 'category' | 'name';
+const FIELD_OF: Record<string, Field> = { title: 'title', 'sub-title': 'subtitle', desc: 'description', category: 'category' };
+
+/**
+ * Streams XMLTV from `source`. Handlers run strictly one at a time, in document order; the source is paused
+ * while they run. Resolves only once every handler has settled.
+ */
 export function parseXmltv(source: Readable, handlers: XmltvHandlers): Promise<{ channels: number; programmes: number; skipped: number }> {
   return new Promise((resolve, reject) => {
     const parser = new SaxesParser();
     const decoder = new StringDecoder('utf8');
     const counts = { channels: 0, programmes: 0, skipped: 0 };
     let settled = false;
-    let pending: Promise<void>[] = [];
+    let ended = false;
+    const queue: Array<() => void | Promise<void>> = [];
+    let tail: Promise<void> = Promise.resolve();
 
     // Per-element state; only one channel or programme is open at a time.
-    let channel: { id: string; names: string[] } | null = null;
+    let channel: XmltvChannel | null = null;
     let prog: { channel: string; start: string; stop: string; title: string | null; subtitle: string | null; description: string | null; category: string | null } | null = null;
-    let field: 'title' | 'subtitle' | 'description' | 'category' | 'name' | null = null;
+    let depth = 0;
+    let ownerDepth = 0;
+    let field: Field | null = null;
     let text = '';
 
     const fail = (err: unknown) => {
       if (settled) return;
       settled = true;
+      queue.length = 0;
       source.destroy();
       reject(err instanceof Error ? err : new Error(String(err)));
     };
-    const hand = (r: void | Promise<void>) => { if (r) pending.push(r); };
 
     parser.on('error', fail);
     parser.on('opentag', (tag) => {
+      depth++;
       const a = tag.attributes as Record<string, string>;
-      if (tag.name === 'channel') channel = { id: (a.id ?? '').trim(), names: [] };
-      else if (tag.name === 'programme') {
+      if (tag.name === 'channel') {
+        channel = { id: (a.id ?? '').trim(), names: [] };
+        ownerDepth = depth;
+      } else if (tag.name === 'programme') {
         prog = { channel: (a.channel ?? '').trim(), start: a.start ?? '', stop: a.stop ?? '', title: null, subtitle: null, description: null, category: null };
-      } else if (channel && tag.name === 'display-name') field = 'name';
-      else if (prog) {
-        field = tag.name === 'title' ? 'title' : tag.name === 'sub-title' ? 'subtitle' : tag.name === 'desc' ? 'description' : tag.name === 'category' ? 'category' : null;
+        ownerDepth = depth;
+      } else if (depth === ownerDepth + 1) {
+        if (channel && tag.name === 'display-name') field = 'name';
+        else if (prog) field = FIELD_OF[tag.name] ?? null;
+        text = '';
       }
-      text = '';
     });
     const onText = (t: string) => { if (field) text += t; };
     parser.on('text', onText);
     parser.on('cdata', onText);
     parser.on('closetag', (tag) => {
+      const closing = depth--;
       if (settled) return; // saxes keeps emitting after an error; nothing past it is trustworthy
       if (tag.name === 'channel') {
         const c = channel;
         channel = null;
-        if (c && c.id) { counts.channels++; hand(handlers.channel(c)); }
+        if (c && c.id) { counts.channels++; queue.push(() => handlers.channel(c)); }
       } else if (tag.name === 'programme') {
         const p = prog;
         prog = null;
@@ -105,35 +132,45 @@ export function parseXmltv(source: Readable, handlers: XmltvHandlers): Promise<{
         const stop = p && p.stop ? parseXmltvTime(p.stop) : null;
         if (!p || !p.channel || start === null || stop === null || stop <= start || !p.title) { counts.skipped++; return; }
         counts.programmes++;
-        hand(handlers.programme({ channel: p.channel, start, stop, title: p.title, subtitle: p.subtitle || null, description: p.description || null, category: p.category || null }));
-      } else if (field) {
+        const item: XmltvProgramme = { channel: p.channel, start, stop, title: p.title, subtitle: p.subtitle, description: p.description, category: p.category };
+        queue.push(() => handlers.programme(item));
+      } else if (field && closing === ownerDepth + 1) {
         const v = clean(text);
-        if (field === 'name') { if (v && channel) channel.names.push(v); }
-        else if (prog && prog[field] === null) prog[field] = v;
+        if (v) {
+          if (field === 'name') channel?.names.push(v);
+          else if (prog && prog[field] === null) prog[field] = v;
+        }
         field = null;
       }
     });
 
+    // Runs the queued handlers one at a time. A rejection or throw fails the parse.
+    const drain = async () => {
+      while (queue.length && !settled) {
+        const r = queue.shift()!();
+        if (r) await r;
+      }
+    };
     const feed = (chunk: string) => {
       try { parser.write(chunk); } catch (e) { fail(e); }
     };
 
     source.on('error', fail);
+    source.on('close', () => { if (!ended) fail(new Error('XMLTV source closed before the end')); });
     source.on('data', (chunk: Buffer | string) => {
       if (settled) return;
       feed(typeof chunk === 'string' ? chunk : decoder.write(chunk));
-      if (settled || pending.length === 0) return;
-      const batch = pending;
-      pending = [];
+      if (settled || queue.length === 0) return;
       source.pause();
-      Promise.all(batch).then(() => { if (!settled) source.resume(); }, fail);
+      tail = tail.then(drain).then(() => { if (!settled) source.resume(); }).catch(fail);
     });
     source.on('end', () => {
-      if (settled) return;
-      try { parser.write(decoder.end()); parser.close(); } catch (e) { fail(e); return; }
-      const rest = pending;
-      pending = [];
-      Promise.all(rest).then(() => { if (!settled) { settled = true; resolve(counts); } }, fail);
+      ended = true;
+      tail = tail.then(() => {
+        if (settled) return;
+        try { parser.write(decoder.end()); parser.close(); } catch (e) { fail(e); return; }
+        return drain();
+      }).then(() => { if (!settled) { settled = true; resolve(counts); } }).catch(fail);
     });
   });
 }
