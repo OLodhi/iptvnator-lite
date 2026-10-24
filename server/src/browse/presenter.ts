@@ -29,7 +29,8 @@ export function createPresenter(deps: {
       providerId: i.providerId,
       kind: i.kind,
       name: i.name,
-      logoUrl: i.logoUrl,
+      // Never the provider's own URL: the server fetches and caches the image.
+      logoUrl: i.logoUrl ? `/api/logos/${i.id}` : null,
       catchupDays: i.catchupDays,
       year: i.year,
       rating: i.rating,

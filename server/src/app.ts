@@ -19,6 +19,8 @@ import { searchRoutes } from './routes/search.ts';
 import { catalogueRoutes } from './routes/catalogue.ts';
 import { curationRoutes } from './routes/curation.ts';
 import type { PersonalService } from './personal/service.ts';
+import { createLogoCache, type LogoCache } from './logos/cache.ts';
+import { logoRoutes } from './routes/logos.ts';
 import { meRoutes } from './routes/me.ts';
 import { playbackRoutes } from './routes/playback.ts';
 import { providerRoutes } from './routes/providers.ts';
@@ -36,6 +38,8 @@ export type AppDeps = {
   sessions: SessionManager;
   curation: CurationService;
   personal: PersonalService;
+  /** Proxied logos and posters; a cache over `config.logoDir` if left out. */
+  logos?: LogoCache;
   /** The server's own log (provider failures, sessions); silent if left out. */
   log?: Log;
   /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
@@ -46,6 +50,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
   const presenter = createPresenter(deps);
   const search = createSearch(deps.db);
+  const logos =
+    deps.logos ?? createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
   const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
 
   await app.register(
@@ -60,6 +66,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       await api.register(
         meRoutes({ personal: deps.personal, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo }),
       );
+      await api.register(logoRoutes({ catalogue: deps.catalogue, logos }));
       await api.register(browseRoutes({ presenter, providers: deps.providers }));
       await api.register(
         searchRoutes({

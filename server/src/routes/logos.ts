@@ -1,0 +1,30 @@
+import fs from 'node:fs';
+import type { FastifyPluginAsync } from 'fastify';
+import type { ApiError } from '@tv/shared';
+import type { CatalogueRepo } from '../catalogue/repo.ts';
+import type { LogoCache } from '../logos/cache.ts';
+
+export const LOGO_MAX_AGE_SECONDS = 604800;
+
+export const logoRoutes = (deps: { catalogue: CatalogueRepo; logos: LogoCache }): FastifyPluginAsync =>
+  async (app) => {
+    app.get<{ Params: { itemId: number } }>(
+      '/logos/:itemId',
+      { schema: { params: { type: 'object', properties: { itemId: { type: 'integer', minimum: 1 } } } } },
+      async (req, reply) => {
+        const notFound = () =>
+          reply.code(404).send({ code: 'NOT_FOUND', message: 'No logo for this item' } satisfies ApiError);
+        const url = deps.catalogue.getItem(req.params.itemId)?.logoUrl;
+        if (!url) return notFound();
+        const image = await deps.logos.get(url);
+        if (!image) return notFound();
+        return reply
+          .header('cache-control', `public, max-age=${LOGO_MAX_AGE_SECONDS}`)
+          // Provider-supplied SVG must never run script from our origin.
+          .header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+          .header('x-content-type-options', 'nosniff')
+          .type(image.contentType)
+          .send(fs.createReadStream(image.path));
+      },
+    );
+  };

@@ -10,6 +10,7 @@ import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { createPersonalService } from './personal/service.ts';
 import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
+import { createLogoCache } from './logos/cache.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
 import { createSessionManager, defaultIsReady } from './playback/sessions.ts';
 import { spawnFfmpeg } from './playback/spawn.ts';
@@ -51,8 +52,9 @@ const sessions = createSessionManager({
 });
 const curation = createCurationService({ db, now: Date.now });
 const personal = createPersonalService({ db, now: Date.now });
+const logos = createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
 const app = await buildApp({
-  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, log, httpLogLevel: 'warn',
+  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, logos, log, httpLogLevel: 'warn',
 });
 
 const scheduler = createRefreshScheduler({ providers, sync, now: Date.now });
