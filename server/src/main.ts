@@ -7,6 +7,7 @@ import type { SyncRunner } from './catalogue/syncRunner.ts';
 import { createRefreshScheduler } from './catalogue/scheduler.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
+import { createPersonalService } from './personal/service.ts';
 import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
@@ -49,8 +50,9 @@ const sessions = createSessionManager({
   log,
 });
 const curation = createCurationService({ db, now: Date.now });
+const personal = createPersonalService({ db, now: Date.now });
 const app = await buildApp({
-  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, log, httpLogLevel: 'warn',
+  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, log, httpLogLevel: 'warn',
 });
 
 const scheduler = createRefreshScheduler({ providers, sync, now: Date.now });

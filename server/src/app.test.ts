@@ -6,6 +6,7 @@ import { buildApp } from './app.ts';
 import { createSyncRunner } from './catalogue/syncRunner.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
+import { createPersonalService } from './personal/service.ts';
 import { createCurationService } from './curation/service.ts';
 import { openDb } from './db/db.ts';
 import { createProviderService } from './providers/service.ts';
@@ -23,6 +24,7 @@ async function appFor(webDir: string) {
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions(),
     curation: createCurationService({ db, now: Date.now }),
+    personal: createPersonalService({ db, now: Date.now }),
   });
 }
 

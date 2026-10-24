@@ -10,6 +10,7 @@ import { createCatalogueRepo } from '../catalogue/repo.ts';
 import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { syncCatalogue } from '../catalogue/sync.ts';
 import { createSyncRunner } from '../catalogue/syncRunner.ts';
+import { createPersonalService } from '../personal/service.ts';
 import { createCurationService } from '../curation/service.ts';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
@@ -52,6 +53,7 @@ beforeAll(async () => {
     seriesInfo: createSeriesInfoCache({ providers, catalogue }),
     sessions: stubSessions(),
     curation: createCurationService({ db, now: Date.now }),
+    personal: createPersonalService({ db, now: Date.now }),
   });
   providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId, kinds: ['live'] });

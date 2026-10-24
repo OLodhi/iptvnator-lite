@@ -14,6 +14,8 @@ import type { SessionManager } from './playback/sessions.ts';
 import type { CurationService } from './curation/service.ts';
 import { catalogueRoutes } from './routes/catalogue.ts';
 import { curationRoutes } from './routes/curation.ts';
+import type { PersonalService } from './personal/service.ts';
+import { meRoutes } from './routes/me.ts';
 import { playbackRoutes } from './routes/playback.ts';
 import { providerRoutes } from './routes/providers.ts';
 import { syncRoutes } from './routes/sync.ts';
@@ -29,6 +31,7 @@ export type AppDeps = {
   seriesInfo: SeriesInfoCache;
   sessions: SessionManager;
   curation: CurationService;
+  personal: PersonalService;
   /** The server's own log (provider failures, sessions); silent if left out. */
   log?: Log;
   /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
@@ -49,11 +52,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
       await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
       await api.register(
+        meRoutes({ personal: deps.personal, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo }),
+      );
+      await api.register(
         playbackRoutes({
           catalogue: deps.catalogue,
           seriesInfo: deps.seriesInfo,
           providers: deps.providers,
           sessions: deps.sessions,
+          personal: deps.personal,
           log: deps.log ?? silentLog,
           userAgent: config.defaultUserAgent,
         }),

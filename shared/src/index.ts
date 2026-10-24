@@ -69,3 +69,11 @@ export type PlayResponse = {
   durationSec: number | null;
   startAtSec: number;
 };
+export type PositionReport = { itemId: number; episodeRemoteId?: string; positionSec: number; durationSec: number | null };
+export type SavedPosition = {
+  episodeRemoteId: string | null;
+  positionSec: number;
+  durationSec: number | null;
+  finished: boolean;
+  updatedAt: number;
+};

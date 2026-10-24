@@ -21,6 +21,7 @@ import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import type { SeriesInfoCache } from '../catalogue/seriesInfo.ts';
 import { syncCatalogue } from '../catalogue/sync.ts';
 import { createSyncRunner } from '../catalogue/syncRunner.ts';
+import { createPersonalService } from '../personal/service.ts';
 import { createCurationService } from '../curation/service.ts';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
@@ -85,7 +86,7 @@ async function makeWorld(
   const sessions = makeSessions(db, providers);
   const sync = createSyncRunner({ db, providers });
   const curation = createCurationService({ db, now: Date.now });
-  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, curation, log: opts.log });
+  const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, curation, personal: createPersonalService({ db, now: Date.now }), log: opts.log });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const origin = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
@@ -793,9 +794,9 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   test('the direct proxy lets go of the provider when the viewer leaves, the session ends or the server stops', async () => {
     // A real socket (inject buffers whole bodies) and a fast session re-check instead of every 10 s.
     const proxy = Fastify();
-    const { catalogue, seriesInfo, providers, sessions } = w;
+    const { catalogue, seriesInfo, providers, sessions, db } = w;
     await proxy.register(
-      playbackRoutes({ catalogue, seriesInfo, providers, sessions, log, userAgent: UA, touchIntervalMs: 100 }),
+      playbackRoutes({ catalogue, seriesInfo, providers, sessions, personal: createPersonalService({ db, now: Date.now }), log, userAgent: UA, touchIntervalMs: 100 }),
       { prefix: '/api' },
     );
     await proxy.listen({ port: 0, host: '127.0.0.1' });

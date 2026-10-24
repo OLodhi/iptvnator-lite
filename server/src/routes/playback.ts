@@ -10,6 +10,8 @@ import { CLIENT_ID, PlaybackError } from '../playback/sessions.ts';
 import type { SessionManager } from '../playback/sessions.ts';
 import { resolveSourceUrl, SourceError } from '../playback/sourceUrl.ts';
 import { ProviderError } from '../providers/errors.ts';
+import type { PersonalService } from '../personal/service.ts';
+import { currentUserId } from '../users.ts';
 import type { ProviderService } from '../providers/service.ts';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
@@ -19,6 +21,7 @@ export type PlaybackRouteDeps = {
   seriesInfo: SeriesInfoCache;
   providers: ProviderService;
   sessions: SessionManager;
+  personal: PersonalService;
   log: Log;
   /** Sent to the provider for every stream. */
   userAgent: string;
@@ -106,13 +109,16 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
       // already counts as free once it preempts that session. Close it first, or a one-connection
       // provider refuses the new stream.
       await endProxies((p) => p.clientId === req.body.clientId);
-      return sessions.start({
+      const started = await sessions.start({
         ...source,
         userAgent: deps.userAgent,
         startAtSec: req.body.startAtSec ?? 0,
         clientId: req.body.clientId,
         quality: 'original',
       });
+      // Only a stream that actually started counts as watched.
+      deps.personal.recordPlay(currentUserId(req), req.body.itemId, req.body.episodeRemoteId ?? null);
+      return started;
     });
 
     app.post<{ Params: SessionParams }>('/sessions/:id/:clientId/heartbeat', async (req, reply) => {
