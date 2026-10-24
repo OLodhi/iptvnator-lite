@@ -163,6 +163,27 @@ describe('createProber', () => {
     expect(ffprobe.runs()).toBe(2);
   });
 
+  test('reads every input as HLS over one connection would be read (-http_multiple 0)', async () => {
+    const db = openDb(':memory:');
+    const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+    const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+    const hls = 'http://provider.test/live/someuser/secret/7.m3u8';
+    const ts = 'http://provider.test/live/someuser/secret/7.ts'; // may be HLS too: some providers answer it with the playlist
+    const relayed = 'http://127.0.0.1:9/0f8fad5b-d9cb-469f-a165-70867728950e/7.mkv';
+
+    await prober.probe(hls, 'ua');
+    await prober.probe(ts, 'ua');
+    await prober.probe(url, 'ua', relayed);
+    // An input option, so before the input.
+    expect(ffprobe.args.map((a) => a.slice(-3))).toEqual([
+      ['-http_multiple', '0', hls],
+      ['-http_multiple', '0', ts],
+      ['-http_multiple', '0', relayed],
+    ]);
+    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(hls), redactUrl(ts), redactUrl(url)]); // keyed by URL alone
+    expect(await prober.probe(hls, 'ua')).toMatchObject({ cached: true });
+  });
+
   test('skipCache neither reads nor writes the cache', async () => {
     const db = openDb(':memory:');
     const ffprobe = fakeFfprobe(fixture('h264-mkv'));
@@ -242,5 +263,17 @@ describe.skipIf(!ffprobePath)('ffprobe integration', () => {
     t += 24 * 3600_000 + 1;
     await prober.probe(url, 'test-agent');
     expect(spawns).toBe(2);
+  }, 30_000);
+
+  test('probes HLS over one connection, whatever its URL, and other content still probes', async () => {
+    const prober = createProber({ ffprobePath: ffprobePath!, db: openDb(':memory:') });
+    const refusedBefore = fake.refusedMediaRequests().length; // the fake allows one connection
+    // The fake serves live 1's playlist for any extension, as some providers do.
+    expect((await prober.probe(`${fake.url}/live/u/p/1.m3u8`, 'test-agent')).result.formatName).toBe('hls');
+    expect((await prober.probe(`${fake.url}/live/u/p/1.ts`, 'test-agent')).result.formatName).toBe('hls');
+    expect(fake.refusedMediaRequests().slice(refusedBefore)).toEqual([]); // no segment prefetched on a second connection
+    // -http_multiple is an HLS demuxer option: ffprobe skips it for any other content.
+    expect((await prober.probe(`${fake.url}/live/u/p/2.m3u8`, 'test-agent')).result.formatName).toBe('mpegts');
+    expect((await prober.probe(`${fake.url}/movie/u/p/3.mkv`, 'test-agent')).result.formatName).toBe('matroska,webm');
   }, 30_000);
 });

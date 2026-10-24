@@ -54,19 +54,20 @@ describe('resolveSourceUrl catch-up', () => {
 
   test('rejects catch-up on a channel without archive, too old, not started, too long, or stop before start', async () => {
     const archiveStart = NOW_SEC - 2 * 86_400 - 60; // live 1 keeps 2 days, with a minute's grace
-    const cases: [string, number, number, number][] = [
-      ['no archive', 2, PROGRAMME, PROGRAMME + 3600],
-      ['too old', 1, archiveStart - 1, archiveStart + 3600],
-      ['not started', 1, NOW_SEC, NOW_SEC + 3600],
-      ['too long', 1, PROGRAMME, PROGRAMME + MAX_CATCHUP_SEC + 1],
-      ['stop before start', 1, PROGRAMME, PROGRAMME],
+    const stopFirst = 'A catch-up programme must stop after it starts';
+    const cases: [string, number, number, number, string][] = [
+      ['no archive', 2, PROGRAMME, PROGRAMME + 3600, "This channel doesn't support catch-up"],
+      ['too old', 1, archiveStart - 1, archiveStart + 3600, 'This channel keeps only 2 day(s) of catch-up'],
+      ['not started', 1, NOW_SEC, NOW_SEC + 3600, "That programme hasn't started yet"],
+      ['too long', 1, PROGRAMME, PROGRAMME + MAX_CATCHUP_SEC + 1, 'Catch-up programmes are limited to 8 hours'],
+      ['stop at start', 1, PROGRAMME, PROGRAMME, stopFirst],
+      ['stop before start', 1, PROGRAMME, PROGRAMME - 60, stopFirst],
     ];
-    for (const [name, remoteId, startSec, stopSec] of cases) {
+    for (const [name, remoteId, startSec, stopSec, message] of cases) {
       const err: unknown = await catchupOn(remoteId, startSec, stopSec).catch((e: unknown) => e);
       expect(err, name).toBeInstanceOf(SourceError);
-      expect((err as SourceError).code, name).toBe('VALIDATION');
+      expect(err, name).toMatchObject({ code: 'VALIDATION', message });
     }
-    await expect(catchupOn(2, PROGRAMME, PROGRAMME + 3600)).rejects.toThrow("This channel doesn't support catch-up");
   });
 
   test('accepts catch-up at the edges of the archive and the length limit', async () => {

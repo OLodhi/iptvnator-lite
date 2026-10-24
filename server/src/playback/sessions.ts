@@ -500,7 +500,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    * error passes through as is.
    */
   function probeRace(s: Session, url: string, expired: Promise<never>, readFrom?: string): Promise<ProbeResult> {
-    // A timeshift URL is good for one request only: a cached result for it says nothing about the next.
+    // A timeshift URL is unique per programme start, so a cached probe would never be hit and would only grow probe_cache.
     const opts = { skipCache: s.kind === 'catchup' };
     const probing = deps.probe(url, s.userAgent, readFrom, opts).then(({ result, cached }) => {
       if (cached) s.cachedProbes.push(url);

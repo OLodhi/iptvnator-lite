@@ -764,7 +764,7 @@ describe('session manager', () => {
     await h.m.start(catchup('A'));
     await h.m.start(movie(1, 'B'));
     expect(probe.mock.calls).toEqual([
-      [catchup('A').sourceUrl, UA, RELAY_URL, { skipCache: true }], // a timeshift URL is single-use
+      [catchup('A').sourceUrl, UA, RELAY_URL, { skipCache: true }], // unique per programme start: never worth caching
       [movie(1, 'B').sourceUrl, UA, RELAY_URL, USE_CACHE],
     ]);
   });

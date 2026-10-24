@@ -21,7 +21,10 @@ export type ProbeResult = {
 /** A probe's result, and whether it came from the probe cache rather than a fresh ffprobe run. */
 export type ProbeOutcome = { result: ProbeResult; cached: boolean };
 
-/** `skipCache`: the cache is neither read nor written, for a URL that is good for one request only (a timeshift). */
+/**
+ * `skipCache`: the cache is neither read nor written. For a timeshift URL, which is unique per programme start, so a
+ * cached probe would never be hit and would only grow probe_cache.
+ */
 export type ProbeOptions = { skipCache?: boolean };
 
 export interface Prober {
@@ -146,6 +149,10 @@ export function createProber(deps: {
         '-probesize', '1000000',
         '-analyzeduration', '1500000',
         '-user_agent', userAgent,
+        // The HLS demuxer would otherwise prefetch the next segment on a second connection, which a one-connection
+        // provider refuses. Every input gets it, as HLS can hide behind any URL (a provider that answers a live .ts
+        // URL with its playlist, say), and ffprobe skips it for any other content. (FFmpeg rejects it there instead.)
+        '-http_multiple', '0',
         url,
       ];
       const child = spawnFn(deps.ffprobePath, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });

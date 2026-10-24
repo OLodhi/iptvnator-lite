@@ -933,12 +933,10 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
 
   test('catch-up after live on a one-connection provider', async () => {
     const logsBefore = logs.length;
+    const refusedBefore = fake.refusedMediaRequests().length; // the whole sequence: live, then catch-up
     await playOk({ itemId: w.itemId('live', 1), clientId: 'A' });
     // Switch while the live FFmpeg holds the one connection.
     await vi.waitFor(() => expect(fake.openMediaConnections()).toBeGreaterThanOrEqual(1), { timeout: 8_000, interval: 2 });
-    // Counted from the switch: an uncached probe of the HLS channel has ffprobe prefetch a segment on a second
-    // connection, which the fake refuses (and ffprobe survives).
-    const refusedBefore = fake.refusedMediaRequests().length;
 
     const r = await playOk({ itemId: w.itemId('live', 1), clientId: 'A', catchup: lastHour() });
     expect(r).toMatchObject({ mode: 'hls', durationSec: 3600 }); // the catch-up, not the live session again
