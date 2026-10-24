@@ -123,6 +123,7 @@
   <div class="card">
     <p class="muted">
       On your PC this is in your user folder under <code>.iptvnator\databases\iptvnator.db</code>.
+      Quit IPTVnator first so its latest changes are saved into the file.
     </p>
     <label class="filebtn">
       <span>{importing ? 'Importing…' : 'Choose iptvnator.db'}</span>
