@@ -6,15 +6,19 @@ afterEach(() => vi.useRealTimers());
 
 const ok = (status = 204) => vi.fn(async (..._a: any[]) => new Response(null, { status }));
 
-test('heartbeats every 15s and stops when asked', async () => {
+// The server drops a live viewer after 20 s without a request, so the default beats at least three times
+// in that window: one lost heartbeat while the player is stalled or paused doesn't end the session.
+test('heartbeats every 6 s by default and stops when asked', async () => {
   const f = ok();
   const stop = startHeartbeat('s1', 'c1', { fetchFn: f, onGone: vi.fn() });
   expect(f).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(15000);
+  await vi.advanceTimersByTimeAsync(5999);
+  expect(f).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
   expect(f).toHaveBeenCalledTimes(1);
   expect(f.mock.calls[0]![0]).toBe('/api/sessions/s1/c1/heartbeat');
   expect(f.mock.calls[0]![1]).toMatchObject({ method: 'POST' });
-  await vi.advanceTimersByTimeAsync(30000);
+  await vi.advanceTimersByTimeAsync(12000);
   expect(f).toHaveBeenCalledTimes(3);
   stop();
   await vi.advanceTimersByTimeAsync(60000);
@@ -25,7 +29,7 @@ test('a 404 heartbeat calls onGone once and stops', async () => {
   const f = ok(404);
   const onGone = vi.fn();
   startHeartbeat('s1', 'c1', { fetchFn: f, onGone });
-  await vi.advanceTimersByTimeAsync(15000);
+  await vi.advanceTimersByTimeAsync(6000);
   expect(onGone).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(60000);
   expect(f).toHaveBeenCalledTimes(1);

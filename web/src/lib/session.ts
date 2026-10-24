@@ -2,6 +2,7 @@ const sessionPath = (sessionId: string, clientId: string) =>
   `/api/sessions/${encodeURIComponent(sessionId)}/${encodeURIComponent(clientId)}`;
 
 export type HeartbeatOptions = {
+  /** Default 6 s: at most a third of the server's 20 s live idle timeout, so one lost beat is survivable. */
   intervalMs?: number;
   fetchFn?: typeof fetch;
   /** Called once, when the server says the session no longer exists (404). Heartbeats then stop. */
@@ -10,7 +11,7 @@ export type HeartbeatOptions = {
 
 /** POSTs a heartbeat every `intervalMs` until the returned function is called or the session is gone. */
 export function startHeartbeat(sessionId: string, clientId: string, opts: HeartbeatOptions): () => void {
-  const { intervalMs = 15000, fetchFn = (...a: Parameters<typeof fetch>) => fetch(...a), onGone } = opts;
+  const { intervalMs = 6000, fetchFn = (...a: Parameters<typeof fetch>) => fetch(...a), onGone } = opts;
   let stopped = false;
   const timer = setInterval(async () => {
     try {
