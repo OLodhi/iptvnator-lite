@@ -106,3 +106,4 @@ export type SearchResults = {
   series: CatalogItem[];
   categories: (BrowseCategory & { kind: Kind })[];
 };
+export type ImportResult = { categoriesMatched: number; hiddenApplied: number; favouritesImported: number };

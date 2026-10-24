@@ -20,6 +20,7 @@ import { catalogueRoutes } from './routes/catalogue.ts';
 import { curationRoutes } from './routes/curation.ts';
 import type { PersonalService } from './personal/service.ts';
 import { createLogoCache, type LogoCache } from './logos/cache.ts';
+import { importRoutes } from './routes/import.ts';
 import { logoRoutes } from './routes/logos.ts';
 import { meRoutes } from './routes/me.ts';
 import { playbackRoutes } from './routes/playback.ts';
@@ -40,6 +41,8 @@ export type AppDeps = {
   personal: PersonalService;
   /** Proxied logos and posters; a cache over `config.logoDir` if left out. */
   logos?: LogoCache;
+  /** Where IPTVnator uploads are spooled; the OS temp directory if left out. */
+  tmpDir?: string;
   /** The server's own log (provider failures, sessions); silent if left out. */
   log?: Log;
   /** Turns on Fastify's request/error log at this level; off if left out (as in tests). */
@@ -63,6 +66,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       );
       await api.register(syncRoutes({ sync: deps.sync, providers: deps.providers }));
       await api.register(curationRoutes({ curation: deps.curation, providers: deps.providers }));
+      await api.register(
+        importRoutes({
+          db: deps.db, curation: deps.curation, personal: deps.personal, providers: deps.providers, tmpDir: deps.tmpDir,
+        }),
+      );
       await api.register(
         meRoutes({ personal: deps.personal, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo }),
       );
