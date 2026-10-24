@@ -48,7 +48,11 @@ export type CurationCategory = {
   visible: boolean;
   isNew: boolean;
 };
-export type CurationGroup = { tag: string; friendlyName: string | null; hint: string[]; categories: CurationCategory[] };
+export type CurationGroup = { tag: string; friendlyName: string | null; hint: string[];
+  /** The group's standing switch for the viewing user (their own, else the default); null when none was ever set. */
+  rule: boolean | null;
+  categories: CurationCategory[];
+};
 export type CurationView = {
   kind: Kind;
   style: TagStyle;

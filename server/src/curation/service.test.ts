@@ -365,3 +365,21 @@ test('hiding a category in a curated kind adds one exception', async () => {
   expect(visible()).toEqual(['12', '13']);
   expect(curation.hideCategory(987_654, null)).toBe(false);
 });
+
+test("view reports each group's standing rule for the viewer", () => {
+  const rule = (tag: string, userId = OWNER) => view(userId).groups.find((g) => g.tag === tag)!.rule;
+  expect(view().groups.map((g) => g.rule)).toEqual([null, null, null]); // uncurated
+
+  // UK on; US off with visible exceptions; AR has no switch.
+  save({ tags: { UK: true, US: false }, categories: { '21': true, '22': true } });
+  expect(rule('UK')).toBe(true);
+  expect(rule('US')).toBe(false);
+  expect(view().groups.find((g) => g.tag === 'US')!.categories.filter((c) => c.visible)).toHaveLength(2);
+  expect(rule('AR')).toBeNull();
+
+  // A user's own switch beats the default for that user only; the rest is inherited.
+  save({ tags: { US: true }, categories: {} }, GUEST);
+  expect(rule('US', GUEST)).toBe(true);
+  expect(rule('UK', GUEST)).toBe(true);
+  expect(rule('US', OWNER)).toBe(false);
+});

@@ -11,8 +11,8 @@ const view = (): CurationView => ({
   style: 'mixed',
   newCount: 0,
   groups: [
-    { tag: 'UK', friendlyName: 'United Kingdom', hint: [], categories: [cat('1', 'Sports', true), cat('2', 'PPV', true), cat('3', 'News', true)] },
-    { tag: 'US', friendlyName: null, hint: ['ESPN'], categories: [cat('4', 'Sports', false), cat('5', 'News', false)] },
+    { tag: 'UK', friendlyName: 'United Kingdom', hint: [], rule: null, categories: [cat('1', 'Sports', true), cat('2', 'PPV', true), cat('3', 'News', true)] },
+    { tag: 'US', friendlyName: null, hint: ['ESPN'], rule: null, categories: [cat('4', 'Sports', false), cat('5', 'News', false)] },
   ],
   untagged: [cat('10', 'Zulu', false), cat('11', 'alpha', true), cat('12', 'Alpine', false), cat('13', 'Beta', false), cat('14', '4K Movies', false)],
 });
@@ -96,10 +96,20 @@ test('keptCount matches the footer "82 of 764 kept" arithmetic', () => {
   expect(p.keptCount()).toBe(5);
 });
 
-test('a group that starts partly visible takes the majority as its rule', () => {
+test('a stored rule of off survives an untouched Done, even with most categories visible', () => {
   const v = view();
-  v.groups[0]!.categories[1]!.visible = false;
+  v.groups[0]!.rule = false; // UK: rule off, but 3 visible exceptions
   const p = createPickerState(v);
-  expect(p.groupState('UK')).toBe('some');
-  expect(p.toUpdate()).toMatchObject({ tags: { UK: true }, categories: { '2': false } });
+  expect(p.groupState('UK')).toBe('on');
+  const update = p.toUpdate();
+  expect(update.tags.UK).toBe(false);
+  expect(update.categories).toMatchObject({ '1': true, '2': true, '3': true });
+});
+
+test('a group with no stored rule starts on when every category is visible, else off', () => {
+  const v = view();
+  v.groups[1]!.categories[0]!.visible = true; // US: one of two visible, no rule
+  const p = createPickerState(v);
+  expect(p.toUpdate().tags).toEqual({ UK: true, US: false });
+  expect(p.toUpdate().categories).toMatchObject({ '4': true });
 });

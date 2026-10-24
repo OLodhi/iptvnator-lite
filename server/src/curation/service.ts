@@ -119,6 +119,15 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
     });
   }
 
+  /** A tag's standing rule for the user: their own, else the default's; absent when neither exists. */
+  function tagRulesFor(providerId: number, kind: Kind, userId: number): Map<string, boolean> {
+    const out = new Map<string, boolean>();
+    const found = (rules.all(providerId, kind, userId) as RuleRow[]).filter((r) => r.targetType === 'tag');
+    for (const r of found.filter((x) => x.isDefault)) out.set(r.target, r.visible === 1);
+    for (const r of found.filter((x) => !x.isDefault)) out.set(r.target, r.visible === 1);
+    return out;
+  }
+
   function resolution(providerId: number, kind: Kind, userId: number): Resolution {
     const rows = categories.all(providerId, kind) as CategoryRow[];
     const resolved = resolve(providerId, kind, userId, rows);
@@ -155,6 +164,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
       const pattern = rows[0]?.pattern ?? null;
       const resolved = resolve(providerId, kind, userId, rows);
       const displayName = nameFn(pattern, resolved);
+      const tagRules = tagRulesFor(providerId, kind, userId);
       const groups = new Map<string, CurationGroup>();
       const untagged: CurationCategory[] = [];
       // Rows arrive in provider order, so groups come out in the order of their first category.
@@ -169,7 +179,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
         }
         let group = groups.get(c.tag);
         if (!group) {
-          group = { tag: c.tag, friendlyName: friendlyName(c.tag), hint: [], categories: [] };
+          group = { tag: c.tag, friendlyName: friendlyName(c.tag), hint: [], rule: tagRules.get(c.tag) ?? null, categories: [] };
           groups.set(c.tag, group);
         }
         if (group.hint.length < HINT_SIZE) group.hint.push(pattern ? strip(c.name, c.tag, pattern) : c.name);

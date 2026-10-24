@@ -23,8 +23,8 @@ export function createPickerState(view: CurationView) {
   const untaggedChoice = new Map<string, boolean>();
 
   for (const g of view.groups) {
-    const visible = g.categories.filter((c) => c.visible).length;
-    const rule = visible * 2 > g.categories.length;
+    // The stored switch; a group nobody has curated yet starts on only if everything in it is showing.
+    const rule = g.rule ?? g.categories.every((c) => c.visible);
     rules.set(g.tag, rule);
     for (const c of g.categories) {
       home.set(c.remoteId, g.tag);
