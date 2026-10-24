@@ -4,6 +4,7 @@ import { buildApp } from './app.ts';
 import { loadConfig } from './config.ts';
 import { createSyncRunner } from './catalogue/syncRunner.ts';
 import type { SyncRunner } from './catalogue/syncRunner.ts';
+import { createRefreshScheduler } from './catalogue/scheduler.ts';
 import { createCatalogueRepo } from './catalogue/repo.ts';
 import { createSeriesInfoCache } from './catalogue/seriesInfo.ts';
 import { openDb } from './db/db.ts';
@@ -48,10 +49,13 @@ const sessions = createSessionManager({
 });
 const app = await buildApp({ config, db, providers, sync, catalogue, seriesInfo, sessions, log, httpLogLevel: 'warn' });
 
+const scheduler = createRefreshScheduler({ providers, sync, now: Date.now });
+
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  scheduler.stop();
   try {
     // Together: closing the app aborts direct streams, and stopAll ends every FFmpeg.
     await Promise.allSettled([app.close(), sessions.stopAll()]);
@@ -64,4 +68,5 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 await app.listen({ port: config.port, host: config.host });
+scheduler.start();
 console.log(`Server listening on http://${config.host}:${config.port}`);
