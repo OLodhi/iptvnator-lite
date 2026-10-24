@@ -66,3 +66,48 @@ test('deleting a provider removes its categories, items and links', () => {
   }
   expect(search(db, 'spor')).toEqual([]);
 });
+
+test('migration 2 seeds the default user', () => {
+  const db = openDb(':memory:');
+  expect(db.prepare('SELECT id, name FROM users').all()).toEqual([{ id: 1, name: 'Owner' }]);
+});
+
+test('renaming an item to the same name does not touch the FTS index', () => {
+  const db = openDb(':memory:');
+  seed(db);
+  const snapshot = () => JSON.stringify(db.prepare('SELECT id, block FROM items_fts_data ORDER BY id').all());
+  const before = snapshot();
+  db.prepare("UPDATE items SET name = 'Sky Sports Main Event' WHERE id = 1").run();
+  expect(snapshot()).toBe(before);
+  db.prepare("UPDATE items SET name = 'Beta' WHERE id = 1").run();
+  expect(search(db, 'spor')).toEqual([]);
+  expect(search(db, 'bet')).toEqual(['Beta']);
+});
+
+test('a failing migration rolls back and leaves user_version unchanged', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-db-'));
+  const file = path.join(dir, 'tv.sqlite');
+  expect(() => openDb(file, { migrations: [...migrations, 'CREATE TABLE ok (x); THIS IS NOT SQL'] })).toThrow();
+  const db = openDb(file);
+  expect(db.pragma('user_version', { simple: true })).toBe(migrations.length);
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'ok'").all()).toEqual([]);
+  db.close();
+});
+
+test('deleting a provider cascades personal and curation rows', () => {
+  const db = openDb(':memory:');
+  seed(db);
+  db.exec(`
+    INSERT INTO category_rules (provider_id, user_id, kind, target_type, target, visible) VALUES (1, NULL, 'live', 'tag', 'UK', 1);
+    INSERT INTO curation_state (provider_id, user_id, kind, saved_at) VALUES (1, NULL, 'live', 0);
+    INSERT INTO pins (user_id, provider_id, kind, category_remote_id, pinned_at) VALUES (1, 1, 'live', 'c1', 0);
+    INSERT INTO favourites (user_id, provider_id, kind, remote_id, added_at) VALUES (1, 1, 'live', 'a', 0);
+    INSERT INTO history (user_id, provider_id, kind, remote_id, watched_at) VALUES (1, 1, 'live', 'a', 0);
+    INSERT INTO positions (user_id, provider_id, content_key, position_sec, updated_at) VALUES (1, 1, 'movie:a', 5, 0);
+    INSERT INTO catalogue_styles (provider_id, kind, style) VALUES (1, 'live', 'tagged');
+  `);
+  db.prepare('DELETE FROM providers WHERE id = 1').run();
+  for (const table of ['category_rules', 'pins', 'favourites', 'history', 'positions', 'curation_state', 'catalogue_styles']) {
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+  }
+});

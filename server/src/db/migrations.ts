@@ -58,4 +58,57 @@ export const migrations: string[] = [
   END;
   CREATE TABLE probe_cache (url_key TEXT PRIMARY KEY, result TEXT NOT NULL, probed_at INTEGER NOT NULL);
   `,
+  // 2: personal, curation and refresh-safety schema
+  `
+  DROP TRIGGER items_fts_au;
+  CREATE TRIGGER items_fts_au AFTER UPDATE OF name ON items WHEN old.name IS NOT new.name BEGIN
+    INSERT INTO items_fts (items_fts, rowid, name) VALUES ('delete', old.id, old.name);
+    INSERT INTO items_fts (rowid, name) VALUES (new.id, new.name);
+  END;
+  ALTER TABLE item_categories ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE categories ADD COLUMN tag TEXT;                     -- detected tag key, NULL = untagged
+  ALTER TABLE categories ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0;
+  UPDATE categories SET first_seen_at = seen_at;
+  CREATE TABLE catalogue_styles (
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, style TEXT NOT NULL CHECK (style IN ('tagged','mixed','untagged')), pattern TEXT,
+    PRIMARY KEY (provider_id, kind));
+  CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+  INSERT INTO users (id, name, created_at) VALUES (1, 'Owner', 0);
+  CREATE TABLE category_rules (
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,         -- NULL = default (admin) rule
+    kind TEXT NOT NULL, target_type TEXT NOT NULL CHECK (target_type IN ('tag','category')),
+    target TEXT NOT NULL,                                            -- tag key, or category remote_id
+    visible INTEGER NOT NULL CHECK (visible IN (0,1)));
+  CREATE UNIQUE INDEX category_rules_key ON category_rules (provider_id, kind, target_type, target, COALESCE(user_id, 0));
+  CREATE TABLE curation_state (
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+  CREATE UNIQUE INDEX curation_state_key ON curation_state (provider_id, kind, COALESCE(user_id, 0));
+  CREATE TABLE pins (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, category_remote_id TEXT NOT NULL, pinned_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider_id, kind, category_remote_id));
+  CREATE TABLE favourites (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, remote_id TEXT NOT NULL, added_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider_id, kind, remote_id));
+  CREATE TABLE history (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, remote_id TEXT NOT NULL, episode_remote_id TEXT, watched_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider_id, kind, remote_id));
+  CREATE INDEX history_recent ON history (user_id, provider_id, kind, watched_at DESC);
+  CREATE TABLE positions (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    content_key TEXT NOT NULL,          -- 'movie:<remoteId>' | 'episode:<episodeRemoteId>'
+    series_remote_id TEXT,              -- set for episodes
+    position_sec REAL NOT NULL, duration_sec REAL, finished INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider_id, content_key));
+  CREATE INDEX positions_recent ON positions (user_id, provider_id, finished, updated_at DESC);
+  `,
 ];

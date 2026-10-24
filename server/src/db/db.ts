@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
-import { migrations } from './migrations.ts';
+import { migrations as defaultMigrations } from './migrations.ts';
 
 export type Db = import('better-sqlite3').Database;
 
-export function openDb(file: string): Db {
+export function openDb(file: string, opts: { migrations?: string[] } = {}): Db {
+  const migrations = opts.migrations ?? defaultMigrations;
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
