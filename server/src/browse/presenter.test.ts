@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { startBrowseApp } from '../testing/browseApp.ts';
 import { browseCatalogue } from '../testing/browseCatalogue.ts';
 import { createGuideQueries } from '../guide/query.ts';
+import type { GuideQueries } from '../guide/query.ts';
 import { createGuideStore } from '../guide/store.ts';
 import { createPresenter } from './presenter.ts';
 
@@ -61,4 +62,13 @@ test('live items carry now; movies don\'t', async () => {
   } finally {
     h.db.exec('DELETE FROM guide_links; DELETE FROM programmes; DELETE FROM guide_state');
   }
+});
+
+test('a presented batch makes one nowFor call', () => {
+  const calls: number[][] = [];
+  const guide = { nowFor: (_p: number, ids: number[]) => (calls.push(ids), new Map()) } as unknown as GuideQueries;
+  const presenter = createPresenter({ ...h, guide, now: () => 0 });
+  const stored = ['UK| BBC News', 'UK| Sky Sports 1', '|EN| Sporting Chance'].map((n) => h.catalogue.getItem(itemId(n))!);
+  presenter.items(stored, 1);
+  expect(calls).toEqual([[itemId('UK| BBC News'), itemId('UK| Sky Sports 1')]]);
 });

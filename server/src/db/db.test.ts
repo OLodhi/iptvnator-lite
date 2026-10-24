@@ -70,6 +70,8 @@ test('deleting a provider removes its categories, items and links', () => {
 test('migration 3 creates the guide tables', () => {
   const db = openDb(':memory:');
   expect(db.pragma('user_version', { simple: true })).toBe(3);
+  const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'programmes'").pluck().all();
+  expect(indexes).toEqual(expect.arrayContaining(['programmes_slot', 'programmes_time', 'programmes_stop']));
   seed(db);
   db.exec(`
     INSERT INTO guide_state (provider_id, generation, source) VALUES (1, 1, 'xmltv');

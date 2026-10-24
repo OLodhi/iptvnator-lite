@@ -19,6 +19,7 @@ export interface GuideQueries {
   whatsOn(q: WhatsOnQuery): { items: { itemId: number; programme: Programme }[]; nextCursor: string | null };
   /** Programmes overlapping [fromSec, toSec) per item, by start. */
   programmesFor(providerId: number, itemIds: number[], fromSec: number, toSec: number): Map<number, Programme[]>;
+  /** Items linked to a channel that has programmes in the current guide. */
   linkedItemIds(providerId: number, itemIds: number[]): Set<number>;
   /** Earliest start and latest stop of the current guide; null when there is none. */
   range(providerId: number): { fromSec: number; toSec: number } | null;
@@ -64,12 +65,14 @@ function decode(cursor: string | null, length: number): number[] | null {
   }
 }
 
-// One row per channel: of several items on one channel the earliest in `order` wins. Programmes are then read per
-// channel through programmes_slot (provider, generation, channel, start), never by scanning the table.
-const CHANNELS = `
+// One row per channel: of several items on one channel the earliest in `order` wins (for past mode, the earliest with
+// an archive). Programmes are then read per channel through programmes_slot, never by scanning the table.
+// CROSS JOIN pins the id list as the outer loop, so each id is one primary-key probe of guide_links.
+const channels_ = (archiveOnly: boolean) => `
   ord AS (SELECT CAST(j.value AS INTEGER) AS item_id, CAST(j.key AS INTEGER) AS pos FROM json_each(@order) j),
-  chan AS (SELECT gl.channel_key AS ck, ord.item_id AS item_id, MIN(ord.pos) AS pos
-             FROM ord JOIN guide_links gl ON gl.item_id = ord.item_id AND gl.provider_id = @providerId
+  chan AS (SELECT gl.channel_key AS ck, ord.item_id AS item_id, MIN(ord.pos) AS pos${archiveOnly ? ', items.catchup_days AS days' : ''}
+             FROM ord CROSS JOIN guide_links gl ON gl.item_id = ord.item_id AND gl.provider_id = @providerId
+             ${archiveOnly ? 'CROSS JOIN items ON items.id = ord.item_id AND items.catchup_days > 0' : ''}
             GROUP BY gl.channel_key)`;
 const COLUMNS = `p.id AS id, p.title AS title, p.subtitle AS subtitle, p.description AS description,
   p.category AS category, p.start AS start, p.stop AS stop, chan.item_id AS itemId, chan.pos AS pos`;
@@ -86,12 +89,12 @@ export function createGuideQueries(db: Db): GuideQueries {
   const nowRows = db.prepare(
     `SELECT CAST(j.value AS INTEGER) AS itemId, p.title AS title, p.start AS start, p.stop AS stop
        FROM json_each(@ids) j
-       JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId
+       CROSS JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId
        JOIN programmes p ON p.id = ${LATEST('gl.channel_key')}
       WHERE p.stop > @now`,
   );
   const airing = db.prepare(
-    `WITH ${CHANNELS}
+    `WITH ${channels_(false)}
      SELECT ${COLUMNS} FROM chan
        JOIN programmes p ON p.id = ${LATEST('chan.ck')}
       WHERE p.stop > @now
@@ -102,7 +105,7 @@ export function createGuideQueries(db: Db): GuideQueries {
     desc: `(@hasCursor = 0 OR p.start < @cStart OR (p.start = @cStart AND (chan.pos > @cPos OR (chan.pos = @cPos AND p.id > @cId))))`,
   };
   const inRange = db.prepare(
-    `WITH ${CHANNELS}
+    `WITH ${channels_(false)}
      SELECT ${COLUMNS} FROM chan
        JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = chan.ck
                         AND p.start >= @from AND p.start < @to
@@ -111,11 +114,10 @@ export function createGuideQueries(db: Db): GuideQueries {
   );
   // Catch-up is the channel's archive window: the programme has ended and started within `catchup_days`.
   const past = db.prepare(
-    `WITH ${CHANNELS}
+    `WITH ${channels_(true)}
      SELECT ${COLUMNS} FROM chan
-       JOIN items ON items.id = chan.item_id AND items.catchup_days > 0
        JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = chan.ck
-                        AND p.start >= @from AND p.start >= @now - items.catchup_days * ${DAY} AND p.stop <= @now
+                        AND p.start >= @from AND p.start >= @now - chan.days * ${DAY} AND p.stop <= @now
       WHERE ${KEYSET.desc}
       ORDER BY p.start DESC, chan.pos, p.id LIMIT @limit`,
   );
@@ -123,21 +125,30 @@ export function createGuideQueries(db: Db): GuideQueries {
     `SELECT CAST(j.value AS INTEGER) AS itemId, p.id AS id, p.title AS title, p.subtitle AS subtitle,
             p.description AS description, p.category AS category, p.start AS start, p.stop AS stop
        FROM json_each(@ids) j
-       JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId
-       JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = gl.channel_key
+       CROSS JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId
+       CROSS JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = gl.channel_key
                         AND p.start < @to AND p.stop > @from
       ORDER BY p.start`,
   );
   const linked = db
-    .prepare(`SELECT gl.item_id FROM json_each(@ids) j JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId`)
+    .prepare(
+      `SELECT gl.item_id FROM json_each(@ids) j
+         CROSS JOIN guide_links gl ON gl.item_id = j.value AND gl.provider_id = @providerId
+        WHERE EXISTS (SELECT 1 FROM programmes p WHERE p.provider_id = @providerId AND p.generation = @generation
+                         AND p.channel_key = gl.channel_key)`,
+    )
     .pluck();
-  const bounds = db.prepare('SELECT MIN(start) AS fromSec, MAX(stop) AS toSec FROM programmes WHERE provider_id = ? AND generation = ?');
+  const bounds = db.prepare(
+    // Two subqueries, because SQLite serves MIN and MAX from an index only one to a query.
+    `SELECT (SELECT MIN(start) FROM programmes WHERE provider_id = @p AND generation = @g) AS fromSec,
+            (SELECT MAX(stop) FROM programmes WHERE provider_id = @p AND generation = @g) AS toSec`,
+  );
   const channels = db.prepare(
     `SELECT key, name FROM guide_channels
       WHERE provider_id = @providerId AND generation = @generation
         AND (@pattern IS NULL OR key LIKE @pattern ESCAPE '\\' OR name LIKE @pattern ESCAPE '\\'
              OR EXISTS (SELECT 1 FROM json_each(names) n WHERE n.value LIKE @pattern ESCAPE '\\'))
-      ORDER BY name, key LIMIT @limit`,
+      ORDER BY name COLLATE NOCASE, key LIMIT @limit`,
   );
 
   return {
@@ -200,14 +211,15 @@ export function createGuideQueries(db: Db): GuideQueries {
     },
 
     linkedItemIds(providerId, itemIds) {
-      if (itemIds.length === 0) return new Set();
-      return new Set(linked.all({ ids: JSON.stringify(itemIds), providerId }) as number[]);
+      const gen = generation(providerId);
+      if (gen === 0 || itemIds.length === 0) return new Set();
+      return new Set(linked.all({ ids: JSON.stringify(itemIds), providerId, generation: gen }) as number[]);
     },
 
     range(providerId) {
       const gen = generation(providerId);
       if (gen === 0) return null;
-      const r = bounds.get(providerId, gen) as { fromSec: number | null; toSec: number | null };
+      const r = bounds.get({ p: providerId, g: gen }) as { fromSec: number | null; toSec: number | null };
       return r.fromSec === null || r.toSec === null ? null : { fromSec: r.fromSec, toSec: r.toSec };
     },
 

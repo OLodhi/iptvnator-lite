@@ -126,6 +126,7 @@ export const migrations: string[] = [
     title TEXT NOT NULL, subtitle TEXT, description TEXT, category TEXT);
   CREATE UNIQUE INDEX programmes_slot ON programmes (provider_id, generation, channel_key, start);
   CREATE INDEX programmes_time ON programmes (provider_id, generation, start);
+  CREATE INDEX programmes_stop ON programmes (provider_id, generation, stop);
   CREATE TABLE guide_links (item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
     provider_id INTEGER NOT NULL, channel_key TEXT NOT NULL,
     method TEXT NOT NULL CHECK (method IN ('manual','id','name','normalised','sibling','provider')));

@@ -197,4 +197,90 @@ describe('guide queries', () => {
     expect(q.sources(P, 'bbc 1', 10).map((c) => c.key)).toEqual(['b']);
     expect(q.sources(P, '', 2).map((c) => c.name)).toEqual(['100% Music', 'BBC One']);
   });
+  test('the guide is read from the current generation only, by every query', () => {
+    item(1, 'a', 3);
+    item(2, 'orphan', 3);
+    // Generation 1 holds rows that the current generation 2 does not.
+    seed(
+      [prog('a', NOW + HOUR, NOW + 2 * HOUR, 'old-range'), prog('a', NOW - 2 * HOUR, NOW - HOUR, 'old-past'), prog('orphan', 10, 20, 'old-orphan')],
+      [{ key: 'old-chan', name: 'Old' }],
+    );
+    seed([prog('a', NOW + 3 * HOUR, NOW + 4 * HOUR, 'new-range'), prog('a', NOW - 4 * HOUR, NOW - 3 * HOUR, 'new-past')], [{ key: 'new-chan', name: 'New' }]);
+    const base = { providerId: P, order: [1], nowSec: NOW, cursor: null, limit: 10 };
+    expect(q.whatsOn({ ...base, mode: 'range', fromSec: NOW, toSec: NOW + 10 * HOUR }).items.map((i) => i.programme.title)).toEqual(['new-range']);
+    expect(q.whatsOn({ ...base, mode: 'past' }).items.map((i) => i.programme.title)).toEqual(['new-past']);
+    expect(q.programmesFor(P, [1], 0, NOW + 10 * HOUR).get(1)!.map((p) => p.title)).toEqual(['new-past', 'new-range']);
+    expect(q.range(P)).toEqual({ fromSec: NOW - 4 * HOUR, toSec: NOW + 4 * HOUR });
+    expect(q.sources(P, '', 10).map((c) => c.key)).toEqual(['new-chan']);
+    expect(q.linkedItemIds(P, [1, 2])).toEqual(new Set([1]));
+  });
+
+  test('linkedItemIds needs a guide and programmes on the channel', () => {
+    item(1, 'a');
+    item(2, 'empty');
+    expect(q.linkedItemIds(P, [1, 2])).toEqual(new Set());
+    seed([prog('a', 0, 10)]);
+    expect(q.linkedItemIds(P, [1, 2])).toEqual(new Set([1]));
+  });
+
+  test('past mode includes the boundaries of the archive window', () => {
+    const day = 86_400;
+    item(1, 'a', 2);
+    seed([
+      prog('a', NOW - 2 * day, NOW - 2 * day + HOUR, 'at-window-edge'),
+      prog('a', NOW - 2 * day - 1, NOW - 2 * day + HOUR, 'just-outside'),
+      prog('a', NOW - HOUR, NOW, 'stops-now'),
+      prog('a', NOW - HOUR + 1, NOW + 1, 'stops-after-now'),
+    ]);
+    const res = q.whatsOn({ providerId: P, order: [1], mode: 'past', nowSec: NOW, cursor: null, limit: 10 });
+    expect(res.items.map((i) => i.programme.title)).toEqual(['stops-now', 'at-window-edge']);
+  });
+
+  test('past mode lets an item with an archive stand in for a version without one', () => {
+    item(1, 'a', null); // HD, first in order, no archive
+    item(2, 'a', 2); // SD, archive
+    seed([prog('a', NOW - 2 * HOUR, NOW - HOUR, 'earlier')]);
+    const res = q.whatsOn({ providerId: P, order: [1, 2], mode: 'past', nowSec: NOW, cursor: null, limit: 10 });
+    expect(res.items.map((i) => i.itemId)).toEqual([2]);
+  });
+
+  test('paging with an exact multiple of the limit ends cleanly, with distinct entries', () => {
+    for (let i = 1; i <= 100; i++) item(i, `k${i}`, 1);
+    seed(Array.from({ length: 100 }, (_, i) => prog(`k${i + 1}`, NOW - HOUR + (i % 3), NOW + 2 * HOUR, `p${i}`)));
+    const order = Array.from({ length: 100 }, (_, i) => i + 1);
+    for (const mode of ['now', 'range'] as const) {
+      const ids: number[] = [];
+      const sizes: number[] = [];
+      let cursor: string | null = null;
+      do {
+        const res: ReturnType<GuideQueries['whatsOn']> = q.whatsOn({
+          providerId: P, order, mode, fromSec: NOW - 2 * HOUR, toSec: NOW + HOUR, nowSec: NOW, cursor, limit: 50,
+        });
+        sizes.push(res.items.length);
+        ids.push(...res.items.map((i) => i.itemId));
+        cursor = res.nextCursor;
+      } while (cursor);
+      expect(sizes).toEqual([50, 50]);
+      expect(new Set(ids).size).toBe(100);
+    }
+  });
+
+  test('queries stay fast over a large guide', () => {
+    const N = 2000;
+    for (let i = 1; i <= N; i++) item(i, `k${i}`, 1);
+    const g = store.beginGeneration(P, 0);
+    const rows: ProgrammeRow[] = [];
+    for (let c = 1; c <= N; c++) for (let j = 0; j < 25; j++) rows.push(prog(`k${c}`, NOW - 6 * HOUR + j * 1800, NOW - 6 * HOUR + (j + 1) * 1800));
+    store.insertProgrammes(P, g, rows);
+    store.commitGeneration(P, g, { fetchedAt: 0, source: 'xmltv' });
+    const ids = Array.from({ length: N }, (_, i) => i + 1);
+    const time = (f: () => unknown): number => {
+      f();
+      const s = performance.now();
+      f();
+      return performance.now() - s;
+    };
+    expect(time(() => q.whatsOn({ providerId: P, order: ids, mode: 'now', nowSec: NOW, cursor: null, limit: 500 }))).toBeLessThan(50);
+    expect(time(() => q.programmesFor(P, ids.slice(0, 30), NOW, NOW + 6 * HOUR))).toBeLessThan(50);
+  });
 });
