@@ -25,15 +25,15 @@
     play: (req, signal) => api<PlayResponse>('/api/play', { method: 'POST', body: JSON.stringify(req), signal }),
     releaseSession: (sessionId, clientId) => releaseSession(sessionId, clientId),
     startHeartbeat: (sessionId, clientId, opts) => startHeartbeat(sessionId, clientId, opts),
-    attachStream: (v, url) => attachStream(v, url, { Hls }),
+    attachStream: (v, url, opts) => attachStream(v, url, { Hls, ...opts }),
     clientId: getClientId,
-    onStarted: ({ startAtSec, durationSec }) => {
+    onStarted: ({ offsetSec, durationSec }) => {
       if (!video || durationSec === null) return; // live: nothing to resume
       const q = page.url.searchParams;
       reporter.attach(video, {
         itemId: Number(q.get('item')),
         episodeRemoteId: q.get('episode') ?? undefined,
-        startAtSec,
+        offsetSec,
         durationSec
       });
     },

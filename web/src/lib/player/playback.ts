@@ -4,11 +4,16 @@ export type PlaybackDeps = {
   play: (req: PlayRequest, signal: AbortSignal) => Promise<PlayResponse>;
   releaseSession: (sessionId: string, clientId: string) => Promise<void>;
   startHeartbeat: (sessionId: string, clientId: string, opts: { onGone: () => void }) => () => void;
-  attachStream: (video: HTMLVideoElement, url: string) => { destroy(): void };
+  /** `startAtSec`: for a direct stream, where to seek once the file is open (an HLS session starts there itself). */
+  attachStream: (video: HTMLVideoElement, url: string, opts: { startAtSec?: number }) => { destroy(): void };
   clientId: () => string;
   onGone: () => void;
-  /** Called once the stream is attached; startAtSec/durationSec come from the server. */
-  onStarted?: (info: { startAtSec: number; durationSec: number | null }) => void;
+  /** Called once the stream is attached; durationSec comes from the server. */
+  onStarted?: (info: {
+    /** Added to currentTime to get the absolute position; 0 when the stream itself is absolute. */
+    offsetSec: number;
+    durationSec: number | null;
+  }) => void;
   /** Called at the start of teardown of an attached session, before the video is detached. */
   onStopping?: () => void;
   onError: (err: unknown) => void;
@@ -25,7 +30,7 @@ export function createPlayback(deps: PlaybackDeps) {
   let controller: AbortController | undefined;
   let stopHeartbeat: (() => void) | undefined;
   let handle: { destroy(): void } | undefined;
-  let active: { sessionId: string; clientId: string; vod: boolean; startAtSec: number } | undefined;
+  let active: { sessionId: string; clientId: string; vod: boolean; offsetSec: number } | undefined;
 
   function teardown() {
     if (active) deps.onStopping?.();
@@ -60,15 +65,19 @@ export function createPlayback(deps: PlaybackDeps) {
       void deps.releaseSession(res.sessionId, clientId);
       return;
     }
-    active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null, startAtSec: res.startAtSec };
-    handle = deps.attachStream(video, res.url);
+    // An HLS session is cut from startAtSec, so its currentTime counts from there. A direct stream is the whole
+    // file: it is seeked to startAtSec instead, and its currentTime is already absolute.
+    const offsetSec = res.mode === 'hls' ? res.startAtSec : 0;
+    const seekToSec = res.mode === 'direct' && res.startAtSec > 0 ? res.startAtSec : undefined;
+    active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null, offsetSec };
+    handle = deps.attachStream(video, res.url, seekToSec === undefined ? {} : { startAtSec: seekToSec });
     stopHeartbeat = deps.startHeartbeat(res.sessionId, clientId, { onGone: deps.onGone });
-    deps.onStarted?.({ startAtSec: res.startAtSec, durationSec: res.durationSec });
+    deps.onStarted?.({ offsetSec, durationSec: res.durationSec });
   }
 
-  /** Absolute VOD position: the video's currentTime is relative to the session's start offset. */
+  /** Absolute VOD position: currentTime plus the session's offset (0 for a direct stream). */
   function absoluteSec(video: HTMLVideoElement): number {
-    return Math.floor((active?.startAtSec ?? 0) + video.currentTime);
+    return Math.floor((active?.offsetSec ?? 0) + video.currentTime);
   }
 
   return { start, teardown, isVod: () => active?.vod ?? false, absoluteSec };

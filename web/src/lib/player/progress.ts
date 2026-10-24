@@ -9,15 +9,15 @@ export type ProgressDeps = {
 export type ProgressBase = {
   itemId: number;
   episodeRemoteId?: string;
-  /** Where the HLS session started: the video's currentTime is relative to it. */
-  startAtSec: number;
+  /** Added to currentTime to get the absolute position; 0 when the stream itself is absolute. */
+  offsetSec: number;
   durationSec: number | null;
 };
 
 const MIN_REPORT_SEC = 5; // the server ignores anything earlier
 
 /**
- * Reports the absolute playback position (startAtSec + currentTime) on an interval and on flush().
+ * Reports the absolute playback position (offsetSec + currentTime) on an interval and on flush().
  * Nothing is sent until playback has actually advanced (currentTime > 0) past the server's 5 s floor,
  * and a position is never sent twice. Failures are swallowed: progress is best-effort.
  */
@@ -31,7 +31,7 @@ export function createProgressReporter(deps: ProgressDeps) {
 
   function send(): Promise<void> {
     if (!video || !base || !(video.currentTime > 0)) return Promise.resolve();
-    const positionSec = Math.floor(base.startAtSec + video.currentTime);
+    const positionSec = Math.floor(base.offsetSec + video.currentTime);
     if (positionSec < MIN_REPORT_SEC || positionSec === lastSent) return Promise.resolve();
     lastSent = positionSec;
     lastSentAt = deps.now();

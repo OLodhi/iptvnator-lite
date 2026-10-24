@@ -24,7 +24,7 @@ function setup() {
     play,
     releaseSession: vi.fn(async (_s: string, _c: string) => {}),
     startHeartbeat: vi.fn((_s: string, _c: string, _o: { onGone: () => void }) => stopHb),
-    attachStream: vi.fn((_v: HTMLVideoElement, _u: string) => ({ destroy })),
+    attachStream: vi.fn((_v: HTMLVideoElement, _u: string, _o: { startAtSec?: number }) => ({ destroy })),
     clientId: () => 'cid',
     onGone: vi.fn(),
     onError: vi.fn(),
@@ -41,7 +41,7 @@ test('normal path attaches, heartbeats, and releases once on teardown', async ()
   expect(deps.play.mock.calls[0]![0]).toEqual({ itemId: 1, startAtSec: 0, clientId: 'cid' });
   pending[0]!.resolve(res('s1'));
   await p;
-  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/s1/cid/index.m3u8');
+  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/s1/cid/index.m3u8', {});
   expect(deps.startHeartbeat).toHaveBeenCalledTimes(1);
   expect(deps.releaseSession).not.toHaveBeenCalled();
   pb.teardown();
@@ -88,7 +88,7 @@ test('overlapping starts: first session released, only the second attaches', asy
   expect(deps.releaseSession).toHaveBeenCalledTimes(1);
   expect(deps.releaseSession).toHaveBeenCalledWith('first', 'cid');
   expect(deps.attachStream).toHaveBeenCalledTimes(1);
-  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/second/cid/index.m3u8');
+  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/second/cid/index.m3u8', {});
   expect(deps.startHeartbeat).toHaveBeenCalledTimes(1);
   pb.teardown();
   expect(deps.releaseSession).toHaveBeenCalledWith('second', 'cid');
@@ -139,9 +139,51 @@ test('onStarted gets the server offset and duration; onStopping fires once, befo
   const p = pb.start({ itemId: 1, startAtSec: 90 }, video);
   pending[0]!.resolve({ ...res('s1', 3000), startAtSec: 88 });
   await p;
-  expect(onStarted).toHaveBeenCalledWith({ startAtSec: 88, durationSec: 3000 });
+  expect(onStarted).toHaveBeenCalledWith({ offsetSec: 88, durationSec: 3000 });
   pb.teardown();
   pb.teardown();
   expect(onStopping).toHaveBeenCalledTimes(1);
   expect(order).toEqual(['stopping:0']);
+});
+
+const direct = (id: string, startAtSec: number): PlayResponse => ({
+  sessionId: id,
+  mode: 'direct',
+  url: `/api/sessions/${id}/cid/direct`,
+  durationSec: 3000,
+  startAtSec,
+});
+
+test('a direct resume seeks the file itself, and its currentTime is already absolute', async () => {
+  const { deps, pending, video } = setup();
+  const onStarted = vi.fn();
+  const pb = createPlayback({ ...deps, onStarted });
+  const p = pb.start({ itemId: 1, startAtSec: 600 }, video);
+  pending[0]!.resolve(direct('s1', 600));
+  await p;
+  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/s1/cid/direct', { startAtSec: 600 });
+  expect(onStarted).toHaveBeenCalledWith({ offsetSec: 0, durationSec: 3000 });
+  video.currentTime = 610;
+  expect(pb.absoluteSec(video)).toBe(610);
+});
+
+test('a direct start from the beginning asks for no seek', async () => {
+  const { pb, deps, pending, video } = setup();
+  const p = pb.start(params, video);
+  pending[0]!.resolve(direct('s1', 0));
+  await p;
+  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/s1/cid/direct', {});
+});
+
+test('an HLS resume starts the stream at the offset: no seek, and currentTime counts from it', async () => {
+  const { deps, pending, video } = setup();
+  const onStarted = vi.fn();
+  const pb = createPlayback({ ...deps, onStarted });
+  const p = pb.start({ itemId: 1, startAtSec: 600 }, video);
+  pending[0]!.resolve({ ...res('s1', 3000), startAtSec: 600 });
+  await p;
+  expect(deps.attachStream).toHaveBeenCalledWith(video, '/api/sessions/s1/cid/index.m3u8', {});
+  expect(onStarted).toHaveBeenCalledWith({ offsetSec: 600, durationSec: 3000 });
+  video.currentTime = 10;
+  expect(pb.absoluteSec(video)).toBe(610);
 });

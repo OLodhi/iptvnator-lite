@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { createProgressReporter } from './progress.ts';
 
 const video = (currentTime = 0) => ({ currentTime }) as HTMLVideoElement;
-const base = { itemId: 7, episodeRemoteId: 'e1', startAtSec: 100, durationSec: 3000 };
+const base = { itemId: 7, episodeRemoteId: 'e1', offsetSec: 100, durationSec: 3000 };
 
 function setup() {
   const report = vi.fn(async (_r: unknown) => {});
@@ -13,7 +13,7 @@ function setup() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-test('reports startAtSec + currentTime every 15 s while playing', () => {
+test('reports offsetSec + currentTime every 15 s while playing', () => {
   const { r, report } = setup();
   const v = video(0);
   r.attach(v, base);
@@ -30,15 +30,15 @@ test('reports startAtSec + currentTime every 15 s while playing', () => {
 
 test('does not report before playback advances', async () => {
   const { r, report } = setup();
-  // Paused at the resume point (iOS refused autoplay): currentTime stays 0 although startAtSec is large.
-  r.attach(video(0), { ...base, startAtSec: 600 });
+  // Paused at the resume point (iOS refused autoplay): currentTime stays 0 although offsetSec is large.
+  r.attach(video(0), { ...base, offsetSec: 600 });
   vi.advanceTimersByTime(45_000);
   await r.flush();
   expect(report).not.toHaveBeenCalled();
   r.detach();
 
   // Advanced, but the absolute position is still under 5 s.
-  r.attach(video(2), { ...base, startAtSec: 0 });
+  r.attach(video(2), { ...base, offsetSec: 0 });
   vi.advanceTimersByTime(15_000);
   await r.flush();
   expect(report).not.toHaveBeenCalled();
@@ -48,12 +48,22 @@ test('does not report before playback advances', async () => {
 test('flush on leave sends the latest position once', async () => {
   const { r, report } = setup();
   const v = video(0);
-  r.attach(v, { itemId: 7, startAtSec: 0, durationSec: null });
+  r.attach(v, { itemId: 7, offsetSec: 0, durationSec: null });
   v.currentTime = 42;
   await r.flush();
   await r.flush();
   expect(report).toHaveBeenCalledTimes(1);
   expect(report).toHaveBeenCalledWith({ itemId: 7, positionSec: 42, durationSec: null });
+  r.detach();
+});
+
+test('with offsetSec 0 (a direct stream, already absolute) the report is currentTime unchanged', async () => {
+  const { r, report } = setup();
+  const v = video(0);
+  r.attach(v, { ...base, offsetSec: 0 });
+  v.currentTime = 610; // seeked to the resume point
+  await r.flush();
+  expect(report).toHaveBeenCalledWith({ itemId: 7, episodeRemoteId: 'e1', positionSec: 610, durationSec: 3000 });
   r.detach();
 });
 
