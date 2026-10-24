@@ -44,6 +44,7 @@ export default defineConfig({
         },
         test: {
           name: 'web',
+          env: { TZ: 'UTC' },
           root: 'web',
           environment: 'jsdom',
           include: ['src/**/*.test.ts'],

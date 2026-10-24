@@ -24,13 +24,15 @@
   const hasGuide = $derived(!!meta?.status && meta.status.programmes > 0);
   const chipLabel = $derived(meta?.chips.find((c) => c.filter === filter)?.label ?? 'All');
 
-  async function loadMeta() {
+  async function loadMeta(keepPrefs = false) {
     try {
       const m = await guideMeta();
       if (gone) return;
       meta = m;
-      view = m.prefs.view;
-      filter = m.chips.some((c) => c.filter === m.prefs.filter) ? m.prefs.filter : 'all';
+      if (!keepPrefs) {
+        view = m.prefs.view;
+        filter = m.chips.some((c) => c.filter === m.prefs.filter) ? m.prefs.filter : 'all';
+      }
       error = '';
       if (m.providerId !== null && m.status?.state === 'running' && !refreshing) {
         refreshing = true; // a refresh started elsewhere: follow it
@@ -43,11 +45,16 @@
     }
   }
 
+  let savePending = false;
+  function flushPrefs() {
+    clearTimeout(saveTimer);
+    savePending = false;
+    saveGuidePrefs({ view, filter }).catch(() => {});
+  }
   function savePrefs() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveGuidePrefs({ view, filter }).catch(() => {});
-    }, 500);
+    savePending = true;
+    saveTimer = setTimeout(flushPrefs, 500);
   }
   function setView(v: GuideView) {
     view = v;
@@ -59,6 +66,7 @@
   }
 
   function poll(providerId: number) {
+    if (gone) return;
     pollTimer = setTimeout(async () => {
       let s: GuideStatus;
       try {
@@ -74,7 +82,7 @@
       if (s.state === 'running') return poll(providerId);
       refreshing = false;
       if (s.state === 'failed') failure = s.error ? `The guide couldn't be refreshed: ${s.error}` : "The guide couldn't be refreshed.";
-      await loadMeta();
+      await loadMeta(true);
     }, 3000);
   }
 
@@ -85,10 +93,12 @@
     try {
       await refreshGuide(meta.providerId);
     } catch (err) {
+      if (gone) return;
       failure = errorText(err);
       refreshing = false;
       return;
     }
+    if (gone || !meta || meta.providerId === null) return;
     poll(meta.providerId);
   }
 
@@ -97,6 +107,7 @@
   });
   onDestroy(() => {
     gone = true;
+    if (savePending) flushPrefs();
     clearTimeout(saveTimer);
     clearTimeout(pollTimer);
   });
@@ -119,9 +130,9 @@
       <button type="button" class="button" disabled={refreshing} onclick={refresh}>Refresh guide</button>
     </div>
   {:else}
-    <div class="views" role="tablist" aria-label="Guide view">
-      <button type="button" role="tab" aria-selected={view === 'whatson'} class:on={view === 'whatson'} onclick={() => setView('whatson')}>What's on</button>
-      <button type="button" role="tab" aria-selected={view === 'grid'} class:on={view === 'grid'} onclick={() => setView('grid')}>Grid</button>
+    <div class="views" role="group" aria-label="Guide view">
+      <button type="button" aria-pressed={view === 'whatson'} class:on={view === 'whatson'} onclick={() => setView('whatson')}>What's on</button>
+      <button type="button" aria-pressed={view === 'grid'} class:on={view === 'grid'} onclick={() => setView('grid')}>Grid</button>
     </div>
     <GuideChips chips={meta.chips} selected={filter} onSelect={setFilter} />
     {#if view === 'whatson'}
@@ -143,7 +154,7 @@
   }
   .views button {
     flex: 1;
-    min-height: 38px;
+    min-height: 44px;
     border: 0;
     border-radius: 999px;
     background: none;

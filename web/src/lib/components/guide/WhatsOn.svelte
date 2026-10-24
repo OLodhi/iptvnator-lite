@@ -8,8 +8,8 @@
   import Artwork from '$lib/components/Artwork.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
 
-  type Props = { filter: string; chipLabel: string };
-  let { filter, chipLabel }: Props = $props();
+  type Props = { filter: string; chipLabel: string; /** IANA zone; the app leaves it unset to use the device zone. */ tz?: string };
+  let { filter, chipLabel, tz }: Props = $props();
 
   const segments: { key: Segment; label: string }[] = [
     { key: 'earlier', label: 'Earlier' },
@@ -22,48 +22,76 @@
   let segment = $state<Segment>('now');
   let entries = $state<WhatsOnEntry[]>([]);
   let nextCursor = $state<string | null>(null);
-  let loading = $state(false);
+  let loading = $state(true);
   let error = $state('');
   let noWindow = $state(false);
   let query: SegmentQuery | null = null;
   let seq = 0;
   let controller: AbortController | undefined;
 
-  async function load(mine: number, cursor: string | null) {
+  async function load(mine: number, cursor: string | null, quiet = false) {
     if (!query) return;
-    loading = true;
-    error = '';
+    if (!quiet) {
+      loading = true;
+      error = '';
+    }
     try {
       const page = await whatsOn({ filter, ...query, cursor }, controller?.signal);
       if (mine !== seq) return;
       entries = cursor ? [...entries, ...page.items] : page.items;
       nextCursor = page.nextCursor;
+      error = '';
     } catch (err) {
-      if (mine === seq) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      if (mine === seq && !quiet) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
       if (mine === seq) loading = false;
     }
   }
 
-  // A new segment or chip starts a fresh list; responses for the old one are discarded by the token.
-  $effect(() => {
-    const seg = segment;
-    void filter;
-    untrack(() => {
-      const mine = ++seq;
-      controller?.abort();
-      controller = new AbortController();
+  // Starts the list again from page 1. A quiet reload keeps the current rows until the new ones arrive.
+  function reload(quiet: boolean) {
+    const mine = ++seq;
+    controller?.abort();
+    controller = new AbortController();
+    if (!quiet) {
       entries = [];
       nextCursor = null;
-      error = '';
-      query = segmentQuery(seg, clock.nowMs);
-      noWindow = query === null;
+    }
+    query = segmentQuery(segment, clock.nowMs, tz);
+    noWindow = query === null;
+    if (noWindow) {
+      entries = [];
+      nextCursor = null;
       loading = false;
-      void load(mine, null);
-    });
+      error = '';
+      return;
+    }
+    void load(mine, null, quiet);
+  }
+
+  // A new segment, chip or zone starts a fresh list; responses for the old one are discarded by the token.
+  $effect(() => {
+    void segment;
+    void filter;
+    void tz;
+    untrack(() => reload(false));
     return () => {
       seq++;
       controller?.abort();
+    };
+  });
+
+  // The Now list goes stale: refresh it every minute and when the app comes back to the foreground.
+  $effect(() => {
+    if (segment !== 'now') return;
+    const timer = setInterval(() => reload(true), 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reload(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   });
 
@@ -84,14 +112,14 @@
         : null;
 </script>
 
-<div class="segments" role="tablist" aria-label="When">
+<div class="segments" role="group" aria-label="When">
   {#each segments as s (s.key)}
-    <button type="button" role="tab" aria-selected={segment === s.key} class:on={segment === s.key} onclick={() => (segment = s.key)}>{s.label}</button>
+    <button type="button" aria-pressed={segment === s.key} class:on={segment === s.key} onclick={() => (segment = s.key)}>{s.label}</button>
   {/each}
 </div>
 
 {#if error}
-  <p class="error" role="alert">{error}</p>
+  <p class="error" role="alert">{error} <button type="button" class="retry" onclick={() => reload(false)}>Retry</button></p>
 {/if}
 
 {#if noWindow}
@@ -109,7 +137,7 @@
       <span class="text">
         <span class="title">{e.programme.title}</span>
         <span class="sub">
-          {e.item.displayName} · {e.live ? `until ${formatClock(e.programme.stopSec)}` : `${formatClock(e.programme.startSec)}–${formatClock(e.programme.stopSec)}`}
+          {e.item.displayName} · {e.live ? `until ${formatClock(e.programme.stopSec, tz)}` : `${formatClock(e.programme.startSec, tz)}–${formatClock(e.programme.stopSec, tz)}`}
         </span>
         {#if e.live}
           <span class="bar" aria-hidden="true"><span style:width="{Math.round(progress(e.programme.startSec, e.programme.stopSec, clock.nowMs) * 100)}%"></span></span>
@@ -135,7 +163,7 @@
   }
   .segments button {
     flex: 1;
-    min-height: 34px;
+    min-height: 44px;
     border: 0;
     border-radius: 999px;
     background: none;
@@ -149,6 +177,16 @@
     background: var(--surface-2);
     color: var(--text);
     font-weight: 600;
+  }
+  .retry {
+    min-height: 44px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
   }
   .empty {
     text-align: center;
