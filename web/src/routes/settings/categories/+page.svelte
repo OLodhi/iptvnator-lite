@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import type { CurationView, Kind } from '@tv/shared';
@@ -33,7 +33,10 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
   onDestroy(() => clearTimeout(timer));
 
-  const dirty = $derived(rev > 0);
+  const dirty = $derived.by(() => {
+    void rev;
+    return picker?.isDirty() ?? false;
+  });
   const kept = $derived.by(() => {
     void rev;
     return picker?.keptCount() ?? 0;
@@ -70,7 +73,8 @@
   }
 
   $effect(() => {
-    void load(kind);
+    const k = kind;
+    untrack(() => void load(k));
     return () => {
       seq++;
     };
@@ -102,6 +106,7 @@
     error = '';
     try {
       await saveCuration(providerId, kind, picker.toUpdate());
+      picker.markSaved();
       rev = 0;
       return true;
     } catch (err) {

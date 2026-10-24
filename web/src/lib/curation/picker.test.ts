@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { CurationCategory, CurationView } from '@tv/shared';
-import { createPickerState } from './picker.ts';
+import { createPickerState, letterFor } from './picker.ts';
 
 const cat = (remoteId: string, displayName: string, visible: boolean): CurationCategory => ({
   id: Number(remoteId), remoteId, name: displayName, displayName, itemCount: 10, visible, isNew: false,
@@ -112,4 +112,31 @@ test('a group with no stored rule starts on when every category is visible, else
   const p = createPickerState(v);
   expect(p.toUpdate().tags).toEqual({ UK: true, US: false });
   expect(p.toUpdate().categories).toMatchObject({ '4': true });
+});
+
+test('azIndex has one entry per letter, with non-A-Z names bucketed first under "#"', () => {
+  const v = view();
+  const names = ['Zulu', '24/7 DISNEY+', 'Ørsted', 'Beta', '4K UHD 3840P', 'Привет', 'أفلام', 'alpha', 'Éclair'];
+  v.untagged = names.map((n, i) => cat(String(100 + i), n, false));
+  const p = createPickerState(v);
+  const idx = p.azIndex();
+  const letters = idx.map((e) => e.letter);
+  expect(new Set(letters).size).toBe(letters.length);
+  expect(letters).toEqual(['#', 'A', 'B', 'E', 'Z']);
+  for (const { letter, index } of idx) {
+    const name = p.untagged[index]!.displayName;
+    expect(letterFor(name)).toBe(letter);
+    expect(index === 0 || letterFor(p.untagged[index - 1]!.displayName) !== letter).toBe(true);
+  }
+});
+
+test('toggling a category and toggling it back is not a change', () => {
+  const p = createPickerState(view());
+  expect(p.isDirty()).toBe(false);
+  p.toggleCategory('1');
+  p.toggleCategory('10');
+  expect(p.isDirty()).toBe(true);
+  p.toggleCategory('10');
+  p.toggleCategory('1');
+  expect(p.isDirty()).toBe(false);
 });

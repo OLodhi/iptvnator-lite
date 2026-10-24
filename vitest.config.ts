@@ -39,6 +39,7 @@ export default defineConfig({
           alias: {
             $lib: fileURLToPath(new URL('./web/src/lib', import.meta.url)),
             '$app/state': fileURLToPath(new URL('./web/src/lib/testing/appState.ts', import.meta.url)),
+            '$app/navigation': fileURLToPath(new URL('./web/src/lib/testing/appNavigation.ts', import.meta.url)),
           },
         },
         test: {

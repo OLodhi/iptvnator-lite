@@ -2,21 +2,29 @@ import type { CurationCategory, CurationUpdate, CurationView } from '@tv/shared'
 
 export type GroupState = 'on' | 'off' | 'some';
 
-const byName = (a: CurationCategory, b: CurationCategory) =>
-  a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base', numeric: true });
-
 /** The A-Z strip letter for a name; anything that doesn't start with a letter files under '#'. */
 export function letterFor(name: string): string {
   const first = name.trim().normalize('NFD').charAt(0).toUpperCase();
   return first >= 'A' && first <= 'Z' ? first : '#';
 }
 
+/** '#' (digits, symbols, other scripts) first, then A-Z; within a letter, natural name order. */
+const byLetterThenName = (a: CurationCategory, b: CurationCategory) => {
+  const la = letterFor(a.displayName);
+  const lb = letterFor(b.displayName);
+  if (la !== lb) return la === '#' ? -1 : lb === '#' ? 1 : la < lb ? -1 : 1;
+  return a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base', numeric: true });
+};
+
+const stable = (u: CurationUpdate): string =>
+  JSON.stringify([Object.entries(u.tags).sort(), Object.entries(u.categories).sort()]);
+
 /**
  * The working copy of one kind's curation. A tag group has a standing rule (its switch); single
  * categories inside it are exceptions. "No tag" categories have no group: each choice is its own rule.
  */
 export function createPickerState(view: CurationView) {
-  const untagged = [...view.untagged].sort(byName);
+  const untagged = [...view.untagged].sort(byLetterThenName);
   const rules = new Map<string, boolean>();
   const choices = new Map<string, boolean>(); // remoteId -> visible, only where it differs from the group rule
   const home = new Map<string, string>(); // remoteId -> tag, for grouped categories
@@ -95,8 +103,18 @@ export function createPickerState(view: CurationView) {
     return { tags, categories };
   }
 
+  let baseline = stable(toUpdate());
+  /** True only when the current choices differ from what was loaded. */
+  const isDirty = () => stable(toUpdate()) !== baseline;
+  /** Call after a successful save: the current choices become the new baseline. */
+  const markSaved = () => {
+    baseline = stable(toUpdate());
+  };
+
   return {
     untagged,
+    isDirty,
+    markSaved,
     isVisible,
     groupState,
     toggleGroup,
