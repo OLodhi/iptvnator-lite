@@ -709,6 +709,24 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     expect(refused).toEqual([]);
   });
 
+  // Ruling R31: AVPlayer stops a live stream whose playlist shows ENDLIST, so the relaunch gap must not.
+  test("a live playlist never shows ENDLIST, even after FFmpeg exits at the end of its input", async () => {
+    const r = await playOk({ itemId: w.itemId('live', 1), clientId: 'A' });
+    // The fake's live input is finite (~30 s), and FFmpeg reads it within seconds, then exits and is relaunched.
+    const exited = () => logs.some((l) => l.startsWith('{"m":"ffmpeg exited') && l.includes(r.sessionId));
+    let exitedAt: number | null = null;
+    const giveUpAt = Date.now() + 15_000;
+    while (Date.now() < giveUpAt) {
+      const pl = await w.app.inject(r.url);
+      expect(pl.statusCode).toBe(200);
+      expect(pl.body).not.toContain('#EXT-X-ENDLIST');
+      if (exitedAt === null && exited()) exitedAt = Date.now();
+      if (exitedAt !== null && Date.now() - exitedAt > 1_500) break; // past the 1 s backoff and into the relaunch
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+    expect(exitedAt, 'ffmpeg should have exited at the end of its input').not.toBeNull();
+  });
+
   test('switches from a direct movie that is still streaming to live on a one-connection provider', async () => {
     const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
     expect(movie.mode).toBe('direct');

@@ -38,7 +38,8 @@ test('copy plan for live writes a 300 s sliding window of ts segments', () => {
   has(a, '-hls_time', '3');
   has(a, '-hls_init_time', '1');
   has(a, '-hls_list_size', '100');
-  has(a, '-hls_flags', 'delete_segments+independent_segments');
+  // omit_endlist (R31): an exiting FFmpeg must not mark the live playlist finished while it is relaunched.
+  has(a, '-hls_flags', 'delete_segments+independent_segments+omit_endlist');
   has(a, '-hls_segment_type', 'mpegts');
   has(a, '-hls_segment_filename', 'O/seg_%05d.ts');
   expect(a.at(-1)).toBe('O/index.m3u8');
@@ -50,7 +51,7 @@ test('copy plan for live writes a 300 s sliding window of ts segments', () => {
 test('restarted live sessions continue numbering with a discontinuity', () => {
   const a = buildFfmpegArgs({ ...base, plan: copyTs, startNumber: 42 });
   has(a, '-start_number', '42');
-  has(a, '-hls_flags', 'delete_segments+independent_segments+discont_start');
+  has(a, '-hls_flags', 'delete_segments+independent_segments+omit_endlist+discont_start');
 });
 
 test('vod starts at an offset before the input and writes an event playlist', () => {
@@ -60,6 +61,7 @@ test('vod starts at an offset before the input and writes an event playlist', ()
   has(a, '-hls_playlist_type', 'event');
   has(a, '-hls_list_size', '0');
   expect(a.join(' ')).not.toContain('delete_segments');
+  expect(a.join(' ')).not.toContain('omit_endlist'); // a finished title does end
   has(a, '-hls_flags', 'independent_segments');
 });
 
@@ -146,6 +148,21 @@ test.skipIf(!ffmpeg)('real ffmpeg writes the fmp4 init segment inside outDir and
     const segs = playlist.split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('#'));
     expect(segs.length).toBeGreaterThan(0);
     for (const s of segs) expect(s).toMatch(/^seg_\d{5}\.m4s$/);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(!ffmpeg)('real ffmpeg leaves no ENDLIST in a live playlist when its input ends', () => {
+  const input = path.resolve(import.meta.dirname, '../../../tools/fake-xtream/media/raw.ts'); // 30 s, read at once
+  const outDir = mkdtempSync(path.join(tmpdir(), 'tv-ffargs-'));
+  try {
+    const args = buildFfmpegArgs({ ...base, url: input, plan: copyTs, live: true, outDir });
+    const r = spawnSync(ffmpeg!, args, { encoding: 'utf8', windowsHide: true });
+    expect(r.status, r.stderr).toBe(0); // it exited at the end of its input
+    const playlist = readFileSync(path.join(outDir, 'index.m3u8'), 'utf8');
+    expect(playlist).toMatch(/^seg_\d{5}\.ts$/m);
+    expect(playlist).not.toContain('#EXT-X-ENDLIST');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

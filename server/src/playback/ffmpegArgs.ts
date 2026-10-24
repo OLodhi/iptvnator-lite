@@ -75,7 +75,9 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   args.push('-f', 'hls', '-hls_time', String(SEGMENT_SECONDS), '-hls_init_time', '1');
   if (live) {
     args.push('-hls_list_size', String(LIVE_LIST_SIZE));
-    let flags = 'delete_segments+independent_segments';
+    // omit_endlist: an FFmpeg that exits (and is relaunched) must not mark the live playlist finished,
+    // or the player stops (R31).
+    let flags = 'delete_segments+independent_segments+omit_endlist';
     if (startNumber > 0) flags += '+discont_start';
     args.push('-hls_flags', flags);
   } else {

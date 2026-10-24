@@ -398,15 +398,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     });
   }
 
-  async function probeWithin(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
+  /** Probes `url`, tracked as a held connection, racing the start deadline; a probe error passes through as is. */
+  function probeRace(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
     const probing = deps.probe(url, s.userAgent);
     const done = () => {
       if (s.probing === ended) s.probing = null;
     };
     const ended = probing.then(done, done);
     s.probing = ended;
+    return Promise.race([probing, expired]);
+  }
+
+  async function probeWithin(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
     try {
-      return await Promise.race([probing, expired]);
+      return await probeRace(s, url, expired);
     } catch (err) {
       if (err instanceof PlaybackError) throw err; // the deadline
       log.warn({ url: redactUrl(url), err: errorText(err) }, 'probe failed');
@@ -420,24 +425,27 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   /** Switches the session to the provider's continuous stream, unless that can't be probed (within the same deadline). */
   async function continuousInstead(s: Session, playlist: ProbeResult, url: string, expired: Promise<never>): Promise<ProbeResult> {
+    const sessionId = s.id;
+    const fallback = redactUrl(url);
     const { durationSec } = playlist;
-    const urls = { url: redactUrl(s.sourceUrl), fallback: redactUrl(url) };
-    log.info({ sessionId: s.id, ...urls, durationSec }, 'live playlist is finite; switching to continuous stream');
-    try {
-      const probe = await probeWithin(s, url, expired);
-      // Only an actual stream will do. Some servers answer every live extension with the same playlist,
-      // and HLS behind a non-.m3u8 URL would also be read without -http_multiple 0.
-      if (probe.formatName.includes('hls')) {
-        log.info({ sessionId: s.id, ...urls }, 'continuous stream is a playlist too; playing the original');
-        return playlist;
-      }
-      s.sourceUrl = url;
-      return probe;
-    } catch (err) {
-      if (err instanceof PlaybackError && err.code === 'STREAM_START_TIMEOUT') throw err;
-      log.warn({ sessionId: s.id, url: urls.url }, 'continuous stream could not be opened; playing the playlist');
+    log.info({ sessionId, url: redactUrl(s.sourceUrl), fallback, durationSec }, 'trying the continuous stream');
+    const notUsed = (reason: string) => {
+      log.warn({ sessionId, fallback, reason }, 'continuous stream not used; playing the playlist');
       return playlist;
+    };
+    let probe: ProbeResult;
+    try {
+      probe = await probeRace(s, url, expired);
+    } catch (err) {
+      if (err instanceof PlaybackError) throw err; // the deadline
+      return notUsed(errorText(err));
     }
+    // Only an actual stream will do. Some servers answer every live extension with the same playlist,
+    // and HLS behind a non-.m3u8 URL would also be read without -http_multiple 0.
+    if (probe.formatName.includes('hls')) return notUsed('fallback is also HLS');
+    s.sourceUrl = url;
+    log.info({ sessionId, url: fallback }, 'switched to continuous stream');
+    return probe;
   }
 
   async function open(s: Session, fallbackUrl: string | undefined): Promise<void> {

@@ -167,6 +167,13 @@ const argAfter = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 /** The backoff of every failure-restart so far (reconnects are not failures and log differently). */
 const restartDelays = (logs: { m: string; o: object }[]) =>
   logs.filter((l) => l.m === 'ffmpeg exited; restarting').map((l) => (l.o as { delayMs: number }).delayMs);
+// R29 log lines, and the redacted forms of liveWithFallback(1)'s URLs.
+const TRYING = 'trying the continuous stream';
+const SWITCHED = 'switched to continuous stream';
+const NOT_USED = 'continuous stream not used; playing the playlist';
+const REDACTED_M3U8 = 'http://provider.test/live/***/***/1.m3u8';
+const REDACTED_TS = 'http://provider.test/live/***/***/1.ts';
+const fallbackLogs = <L extends { m: string }>(logs: L[]) => logs.filter((l) => [TRYING, SWITCHED, NOT_USED].includes(l.m));
 
 function writePlaylist(outDir: string, first: number, last: number): void {
   let text = '#EXTM3U\n#EXT-X-TARGETDURATION:3\n';
@@ -301,7 +308,8 @@ describe('session manager', () => {
     const outDir = outDirOf(h.m, s.sessionId);
     expect(h.children[0]!.args).not.toContain('-start_number');
 
-    // Each run below produces exactly one new segment: a failure, not a reconnect (R28).
+    // Each run below is quick (under 10 s) and produces one new segment: a failure on both counts (R28a).
+    // The segment count alone is pinned by 'a long run that wrote only one new segment is a failure'.
     writePlaylist(outDir, 0, 0);
     h.children[0]!.exit(1);
     await vi.advanceTimersByTimeAsync(999);
@@ -750,6 +758,23 @@ describe('session manager', () => {
     expect(restartDelays(h.logs)).toEqual([1_000, 2_000, 1_000, 2_000, 4_000]);
   });
 
+  test('a long run that wrote only one new segment is a failure, not a reconnect', async () => {
+    const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
+    const s = await h.m.start(live(1, 'A'));
+    const outDir = outDirOf(h.m, s.sessionId);
+
+    writePlaylist(outDir, 0, 0); // one new segment
+    await vi.advanceTimersByTimeAsync(12_000); // long enough to reconnect, if it had written two
+    h.children[0]!.exit(0);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.spawn).toHaveBeenCalledTimes(1); // backing off
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.spawn).toHaveBeenCalledTimes(2);
+    expect(argAfter(h.children[1]!.args, '-start_number')).toBe('1');
+    expect(restartDelays(h.logs)).toEqual([1_000]);
+    expect(h.logs.some((l) => l.m.includes('reconnecting'))).toBe(false);
+  });
+
   test('a run shorter than 10 s is a failure however many segments it wrote; a longer one reconnects', async () => {
     const h = harness({ liveIdleMs: HOUR, stallTimeoutMs: HOUR });
     const s = await h.m.start(live(1, 'A'));
@@ -854,16 +879,11 @@ describe('session manager', () => {
     const args = h.children[0]!.args;
     expect(argAfter(args, '-i')).toBe(req.fallbackSourceUrl);
     expect(args).not.toContain('-http_multiple');
-    expect(h.logs).toContainEqual({
-      level: 'info',
-      m: 'live playlist is finite; switching to continuous stream',
-      o: expect.objectContaining({
-        url: 'http://provider.test/live/***/***/1.m3u8',
-        fallback: 'http://provider.test/live/***/***/1.ts',
-        durationSec: 15,
-      }),
-    });
-    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: 'http://provider.test/live/***/***/1.ts' });
+    expect(fallbackLogs(h.logs)).toEqual([
+      { level: 'info', m: TRYING, o: { sessionId: s.sessionId, url: REDACTED_M3U8, fallback: REDACTED_TS, durationSec: 15 } },
+      { level: 'info', m: SWITCHED, o: { sessionId: s.sessionId, url: REDACTED_TS } },
+    ]);
+    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: REDACTED_TS });
 
     h.children[0]!.exit(1); // a relaunch keeps the continuous stream
     await vi.advanceTimersByTimeAsync(1_000);
@@ -884,7 +904,7 @@ describe('session manager', () => {
     const finite = harness({ probe: async () => FINITE_HLS });
     await finite.m.start(live(2, 'B')); // no fallback offered
     expect(argAfter(finite.children[0]!.args, '-i')).toBe(live(2, 'B').sourceUrl);
-    expect([...h.logs, ...finite.logs].some((l) => l.m.includes('switching'))).toBe(false);
+    expect(fallbackLogs([...h.logs, ...finite.logs])).toEqual([]);
   });
 
   test('if the continuous stream cannot be probed, the finite playlist is played after all', async () => {
@@ -900,7 +920,11 @@ describe('session manager', () => {
     expect(probe).toHaveBeenCalledTimes(2);
     expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
     expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
-    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: 'http://provider.test/live/***/***/1.m3u8' });
+    expect(fallbackLogs(h.logs)).toEqual([
+      { level: 'info', m: TRYING, o: { sessionId: s.sessionId, url: REDACTED_M3U8, fallback: REDACTED_TS, durationSec: 15 } },
+      { level: 'warn', m: NOT_USED, o: { sessionId: s.sessionId, fallback: REDACTED_TS, reason: `ffprobe failed for ${REDACTED_TS}` } },
+    ]);
+    expect(h.logs.find((l) => l.m === 'session started')?.o).toMatchObject({ url: REDACTED_M3U8 });
     expect(JSON.stringify(h.logs)).not.toContain('secret');
   });
 
@@ -911,12 +935,15 @@ describe('session manager', () => {
       const probe = vi.fn(async (url: string, _userAgent: string) => (url.endsWith('.ts') ? fallback : FINITE_HLS));
       const h = harness({ probe });
       const req = liveWithFallback(1, 'A');
-      await h.m.start(req);
+      const s = await h.m.start(req);
 
       expect(probe).toHaveBeenCalledTimes(2);
       expect(argAfter(h.children[0]!.args, '-i')).toBe(req.sourceUrl);
       expect(argAfter(h.children[0]!.args, '-http_multiple')).toBe('0');
-      expect(h.logs).toContainEqual(expect.objectContaining({ m: 'continuous stream is a playlist too; playing the original' }));
+      expect(fallbackLogs(h.logs)).toEqual([
+        { level: 'info', m: TRYING, o: { sessionId: s.sessionId, url: REDACTED_M3U8, fallback: REDACTED_TS, durationSec: 15 } },
+        { level: 'warn', m: NOT_USED, o: { sessionId: s.sessionId, fallback: REDACTED_TS, reason: 'fallback is also HLS' } },
+      ]);
       expect(JSON.stringify(h.logs)).not.toContain('secret');
     }
   });
@@ -938,6 +965,12 @@ describe('session manager', () => {
     expect(h.m.activeUpstreams(1)).toBe(1); // that ffprobe is still connected
     await vi.advanceTimersByTimeAsync(3_000); // 18.1 s: it has finished
     expect(h.m.activeUpstreams(1)).toBe(0);
+    // Tried, but no switch is claimed.
+    const sessionId = expect.any(String);
+    expect(fallbackLogs(h.logs)).toEqual([
+      { level: 'info', m: TRYING, o: { sessionId, url: REDACTED_M3U8, fallback: REDACTED_TS, durationSec: 15 } },
+    ]);
+    expect(JSON.stringify(h.logs)).not.toContain('secret');
   });
 
   // Ruling R16: liveness is per viewer.
