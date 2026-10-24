@@ -38,3 +38,20 @@ test('no line without a programme', () => {
     unmount(a);
   }
 });
+
+test('the shared clock moves the bar every 30 s and stops once no row is mounted', async () => {
+  const item = { ...base, now: { title: 'News at Six', startSec: 100, stopSec: 400 } };
+  app = mount(ChannelRow, { target: document.body, props: { item, onToggleFavourite: vi.fn() } });
+  flushSync();
+  const width = () => (document.querySelector('.now-bar > span') as HTMLElement).style.width;
+  expect(width()).toBe('17%');
+  vi.advanceTimersByTime(30_000);
+  flushSync();
+  expect(width()).toBe('27%');
+  const clear = vi.spyOn(globalThis, 'clearInterval');
+  unmount(app);
+  app = undefined;
+  await vi.advanceTimersByTimeAsync(0);
+  expect(clear).toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});

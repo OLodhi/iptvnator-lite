@@ -61,3 +61,37 @@ test('does not search before the debounce', async () => {
   await type('bb', 200);
   expect(guide.guideSources).not.toHaveBeenCalledWith(3, 'bb', expect.anything());
 });
+
+test('a stale response after the box is cleared is dropped', async () => {
+  let resolve!: (v: { key: string; name: string }[]) => void;
+  guide.guideSources.mockReturnValue(new Promise((r) => (resolve = r)));
+  await type('bbc', 250);
+  await type('', 0);
+  resolve([{ key: 'late.uk', name: 'Late' }]);
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+  expect(buttons().some((b) => b.textContent?.includes('late.uk'))).toBe(false);
+});
+
+test('a new pick clears the previous error and success message', async () => {
+  guide.setGuideSource.mockRejectedValueOnce(new Error('x'));
+  buttons()[0]!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+  expect(document.querySelector('[role=alert]')).toBeTruthy();
+  buttons()[0]!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+  expect(document.querySelector('[role=alert]')).toBeNull();
+  expect(document.querySelector('[role=status]')).toBeTruthy();
+});
+
+test('focuses the search box and keeps long result lists inside a scrolling list', async () => {
+  expect(document.activeElement).toBe(document.querySelector('input'));
+  guide.guideSources.mockResolvedValue(Array.from({ length: 80 }, (_, i) => ({ key: `k${i}`, name: `Channel ${i}` })));
+  await type('ch', 250);
+  const list = document.querySelector('.sheet > .list')!;
+  expect(list.querySelectorAll('.result').length).toBe(81);
+  expect(document.querySelector('.sheet > .cancel')).toBeTruthy(); // footer sits outside the scrolling list
+  expect(list.contains(document.querySelector('.cancel'))).toBe(false);
+});

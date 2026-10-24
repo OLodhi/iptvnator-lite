@@ -37,9 +37,17 @@
     };
   });
 
+  let input = $state<HTMLInputElement>();
+  $effect(() => {
+    if (open && input) input.focus();
+  });
+
   function onInput() {
     clearTimeout(timer);
     controller?.abort();
+    const mine = ++seq;
+    error = '';
+    done = false;
     const text = q.trim();
     if (!text || !item) {
       results = [];
@@ -47,7 +55,6 @@
     }
     const providerId = item.providerId;
     timer = setTimeout(async () => {
-      const mine = ++seq;
       controller = new AbortController();
       try {
         const found = await guideSources(providerId, text, controller.signal);
@@ -63,6 +70,7 @@
     if (!item || busy) return;
     busy = true;
     error = '';
+    done = false;
     try {
       await setGuideSource(item.id, key);
       done = true;
@@ -81,7 +89,7 @@
   <div class="backdrop" role="presentation" onclick={onClose}></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-label="Map guide channel">
     <p class="sheet-title">{item.displayName}</p>
-    <input type="search" placeholder="Search guide channels" bind:value={q} oninput={onInput} aria-label="Search guide channels" />
+    <input type="search" placeholder="Search guide channels" bind:this={input} bind:value={q} oninput={onInput} aria-label="Search guide channels" />
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if done}<p class="done" role="status">Guide will update in a minute or two</p>{/if}
     <div class="list">
@@ -112,14 +120,15 @@
     z-index: 21;
     max-width: 720px;
     max-height: 80vh;
+    max-height: 80dvh;
     margin: 0 auto;
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 8px;
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
     background: var(--surface);
     border-radius: 16px 16px 0 0;
     border-top: 1px solid var(--border);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
   }
   .sheet-title {
     margin: 0;
@@ -140,7 +149,12 @@
     color: var(--text);
     font: inherit;
   }
+  .sheet > :not(.list) {
+    flex: none;
+  }
   .list {
+    flex: 1;
+    min-height: 0;
     display: grid;
     gap: 1px;
     overflow-y: auto;

@@ -37,8 +37,13 @@ test('earlier is the last 24 hours in past mode', () => {
   expect(segmentQuery('now', now, tz)).toEqual({ mode: 'now' });
 });
 
-test('zonedEpochSec resolves the repeated hour once', () => {
+test('zonedEpochSec is deterministic around the clock changes', () => {
+  // fall back: 01:30 happens twice (00:30Z in BST, 01:30Z in GMT); the later one wins
+  expect(zonedEpochSec(2026, 10, 25, 1, 30, tz)).toBe(sec('2026-10-25T01:30:00Z'));
   expect(zonedEpochSec(2026, 10, 25, 2, 0, tz)).toBe(sec('2026-10-25T02:00:00Z'));
+  // spring forward: 01:30 on 2026-03-29 does not exist; the result is after the change
+  expect(zonedEpochSec(2026, 3, 29, 1, 30, tz)).toBe(sec('2026-03-29T01:30:00Z'));
+  expect(zonedEpochSec(2026, 3, 29, 2, 30, tz)).toBe(sec('2026-03-29T01:30:00Z'));
   expect(zonedEpochSec(2026, 10, 24, 18, 0, tz)).toBe(sec('2026-10-24T17:00:00Z'));
 });
 

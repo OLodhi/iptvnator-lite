@@ -16,18 +16,18 @@ function wallParts(sec: number, tz: string): Wall {
   return { y: get('year'), m: get('month'), d: get('day'), h: get('hour'), min: get('minute') };
 }
 
-/** Epoch seconds of the local wall time `y-m-d h:min` in `tz`; a repeated hour resolves to its second occurrence. */
+const asUtc = (w: Wall) => Date.UTC(w.y, w.m - 1, w.d, w.h, w.min) / 1000;
+
+/**
+ * Epoch seconds of the local wall time `y-m-d h:min` in `tz`. A repeated hour resolves to its later
+ * occurrence (after the change); a skipped time resolves to the later candidate too.
+ */
 export function zonedEpochSec(y: number, m: number, d: number, h: number, min: number, tz: string): number {
-  const wallAsUtc = Date.UTC(y, m - 1, d, h, min) / 1000;
-  let utc = wallAsUtc;
-  for (let i = 0; i < 3; i++) {
-    const w = wallParts(utc, tz);
-    const offset = Date.UTC(w.y, w.m - 1, w.d, w.h, w.min) / 1000 - utc;
-    const next = wallAsUtc - offset;
-    if (next === utc) break;
-    utc = next;
-  }
-  return utc;
+  const wall = Date.UTC(y, m - 1, d, h, min) / 1000;
+  const offsets = new Set([-86400, 86400].map((delta) => asUtc(wallParts(wall + delta, tz)) - (wall + delta)));
+  const candidates = [...offsets].map((o) => wall - o);
+  const valid = candidates.filter((c) => asUtc(wallParts(c, tz)) === wall);
+  return Math.max(...(valid.length ? valid : candidates));
 }
 
 /** Calendar date `days` after y-m-d (Date.UTC normalises month and year overflow). */
@@ -66,9 +66,13 @@ export function progress(startSec: number, stopSec: number, nowMs: number): numb
 /** A reactive clock: `nowMs` re-evaluates every `intervalMs`, and only ticks while something reads it. */
 export function createClock(intervalMs = 30_000): { readonly nowMs: number; stop(): void } {
   let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
   const subscribe = createSubscriber((update) => {
-    const id = setInterval(() => !stopped && update(), intervalMs);
-    return () => clearInterval(id);
+    if (!stopped) timer = setInterval(update, intervalMs);
+    return () => {
+      clearInterval(timer);
+      timer = undefined;
+    };
   });
   return {
     get nowMs() {
@@ -77,6 +81,8 @@ export function createClock(intervalMs = 30_000): { readonly nowMs: number; stop
     },
     stop() {
       stopped = true;
+      clearInterval(timer);
+      timer = undefined;
     },
   };
 }
