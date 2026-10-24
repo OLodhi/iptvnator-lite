@@ -113,4 +113,26 @@ export const migrations: string[] = [
     PRIMARY KEY (user_id, provider_id, content_key));
   CREATE INDEX positions_recent ON positions (user_id, provider_id, finished, updated_at DESC);
   `,
+  // 3: TV guide (times are epoch seconds) and user preferences
+  `
+  CREATE TABLE guide_state (provider_id INTEGER PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER, attempted_at INTEGER,
+    source TEXT CHECK (source IN ('xmltv','provider')), failures INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+  CREATE TABLE guide_channels (provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, names TEXT NOT NULL,  -- names: JSON array
+    PRIMARY KEY (provider_id, generation, key));
+  CREATE TABLE programmes (id INTEGER PRIMARY KEY, provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL, channel_key TEXT NOT NULL, start INTEGER NOT NULL, stop INTEGER NOT NULL,
+    title TEXT NOT NULL, subtitle TEXT, description TEXT, category TEXT);
+  CREATE UNIQUE INDEX programmes_slot ON programmes (provider_id, generation, channel_key, start);
+  CREATE INDEX programmes_time ON programmes (provider_id, generation, start);
+  CREATE TABLE guide_links (item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    provider_id INTEGER NOT NULL, channel_key TEXT NOT NULL,
+    method TEXT NOT NULL CHECK (method IN ('manual','id','name','normalised','sibling','provider')));
+  CREATE INDEX guide_links_channel ON guide_links (provider_id, channel_key);
+  CREATE TABLE guide_maps (provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    item_remote_id TEXT NOT NULL, channel_key TEXT NOT NULL, PRIMARY KEY (provider_id, item_remote_id));
+  CREATE TABLE user_prefs (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (user_id, key));
+  `,
 ];

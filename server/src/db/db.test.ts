@@ -67,6 +67,38 @@ test('deleting a provider removes its categories, items and links', () => {
   expect(search(db, 'spor')).toEqual([]);
 });
 
+test('migration 3 creates the guide tables', () => {
+  const db = openDb(':memory:');
+  expect(db.pragma('user_version', { simple: true })).toBe(3);
+  seed(db);
+  db.exec(`
+    INSERT INTO guide_state (provider_id, generation, source) VALUES (1, 1, 'xmltv');
+    INSERT INTO guide_channels (provider_id, generation, key, name, names) VALUES (1, 1, 'bbc1', 'BBC 1', '["BBC 1"]');
+    INSERT INTO programmes (provider_id, generation, channel_key, start, stop, title) VALUES (1, 1, 'bbc1', 0, 10, 'News');
+    INSERT INTO guide_links (item_id, provider_id, channel_key, method) VALUES (1, 1, 'bbc1', 'id');
+    INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'bbc1');
+    INSERT INTO user_prefs (user_id, key, value) VALUES (1, 'guide.filter', '"all"');
+  `);
+  for (const table of ['guide_state', 'guide_channels', 'programmes', 'guide_links', 'guide_maps', 'user_prefs']) {
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
+  }
+});
+
+test('migration 3 on a populated database keeps items and positions', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-db-'));
+  const file = path.join(dir, 'tv.sqlite');
+  const old = openDb(file, { migrations: migrations.slice(0, 2) });
+  expect(old.pragma('user_version', { simple: true })).toBe(2);
+  seed(old);
+  old.prepare("INSERT INTO positions (user_id, provider_id, content_key, position_sec, updated_at) VALUES (1, 1, 'movie:a', 5, 0)").run();
+  old.close();
+  const db = openDb(file);
+  expect(db.pragma('user_version', { simple: true })).toBe(migrations.length);
+  expect(db.prepare('SELECT COUNT(*) AS n FROM items').get()).toEqual({ n: 2 });
+  expect(db.prepare('SELECT content_key AS k, position_sec AS p FROM positions').all()).toEqual([{ k: 'movie:a', p: 5 }]);
+  db.close();
+});
+
 test('migration 2 seeds the default user', () => {
   const db = openDb(':memory:');
   expect(db.prepare('SELECT id, name FROM users').all()).toEqual([{ id: 1, name: 'Owner' }]);
