@@ -9,7 +9,10 @@ import { relinkGuide } from './match.ts';
 import type { GuideStore } from './store.ts';
 
 export interface GuideRunner {
-  /** Starts a refresh in the background; does nothing while one is already running for this provider. */
+  /**
+   * Starts a refresh in the background. While one is already running for this provider, one more is queued to follow
+   * it (at most one), because the running refresh may have fixed its wanted channels before this call.
+   */
   start(providerId: number): void;
   status(providerId: number): GuideStatus;
   /** Re-matches channels to guide channels from the stored guide, without fetching. */
@@ -31,6 +34,7 @@ export function createGuideRunner(deps: {
   const log = deps.log ?? silentLog;
   const now = deps.now ?? Date.now;
   const active = new Map<number, { controller: AbortController; done: Promise<void> }>();
+  const again = new Set<number>();
   let stopped = false;
 
   const count = deps.db.prepare(
@@ -73,12 +77,24 @@ export function createGuideRunner(deps: {
     }
   }
 
+  function begin(providerId: number): void {
+    const controller = new AbortController();
+    const done = run(providerId, controller.signal).finally(() => {
+      active.delete(providerId);
+      // Success or failure, but never after stop(): then nothing is queued.
+      if (again.delete(providerId) && !stopped) begin(providerId);
+    });
+    active.set(providerId, { controller, done });
+  }
+
   return {
     start(providerId) {
-      if (stopped || active.has(providerId)) return;
-      const controller = new AbortController();
-      const done = run(providerId, controller.signal).finally(() => active.delete(providerId));
-      active.set(providerId, { controller, done });
+      if (stopped) return;
+      if (active.has(providerId)) {
+        again.add(providerId);
+        return;
+      }
+      begin(providerId);
     },
     running: (providerId) => active.has(providerId),
     relink(providerId) {
@@ -102,6 +118,7 @@ export function createGuideRunner(deps: {
     },
     async stop() {
       stopped = true;
+      again.clear();
       const pending = [...active.values()];
       for (const a of pending) a.controller.abort();
       await Promise.allSettled(pending.map((a) => a.done));

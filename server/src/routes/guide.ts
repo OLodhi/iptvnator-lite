@@ -25,7 +25,8 @@ const FILTER_PATTERN = '^(all|favourites|category:[0-9]+)$';
 
 type Window = { from?: number; to?: number };
 const filterSchema = { type: 'string', pattern: FILTER_PATTERN };
-const limitSchema = (max: number) => ({ type: 'integer', minimum: 1, maximum: max });
+/** Over-large limits are clamped to the endpoint's maximum, as in search; zero and below are rejected. */
+const limitSchema = { type: 'integer', minimum: 1 };
 
 export const guideRoutes = (deps: {
   db: Db;
@@ -173,13 +174,14 @@ export const guideRoutes = (deps: {
               from: { type: 'integer', minimum: 0 },
               to: { type: 'integer', minimum: 0 },
               cursor: { type: 'string', maxLength: 512 },
-              limit: limitSchema(WHATS_ON_LIMIT.max),
+              limit: limitSchema,
             },
           },
         },
       },
       async (req, reply): Promise<Page<WhatsOnEntry> | FastifyReply> => {
-        const { mode = 'now', filter = 'all', cursor, limit = WHATS_ON_LIMIT.default } = req.query;
+        const { mode = 'now', filter = 'all', cursor } = req.query;
+        const limit = Math.min(req.query.limit ?? WHATS_ON_LIMIT.default, WHATS_ON_LIMIT.max);
         if (mode !== 'now') {
           const problem = windowError(req.query, 2 * DAY);
           if (problem) return invalid(reply, problem);
@@ -223,7 +225,7 @@ export const guideRoutes = (deps: {
               from: { type: 'integer', minimum: 0 },
               to: { type: 'integer', minimum: 0 },
               cursor: { type: 'string', maxLength: 512 },
-              limit: limitSchema(GRID_LIMIT.max),
+              limit: limitSchema,
             },
           },
         },
@@ -231,7 +233,8 @@ export const guideRoutes = (deps: {
       async (req, reply): Promise<Page<GridRow> | FastifyReply> => {
         const problem = windowError(req.query, DAY);
         if (problem) return invalid(reply, problem);
-        const { filter = 'all', cursor, limit = GRID_LIMIT.default } = req.query;
+        const { filter = 'all', cursor } = req.query;
+        const limit = Math.min(req.query.limit ?? GRID_LIMIT.default, GRID_LIMIT.max);
         const provider = firstProvider();
         if (!provider) return { items: [], nextCursor: null };
         const order = orderFor(req, provider.id, filter);
@@ -282,13 +285,13 @@ export const guideRoutes = (deps: {
           ...idSchema,
           querystring: {
             type: 'object',
-            properties: { q: { type: 'string', maxLength: 200 }, limit: limitSchema(SOURCES_LIMIT.max) },
+            properties: { q: { type: 'string', maxLength: 200 }, limit: limitSchema },
           },
         },
       },
       async (req, reply): Promise<GuideSource[] | FastifyReply> => {
         if (!deps.providers.get(req.params.id)) return reply.code(404).send(notFound('Provider', req.params.id));
-        return queries.sources(req.params.id, req.query.q ?? '', req.query.limit ?? SOURCES_LIMIT.default);
+        return queries.sources(req.params.id, req.query.q ?? '', Math.min(req.query.limit ?? SOURCES_LIMIT.default, SOURCES_LIMIT.max));
       },
     );
 
@@ -308,6 +311,14 @@ export const guideRoutes = (deps: {
     app.put<{ Params: { id: number }; Body: { key: string | null } }>(
       '/items/:id/guide-source',
       {
+        // Before validation, which would coerce a number to "5" and silently strip extra properties.
+        preValidation: async (req, reply) => {
+          const body = req.body;
+          if (typeof body !== 'object' || body === null) return;
+          const { key, ...extra } = body as { key?: unknown };
+          if (Object.keys(extra).length > 0) return invalid(reply, 'Only key is accepted');
+          if (key !== undefined && key !== null && typeof key !== 'string') return invalid(reply, 'key must be a string or null');
+        },
         schema: {
           ...idSchema,
           body: {

@@ -54,6 +54,8 @@ let db: Db;
 let personal: PersonalService;
 let guide: GuideRunner;
 let providerId: number;
+/** While set, an XMLTV read stops after its first programme until this resolves. */
+let gate: Promise<void> | null = null;
 
 const itemId = (remoteId: string): number =>
   db.prepare("SELECT id FROM items WHERE kind = 'live' AND remote_id = ?").pluck().get(remoteId) as number;
@@ -75,7 +77,23 @@ beforeAll(async () => {
   // The guide runner reads a hand-written XMLTV, which gives other.uk programmes the fake's does not.
   const providers = {
     ...real,
-    clientFor: (id: number) => ({ ...real.clientFor(id), xmltv: async () => Readable.from([Buffer.from(xmltv())]) }),
+    clientFor: (id: number) => ({
+      ...real.clientFor(id),
+      xmltv: async () => {
+        const xml = xmltv();
+        const held = gate;
+        if (!held) return Readable.from([Buffer.from(xml)]);
+        // The wanted channels are fixed at the first programme, so the rest waits until the test has made its pick.
+        const cut = xml.indexOf('<programme', xml.indexOf('<programme') + 1);
+        return Readable.from(
+          (async function* () {
+            yield Buffer.from(xml.slice(0, cut));
+            await held;
+            yield Buffer.from(xml.slice(cut));
+          })(),
+        );
+      },
+    }),
   } as typeof real;
   const curation = createCurationService({ db, now: Date.now });
   personal = createPersonalService({ db, now: Date.now });
@@ -186,6 +204,7 @@ describe('guide API', () => {
     const range = (
       await app.inject(`/api/guide/whats-on?${q({ filter: 'all', mode: 'range', from: NOW, to: NOW + 2 * HOUR })}`)
     ).json() as Page<WhatsOnEntry>;
+    expect(range.items.map((e) => e.catchup)).toEqual([true, false, false, false]);
     expect(range.items.map((e) => [e.item.name, e.programme.startSec, e.live])).toEqual([
       ['UK| HLS Channel', NOW, true], ['UK| Raw TS Channel', NOW, true],
       ['UK| HLS Channel', NOW + HOUR, false], ['UK| Raw TS Channel', NOW + HOUR, false],
@@ -203,7 +222,6 @@ describe('guide API', () => {
     await bad(`/api/guide/whats-on?${q({ mode: 'past', from: NOW, to: NOW - 5 })}`);
     await bad(`/api/guide/whats-on?${q({ mode: 'sideways' })}`);
     await bad(`/api/guide/whats-on?${q({ filter: 'nope' })}`);
-    await bad(`/api/guide/whats-on?${q({ limit: 201 })}`);
     await bad(`/api/guide/grid?${q({ from: NOW, to: NOW + DAY + 1 })}`);
     await bad(`/api/guide/grid?${q({ from: NOW, to: NOW })}`);
     await bad(`/api/guide/programmes?${q({ items: '1', from: NOW, to: NOW + DAY + 1 })}`);
@@ -255,14 +273,87 @@ describe('guide API', () => {
     expect(linkOf()).toEqual({ key: 'other.uk', method: 'manual' });
     expect(guide.running(providerId)).toBe(true);
     await settle();
-    expect((await entryOf())?.programme.startSec).toBe(NOW);
+    const mapped = await entryOf();
+    expect(mapped?.programme).toMatchObject({ startSec: NOW, title: 'other.uk' });
+    expect(mapped?.item.now?.title).toBe('other.uk');
 
     expect((await put(`/api/items/${three}/guide-source`, { key: null })).statusCode).toBe(204);
     expect(linkOf()).toBeUndefined();
     await settle();
+    expect(await entryOf()).toBeUndefined();
 
     expect((await put(`/api/items/${three}/guide-source`, { key: 'missing.uk' })).statusCode).toBe(404);
     expect((await put('/api/items/99999/guide-source', { key: null })).statusCode).toBe(404);
+  });
+
+  test('a pick made during a running refresh gets its programmes from the follow-up refresh', async () => {
+    const three = itemId('3');
+    const entryOf = async () =>
+      ((await app.inject(`/api/guide/whats-on?${q({ filter: 'all', limit: 200 })}`)).json() as Page<WhatsOnEntry>).items.find(
+        (e) => e.item.id === three,
+      );
+    let release!: () => void;
+    gate = new Promise<void>((res) => (release = res));
+    try {
+      guide.start(providerId);
+      await new Promise((res) => setTimeout(res, 150)); // past the first programme, where wanted channels are fixed
+      expect(guide.running(providerId)).toBe(true);
+      expect((await put(`/api/items/${three}/guide-source`, { key: 'other.uk' })).statusCode).toBe(204);
+      gate = null;
+      release();
+      await settle();
+    } finally {
+      gate = null;
+      release();
+    }
+    expect((await entryOf())?.programme.title).toBe('other.uk');
+    expect((await entryOf())?.item.now?.title).toBe('other.uk');
+    expect((await put(`/api/items/${three}/guide-source`, { key: null })).statusCode).toBe(204);
+    await settle();
+  });
+
+  test('over-large limits are clamped', async () => {
+    const whatsOn = await app.inject(`/api/guide/whats-on?${q({ limit: 999 })}`);
+    expect(whatsOn.statusCode).toBe(200);
+    const grid = await app.inject(`/api/guide/grid?${q({ from: NOW, to: NOW + HOUR, limit: 999 })}`);
+    expect(grid.statusCode).toBe(200);
+    const sources = await app.inject(`/api/providers/${providerId}/guide/sources?${q({ limit: 999 })}`);
+    expect(sources.statusCode).toBe(200);
+    expect((sources.json() as unknown[]).length).toBeLessThanOrEqual(50);
+  });
+
+  test('hostile input gets a 400 or a sane page, never a 500', async () => {
+    const win = { from: NOW, to: NOW + HOUR };
+    const negative = Buffer.from('-5').toString('base64url');
+    for (const cursor of ['!!!', negative]) {
+      const whatsOn = await app.inject(`/api/guide/whats-on?${q({ cursor })}`);
+      expect(whatsOn.statusCode, cursor).toBe(200);
+      const grid = await app.inject(`/api/guide/grid?${q({ ...win, cursor })}`);
+      expect(grid.statusCode, cursor).toBe(200);
+      expect((grid.json() as Page<GridRow>).items[0]?.item.name).toBe('UK| HLS Channel');
+    }
+    const long = 'a'.repeat(513);
+    expect((await app.inject(`/api/guide/whats-on?${q({ cursor: long })}`)).statusCode).toBe(400);
+    expect((await app.inject(`/api/guide/grid?${q({ ...win, cursor: long })}`)).statusCode).toBe(400);
+
+    const programmes = (items: string) => app.inject(`/api/guide/programmes?${q({ items, ...win })}`);
+    expect((await programmes('')).statusCode).toBe(400);
+    expect((await programmes('1,a')).statusCode).toBe(400);
+    const dup = await programmes('1,1');
+    expect(dup.statusCode).toBe(200);
+    expect(Object.keys(dup.json())).toEqual(['1']);
+
+    const sources = (extra: Record<string, string | number>) =>
+      app.inject(`/api/providers/${providerId}/guide/sources?${q(extra)}`);
+    expect((await sources({ limit: 0 })).statusCode).toBe(400);
+    expect((await sources({ q: 'x'.repeat(201) })).statusCode).toBe(400);
+    expect((await sources({ q: "%_\'" })).statusCode).toBe(200);
+
+    const three = itemId('3');
+    for (const body of [{}, { key: 5 }, { key: '' }, { key: null, extra: 1 }]) {
+      expect((await put(`/api/items/${three}/guide-source`, body)).statusCode, JSON.stringify(body)).toBe(400);
+    }
+    expect((await put('/api/items/abc/guide-source', { key: null })).statusCode).toBe(400);
   });
 
   test('a non-live item is a 400', async () => {

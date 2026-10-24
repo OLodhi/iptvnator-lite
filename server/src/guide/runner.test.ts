@@ -96,7 +96,6 @@ test('start runs one refresh at a time and reports status', async () => {
     state: 'idle', fetchedAt: null, source: null, channels: 0, programmes: 0, linkedChannels: 0, error: null,
   });
   r.start(providerId);
-  r.start(providerId);
   expect(r.running(providerId)).toBe(true);
   expect(r.status(providerId).state).toBe('running');
   await settled(r);
@@ -197,4 +196,47 @@ test('stop aborts a running refresh', async () => {
   expect(r.status(providerId).state).toBe('idle');
   r.start(providerId);
   expect(r.running(providerId)).toBe(false);
+});
+
+test('start while running queues exactly one more refresh, never concurrent', async () => {
+  let inFlight = 0;
+  let overlapped = false;
+  const counted = {
+    ...providers,
+    clientFor: (id: number) => {
+      const client = providers.clientFor(id);
+      return {
+        ...client,
+        xmltv: async (opts?: Parameters<typeof client.xmltv>[0]) => {
+          xmltvCalls++;
+          if (++inFlight > 1) overlapped = true;
+          try {
+            await new Promise((res) => setTimeout(res, 50));
+            return await client.xmltv(opts);
+          } finally {
+            inFlight--;
+          }
+        },
+      };
+    },
+  } as ProviderService;
+  const r = makeRunner({ providers: counted });
+  r.start(providerId);
+  r.start(providerId);
+  r.start(providerId);
+  await settled(r);
+  expect(xmltvCalls).toBe(2);
+  expect(overlapped).toBe(false);
+  expect(r.running(providerId)).toBe(false);
+});
+
+test('nothing is queued after stop', async () => {
+  const stalled = wrapped((signal) => new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason))));
+  const r = makeRunner({ providers: stalled });
+  r.start(providerId);
+  r.start(providerId);
+  await new Promise((res) => setTimeout(res, 50));
+  await r.stop();
+  expect(r.running(providerId)).toBe(false);
+  expect(xmltvCalls).toBe(1);
 });
