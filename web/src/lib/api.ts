@@ -27,5 +27,6 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiClientError(res.status, body.code ?? `HTTP_${res.status}`, body.message ?? res.statusText, body.details);
   }
   if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  const text = await res.text();
+  return (text === '' ? undefined : JSON.parse(text)) as T; // e.g. a bodiless 202
 }

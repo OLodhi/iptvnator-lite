@@ -32,3 +32,8 @@ test('api sends JSON content-type when a body is given', async () => {
   const init = f.mock.calls[0]![1] as RequestInit;
   expect(new Headers(init.headers).get('content-type')).toBe('application/json');
 });
+
+test('api returns undefined for an empty 2xx body such as 202', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 202 })));
+  expect(await api('/x', { method: 'POST' })).toBeUndefined();
+});

@@ -150,7 +150,7 @@ input {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   background: var(--surface);
   border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom);
@@ -164,6 +164,7 @@ input {
   color: var(--muted);
   text-decoration: none;
   font-weight: 600;
+  font-size: 0.85rem;
 }
 
 .tabbar a[aria-current='page'] {
@@ -189,4 +190,12 @@ video {
   color: var(--text);
   font: inherit;
   cursor: pointer;
+}
+
+/* Long-pressable rows: no iOS callout or text selection. */
+.pressable {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
 }
