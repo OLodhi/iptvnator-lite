@@ -78,7 +78,7 @@
   }
   .title {
     font-size: 0.82rem;
-    line-height: 1.2;
+    line-height: 16px;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
@@ -87,6 +87,7 @@
   }
   .sub {
     font-size: 0.75rem;
+    line-height: 16px;
     color: var(--muted);
     white-space: nowrap;
     overflow: hidden;

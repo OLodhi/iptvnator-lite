@@ -24,6 +24,7 @@
     display: flex;
     gap: 6px;
     overflow-x: auto;
+    overflow-y: hidden;
     padding: 0 10px 4px;
     scroll-snap-type: x proximity;
     scroll-padding: 0 10px;

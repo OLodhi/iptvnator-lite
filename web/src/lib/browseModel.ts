@@ -18,7 +18,7 @@ export function browseSections(view: BrowseView): Section[] {
 }
 
 export const POSTER_GUTTER = 12;
-const POSTER_CAPTION = 46;
+const POSTER_CAPTION = 58;
 
 /** Height of one poster-grid row: a 2:3 poster in a third of `gridWidth`, plus caption and gap. */
 export function posterRowHeight(gridWidth: number, columns = 3): number {
@@ -42,7 +42,7 @@ export function hueFor(name: string): number {
 export function newCategoriesBanner(view: BrowseView): { text: string; href: string } | null {
   if (view.newCategories <= 0) return null;
   return {
-    text: `${view.newCategories} new categories — review`,
+    text: `${view.newCategories} new ${view.newCategories === 1 ? "category" : "categories"} — review`,
     href: `/settings/categories?kind=${view.kind satisfies Kind}`,
   };
 }

@@ -36,7 +36,10 @@ export default defineConfig({
         plugins: [svelte({ hot: false })],
         resolve: {
           conditions: ['browser'],
-          alias: { $lib: fileURLToPath(new URL('./web/src/lib', import.meta.url)) },
+          alias: {
+            $lib: fileURLToPath(new URL('./web/src/lib', import.meta.url)),
+            '$app/state': fileURLToPath(new URL('./web/src/lib/testing/appState.ts', import.meta.url)),
+          },
         },
         test: {
           name: 'web',

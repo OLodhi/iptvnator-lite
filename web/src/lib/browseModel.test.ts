@@ -42,8 +42,8 @@ test('empty sections are omitted', () => {
 });
 
 test('poster rows fit a 2:3 poster plus caption', () => {
-  expect(posterRowHeight(360)).toBe(Math.ceil(108 * 1.5) + 46 + 12);
-  expect(posterRowHeight(0)).toBe(46 + 12);
+  expect(posterRowHeight(360)).toBe(Math.ceil(108 * 1.5) + 58 + 12);
+  expect(posterRowHeight(0)).toBe(58 + 12);
 });
 
 test('placeholder tiles: initials from the first two words and a stable hue', () => {
@@ -59,5 +59,6 @@ test('the banner appears only when there are new categories', () => {
     text: '3 new categories — review',
     href: '/settings/categories?kind=movie',
   });
+  expect(newCategoriesBanner({ ...full('live'), newCategories: 1 })?.text).toBe('1 new category — review');
   expect(newCategoriesBanner(full('live'))).toBeNull();
 });

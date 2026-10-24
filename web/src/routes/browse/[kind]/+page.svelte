@@ -5,6 +5,7 @@
   import { messageFor } from '$lib/messages';
   import { browse, hideCategory, pin, unpin } from '$lib/me';
   import { browseSections, newCategoriesBanner } from '$lib/browseModel';
+  import { rememberCategories } from '$lib/categoryNames';
   import { longpress } from '$lib/actions/longpress';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
   import Artwork from '$lib/components/Artwork.svelte';
@@ -32,7 +33,10 @@
     error = '';
     try {
       const result = await browse(k);
-      if (mine === seq) view = result;
+      if (mine === seq) {
+        view = result;
+        rememberCategories(result);
+      }
     } catch (err) {
       if (mine === seq) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
@@ -53,24 +57,27 @@
       : `/watch?item=${item.id}${episode ? `&episode=${encodeURIComponent(episode)}` : ''}`;
 
   async function act(run: () => Promise<void>) {
+    let failure = '';
     try {
       await run();
     } catch (err) {
-      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      failure = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     }
-    await load(kind, true);
+    await load(kind, true); // clears `error`, so report the failure afterwards
+    if (failure) error = failure;
   }
 
-  const sheetActions = $derived(
-    sheetFor
-      ? [
-          sheetFor.pinned
-            ? { label: 'Unpin', run: () => void act(() => unpin(sheetFor!.id)) }
-            : { label: 'Pin', run: () => void act(() => pin(sheetFor!.id)) },
-          { label: 'Hide', danger: true, run: () => void act(() => hideCategory(sheetFor!.id)) },
-        ]
-      : [],
-  );
+  // The sheet clears `sheetFor` before running an action, so each action captures its own target.
+  const sheetActions = $derived.by(() => {
+    const target = sheetFor;
+    if (!target) return [];
+    return [
+      target.pinned
+        ? { label: 'Unpin', run: () => void act(() => unpin(target.id)) }
+        : { label: 'Pin', run: () => void act(() => pin(target.id)) },
+      { label: 'Hide', danger: true, run: () => void act(() => hideCategory(target.id)) },
+    ];
+  });
 </script>
 
 <h1>{titles[kind] ?? 'Browse'}</h1>
@@ -225,7 +232,7 @@
   }
   .poster-slot {
     width: 124px;
-    height: 228px;
+    height: 238px;
   }
   .hint {
     text-align: center;

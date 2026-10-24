@@ -4,7 +4,8 @@
   import type { CatalogItem, Kind, Page } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
-  import { favourite, unfavourite } from '$lib/me';
+  import { browse, favourite, unfavourite } from '$lib/me';
+  import { categoryName, rememberCategories } from '$lib/categoryNames';
   import { posterRowHeight } from '$lib/browseModel';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
   import ChannelRow from '$lib/components/ChannelRow.svelte';
@@ -18,25 +19,56 @@
   let loading = $state(true);
   let error = $state('');
   let gridWidth = $state(0);
+  let loadFailed = $state(false);
   let sheetFor = $state<CatalogItem | null>(null);
+  let title = $state('');
+  let seq = 0;
 
   const posterHeight = $derived(posterRowHeight(gridWidth || 360));
 
+  // Each load takes a token; a response that is no longer the latest request is dropped, so
+  // A (page 2 in flight) -> B -> back to A cannot append the old response.
   async function load(id: string, cursor: string | null) {
     if (loading && cursor) return;
+    const mine = ++seq;
     loading = true;
+    loadFailed = false;
     error = '';
     try {
       const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
       const res = await api<Page<CatalogItem>>(`/api/categories/${encodeURIComponent(id)}/items${qs}`);
-      if (id !== categoryId) return;
+      if (mine !== seq) return;
       items = cursor ? [...items, ...res.items] : res.items;
       nextCursor = res.nextCursor;
     } catch (err) {
-      if (id === categoryId) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      if (mine !== seq) return;
+      loadFailed = true;
+      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
-      if (id === categoryId) loading = false;
+      if (mine === seq) loading = false;
     }
+  }
+
+  // The tab screen remembers category names; a deep link falls back to one browse request.
+  $effect(() => {
+    const id = Number(categoryId);
+    const k = kind;
+    title = categoryName(id) ?? '';
+    if (title) return;
+    let cancelled = false;
+    browse(k)
+      .then((view) => {
+        rememberCategories(view);
+        if (!cancelled) title = categoryName(id) ?? '';
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  function retry() {
+    void load(categoryId, items.length > 0 ? nextCursor : null);
   }
 
   $effect(() => {
@@ -65,22 +97,21 @@
 
   const hrefFor = (item: CatalogItem) => (item.kind === 'series' ? `/series/${item.id}` : `/watch?item=${item.id}`);
 
-  const sheetActions = $derived(
-    sheetFor
-      ? [
-          {
-            label: sheetFor.favourite ? 'Unfavourite' : 'Favourite',
-            run: () => void toggleFavourite(sheetFor!),
-          },
-        ]
-      : [],
-  );
+  // The sheet clears `sheetFor` before running an action, so the action captures its own target.
+  const sheetActions = $derived.by(() => {
+    const target = sheetFor;
+    if (!target) return [];
+    return [{ label: target.favourite ? 'Unfavourite' : 'Favourite', run: () => void toggleFavourite(target) }];
+  });
 </script>
 
 <p class="back"><a href={`/browse/${kind}`}>‹ Back</a></p>
 
+{#if title}<h1>{title}</h1>{/if}
+
 {#if error}
   <p class="error" role="alert">{error}</p>
+  {#if loadFailed}<button type="button" class="primary retry" onclick={retry}>Retry</button>{/if}
 {/if}
 
 <div class="body" bind:clientWidth={gridWidth}>
@@ -127,6 +158,9 @@
     align-items: center;
     min-height: var(--row-height);
     text-decoration: none;
+  }
+  .retry {
+    margin-bottom: 12px;
   }
   .more-hint {
     text-align: center;
