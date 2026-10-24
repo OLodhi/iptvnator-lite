@@ -28,6 +28,8 @@ const jobs: Job[] = [
   },
   { output: 'movie.mkv', args: [...sources(60), ...h264] },
   { output: 'movie.mp4', args: [...sources(60), ...h264, '-movflags', '+faststart'] },
+  // The same without +faststart: the moov atom is at the end, so reading it takes a seek to the end.
+  { output: 'movie-moov-end.mp4', args: [...sources(60), ...h264] },
   {
     output: 'hevc.mkv',
     args: [...sources(20), '-c:v', 'libx265', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-x265-params', 'log-level=error',

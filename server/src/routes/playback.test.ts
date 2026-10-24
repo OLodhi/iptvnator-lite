@@ -564,7 +564,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   let w: World;
 
   beforeAll(async () => {
-    if (!existsSync(join(mediaDir, 'hevc.mkv'))) {
+    if (!['hevc.mkv', 'movie-moov-end.mp4'].every((f) => existsSync(join(mediaDir, f)))) {
       throw new Error('Fake media is missing. Run: npm run make-media -w @tv/fake-xtream (needs TV_FFMPEG_PATH)');
     }
     relay = await startUpstreamRelay({ log });
@@ -575,7 +575,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
           ffmpegPath: config.ffmpegPath,
           transcodeDir: config.transcodeDir,
           spawn: spawnFfmpeg(log),
-          probe: (url, userAgent) => prober.probe(url, userAgent),
+          probe: (url, userAgent, readFrom) => prober.probe(url, userAgent, readFrom),
           invalidateProbe: (url) => prober.invalidate(url),
           transcodeInterlaced: false,
           maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
@@ -838,6 +838,25 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     expect(logs.slice(logsBefore).filter((l) => l.startsWith('{"m":"direct stream:'))).toEqual([]);
   });
 
+  test('a moov-at-end MP4 starts on a one-connection provider', async () => {
+    // ffprobe has to seek to the end of the file for its moov atom while its first request is still open.
+    const catalogue = smallCatalogue();
+    catalogue.movie.items.push({ id: 4, name: '|EN| MP4 Moov At End', categoryId: '10' });
+    fake.setCatalogue(catalogue);
+    try {
+      await syncCatalogue({ db: w.db, client: w.providers.clientFor(w.providerId), providerId: w.providerId, kinds: ['movie'] });
+    } finally {
+      fake.setCatalogue(smallCatalogue());
+    }
+    const logsBefore = logs.length;
+    const movie = await playOk({ itemId: w.itemId('movie', 4), clientId: 'A' });
+    expect(movie.mode).toBe('direct');
+    const part = await w.app.inject({ url: movie.url, headers: { range: 'bytes=0-99' } });
+    expect(part.statusCode).toBe(206);
+    expect(part.rawPayload.equals(readFileSync(join(mediaDir, 'movie-moov-end.mp4')).subarray(0, 100))).toBe(true);
+    expect(logs.slice(logsBefore).filter((l) => /HTTP error 403|moov atom not found/.test(l))).toEqual([]);
+  });
+
   test('dead channel fails cleanly', async () => {
     const res = await play({ itemId: w.itemId('live', 999), clientId: 'A' });
     expect(res.statusCode).toBe(502);
@@ -994,7 +1013,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
           ffmpegPath: config.ffmpegPath,
           transcodeDir: config.transcodeDir,
           spawn: spawnFfmpeg(log),
-          probe: (url, userAgent) => prober.probe(url, userAgent),
+          probe: (url, userAgent, readFrom) => prober.probe(url, userAgent, readFrom),
           invalidateProbe: (url) => prober.invalidate(url),
           transcodeInterlaced: false,
           maxConnections: (id) => providers.account(id)?.maxConnections ?? null,

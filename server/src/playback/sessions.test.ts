@@ -570,14 +570,109 @@ describe('session manager', () => {
     await h.m.start(liveTs);
     expect(input(1)).toBe(liveTs.sourceUrl);
 
-    // HLS by its URL alone, or by ffprobe's format alone: either way it is not read through the relay.
+    // HLS by its URL alone, or by ffprobe's format alone: either way FFmpeg does not read it through the relay. HLS by
+    // its format is only known once probed (through the relay), which the session then lets go of.
     const hlsByUrl = { ...movie(3, 'C'), sourceUrl: 'http://provider.test/movie/user/secret/3.m3u8' };
     const hlsByFormat = { ...movie(4, 'D'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
     await h.m.start(hlsByUrl);
     await h.m.start(hlsByFormat);
     expect(input(2)).toBe(hlsByUrl.sourceUrl);
     expect(input(3)).toBe(hlsByFormat.sourceUrl);
+    expect(relay.register).toHaveBeenCalledTimes(2);
+    expect(relay.unregister).toHaveBeenCalledTimes(1);
+  });
+
+  test('non-HLS VOD is probed through the relay, and cached and forgotten by its provider URL', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    const probe = vi.fn(async (_url: string, _userAgent: string, _readFrom?: string) => fromCache(MKV_MOVIE));
+    h = harness({ relay, probe });
+    h.setReady(() => false);
+    const mkv = movie(1, 'A');
+    const outcome = expect(h.m.start(mkv)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+    await flush();
+    expect(probe.mock.calls).toEqual([[mkv.sourceUrl, UA, RELAY_URL]]);
+    expect(h.events).toEqual(['relay:register', 'spawn:1']); // registered before the probe; FFmpeg reads through it too
+    h.children[0]!.exit(1); // the start fails after a cached probe, which is forgotten (R34)
+    await outcome;
+    expect(h.invalidateProbe.mock.calls).toEqual([[mkv.sourceUrl]]); // relay URLs are per session: never a cache key
     expect(relay.register).toHaveBeenCalledTimes(1);
+  });
+
+  test('a direct-mode session lets go of the relay before start() resolves', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    relay.unregister.mockImplementation(async () => {
+      await delayed(100, undefined); // the relay waits for its provider request to close
+      h.events.push('relay:unregister');
+    });
+    h = harness({ relay });
+    const req = movie(2, 'A', 'mp4');
+    let resolved = false;
+    const start = h.m.start(req).then((s) => {
+      resolved = true;
+      return s;
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.events).toEqual(['relay:register']);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(60);
+    const s = await start;
+    expect(s.mode).toBe('direct');
+    expect(h.events).toEqual(['relay:register', 'relay:unregister']);
+    expect(h.probe.mock.calls).toEqual([[req.sourceUrl, UA, RELAY_URL]]);
+    expect(h.m.directSource(s.sessionId)).toEqual({ url: req.sourceUrl, userAgent: UA }); // the proxy reads the provider
+    await h.m.release(s.sessionId, 'A');
+    expect(relay.unregister).toHaveBeenCalledTimes(1);
+  });
+
+  test('live and .m3u8 sources probe the provider URL directly', async () => {
+    const relay = stubRelay(() => {});
+    const h = harness({ relay });
+    const liveM3u8 = live(1, 'A');
+    const liveTs = { ...live(2, 'B'), sourceUrl: 'http://provider.test/live/user/secret/2.ts' };
+    const movieM3u8 = { ...movie(3, 'C'), sourceUrl: 'http://provider.test/movie/user/secret/3.m3u8' };
+    for (const req of [liveM3u8, liveTs, movieM3u8]) await h.m.start(req);
+    expect(h.probe.mock.calls).toEqual([
+      [liveM3u8.sourceUrl, UA, undefined],
+      [liveTs.sourceUrl, UA, undefined],
+      [movieM3u8.sourceUrl, UA, undefined],
+    ]);
+    expect(relay.register).not.toHaveBeenCalled();
+  });
+
+  test('a source the relay cannot serve is probed from the provider instead, once, and read from there', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    // HLS behind a non-.m3u8 URL: its relative segment URLs do not resolve through the relay.
+    const probe = vi.fn(async (_url: string, _userAgent: string, readFrom?: string) => {
+      if (readFrom) throw new Error('ffprobe failed with exit code 1');
+      return fresh({ ...MKV_MOVIE, formatName: 'hls' });
+    });
+    h = harness({ relay, probe });
+    const php = { ...movie(4, 'A'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
+    await h.m.start(php);
+    expect(probe.mock.calls).toEqual([
+      [php.sourceUrl, UA, RELAY_URL],
+      [php.sourceUrl, UA, undefined],
+    ]);
+    expect(h.events).toEqual(['relay:register', 'relay:unregister', 'spawn:1']);
+    expect(argAfter(h.children[0]!.args, '-i')).toBe(php.sourceUrl);
+    expect(h.logs).toContainEqual({
+      level: 'info',
+      m: 'probe through the relay failed; probing the provider directly',
+      o: expect.objectContaining({ url: 'http://provider.test/movie/***/***/4.php' }),
+    });
+  });
+
+  test('a probe through the relay that outlasts the start deadline releases the registration', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    h = harness({ relay, probe: () => delayed(20_000, fresh(MKV_MOVIE)) });
+    const outcome = expect(h.m.start(movie(1, 'A'))).rejects.toMatchObject({ code: 'STREAM_START_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(15_100);
+    await outcome;
+    expect(h.events).toEqual(['relay:register', 'relay:unregister']);
   });
 
   test('the relay is registered once per session and released when it stops', async () => {

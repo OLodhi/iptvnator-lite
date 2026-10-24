@@ -39,7 +39,10 @@ export type SessionManagerDeps = {
   maxRestarts: number /* 3 consecutive */;
   stallTimeoutMs: number /* 20_000 without a new live segment */;
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
-  /** FFmpeg reads non-HLS VOD through it, so a seek never opens a second provider connection. Left out, it reads the provider. */
+  /**
+   * Non-HLS VOD is probed, and read by FFmpeg, through it, so neither ffprobe's seeks nor FFmpeg's ever open a second
+   * provider connection. Left out, both read the provider.
+   */
   relay?: Pick<UpstreamRelay, 'register'>;
 };
 
@@ -162,7 +165,7 @@ type Session = {
   outDir: string | null;
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
-  relayed: { url: string; unregister(): Promise<void> } | null; // what FFmpeg reads instead of sourceUrl, for the whole session
+  relayed: { url: string; unregister(): Promise<void> } | null; // what ffprobe and FFmpeg read instead of sourceUrl
   probing: Promise<void> | null; // an ffprobe that is still connected
   cachedProbes: string[]; // URLs whose probe results came from the cache (R34)
   restarts: number; // consecutive failures
@@ -487,9 +490,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   }
 
-  /** Probes `url`, tracked as a held connection, racing the start deadline; a probe error passes through as is. */
-  function probeRace(s: Session, url: string, expired: Promise<never>): Promise<ProbeResult> {
-    const probing = deps.probe(url, s.userAgent).then(({ result, cached }) => {
+  /**
+   * Probes `url` (reading it from `readFrom` if given), tracked as a held connection, racing the start deadline; a probe
+   * error passes through as is.
+   */
+  function probeRace(s: Session, url: string, expired: Promise<never>, readFrom?: string): Promise<ProbeResult> {
+    const probing = deps.probe(url, s.userAgent, readFrom).then(({ result, cached }) => {
       if (cached) s.cachedProbes.push(url);
       return result;
     });
@@ -508,6 +514,32 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (err instanceof PlaybackError) throw err; // the deadline
       log.warn({ url: redactUrl(url), err: errorText(err) }, 'probe failed');
       throw new PlaybackError('UPSTREAM_ERROR', 'The stream could not be opened');
+    }
+  }
+
+  /** Ends the session's relay registration, once the provider connection it held is closed. */
+  async function letGoOfRelay(s: Session): Promise<void> {
+    if (!s.relayed) return;
+    await s.relayed.unregister();
+    s.relayed = null; // only now: a stop meanwhile also waits for the connection to close
+  }
+
+  /**
+   * Probes the source, through the session's relay registration if it has one. A source the relay cannot serve (HLS
+   * behind a non-.m3u8 URL, whose relative segment URLs do not resolve through it) is probed from the provider
+   * instead, once, and the session no longer uses the relay.
+   */
+  async function probeSource(s: Session, expired: Promise<never>): Promise<ProbeResult> {
+    if (!s.relayed) return probeWithin(s, s.sourceUrl, expired);
+    try {
+      return await probeRace(s, s.sourceUrl, expired, s.relayed.url);
+    } catch (err) {
+      if (err instanceof PlaybackError) throw err; // the deadline
+      const url = redactUrl(s.sourceUrl);
+      log.info({ sessionId: s.id, url, err: errorText(err) }, 'probe through the relay failed; probing the provider directly');
+      await letGoOfRelay(s); // its provider request is closed before the next one opens
+      if (s.state !== 'starting') throw stoppedError();
+      return probeWithin(s, s.sourceUrl, expired);
     }
   }
 
@@ -543,7 +575,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   async function open(s: Session, fallbackUrl: string | undefined): Promise<void> {
     const deadline = startDeadline(deps.readyTimeoutMs); // probes + spawn + ready, all together
     try {
-      let probe = await probeWithin(s, s.sourceUrl, deadline.expired);
+      // Through the relay from the probe on: ffprobe seeks as FFmpeg does (to an MP4's moov atom at the end of the
+      // file, say), and a one-connection provider refuses the second request. Not for live, which never seeks, nor
+      // for HLS, which is read over one connection (-http_multiple 0) and whose relative segment URLs would not
+      // resolve through the relay.
+      if (deps.relay && s.kind !== 'live' && !isHlsUrl(s.sourceUrl)) {
+        s.relayed = deps.relay.register({ url: s.sourceUrl, userAgent: s.userAgent });
+      }
+      let probe = await probeSource(s, deadline.expired);
       if (s.state !== 'starting') throw stoppedError();
       if (fallbackUrl && finitePlaylist(s, probe)) {
         probe = await continuousInstead(s, probe, fallbackUrl, deadline.expired);
@@ -554,17 +593,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       s.durationSec = s.kind === 'live' ? null : probe.durationSec;
       if (plan.mode === 'direct') {
         s.mode = 'direct';
+        await letGoOfRelay(s); // the direct proxy holds the provider connection from here on
       } else {
+        // HLS that only its content gave away: FFmpeg reads it from the provider, like any HLS input.
+        if (s.inputFormat.includes('hls')) await letGoOfRelay(s);
+        if (s.state !== 'starting') throw stoppedError();
         s.plan = plan;
         s.outDir = join(deps.transcodeDir, s.id);
         mkdirSync(s.outDir, { recursive: true });
-        // Through the relay for the whole session. Not for live, which never seeks, nor for HLS, which is already
-        // read over one connection (-http_multiple 0) and whose relative segment URLs would not resolve through it.
-        // The probe above stays direct: it has finished before FFmpeg starts.
-        if (deps.relay && s.kind !== 'live' && !isHlsUrl(s.sourceUrl) && !s.inputFormat.includes('hls')) {
-          s.relayed = deps.relay.register({ url: s.sourceUrl, userAgent: s.userAgent });
-        }
-        launch(s, 0);
+        launch(s, 0); // through the relay, if still registered, for the whole session
         await waitUntilReady(s, deadline.expired);
       }
       if (s.state !== 'starting') throw stoppedError();

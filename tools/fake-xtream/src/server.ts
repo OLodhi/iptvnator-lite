@@ -36,7 +36,8 @@ export type RefusedRequest = { path: string; heldBy: string[] };
 // Media is mapped by stream id; the requested extension is ignored (ruling R1).
 const MEDIA: Record<'live' | 'movie' | 'series', Record<string, string>> = {
   live: { '1': 'hls/index.m3u8', '2': 'raw.ts', '3': 'mpeg2.ts' },
-  movie: { '1': 'movie.mkv', '2': 'movie.mp4', '3': 'hevc.mkv' },
+  // Movie 4 is in no built-in catalogue: tests that need its moov-at-end MP4 add it.
+  movie: { '1': 'movie.mkv', '2': 'movie.mp4', '3': 'hevc.mkv', '4': 'movie-moov-end.mp4' },
   series: { '101': 'movie.mkv', '102': 'movie.mkv', '201': 'movie.mkv' },
 };
 
@@ -290,7 +291,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
           rating: '7.0',
           added: '1600000000',
           category_id: it.categoryId,
-          container_extension: it.id === 2 ? 'mp4' : 'mkv',
+          container_extension: MEDIA.movie[String(it.id)]?.endsWith('.mp4') ? 'mp4' : 'mkv',
         }));
       case 'get_series':
         return streamArray(res, catalogue.series, (it, i) => ({

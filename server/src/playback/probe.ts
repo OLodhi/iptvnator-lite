@@ -22,7 +22,11 @@ export type ProbeResult = {
 export type ProbeOutcome = { result: ProbeResult; cached: boolean };
 
 export interface Prober {
-  probe(url: string, userAgent: string): Promise<ProbeOutcome>;
+  /**
+   * Probes the stream at `url`. `readFrom`, when given, is where ffprobe actually reads it (a session's relay URL);
+   * the result is still cached, logged and forgotten by `url`, as a relay URL lasts only as long as its session.
+   */
+  probe(url: string, userAgent: string, readFrom?: string): Promise<ProbeOutcome>;
   /** Forgets any cached result for `url`, so its next probe runs ffprobe again (R34). */
   invalidate(url: string): void;
 }
@@ -72,8 +76,8 @@ export function parseFfprobe(json: unknown): ProbeResult {
 
 /** Wraps a probe so each result is logged as one line: container, video, audio, duration and whether it was cached (URL redacted). */
 export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] {
-  return async (url, userAgent) => {
-    const outcome = await probe(url, userAgent);
+  return async (url, userAgent, readFrom) => {
+    const outcome = await probe(url, userAgent, readFrom);
     const { result: r, cached } = outcome;
     const v = r.video;
     log.info(
@@ -172,12 +176,12 @@ export function createProber(deps: {
 
   // Rows are keyed by the redacted URL, so no credentials are stored.
   return {
-    async probe(url, userAgent) {
+    async probe(url, userAgent, readFrom) {
       const key = redactUrl(url);
       const cached = fromCache(key);
       if (cached) return { result: cached, cached: true };
 
-      const result = parseFfprobe(await runFfprobe(url, userAgent));
+      const result = parseFfprobe(await runFfprobe(readFrom ?? url, userAgent));
       putStmt.run(key, JSON.stringify(result), now());
       return { result, cached: false };
     },

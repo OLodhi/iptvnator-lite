@@ -106,17 +106,19 @@ describe('withProbeLog', () => {
   });
 });
 
-/** A stand-in for ffprobe that prints `json` and exits 0, counting its runs. */
+/** A stand-in for ffprobe that prints `json` and exits 0, counting its runs and keeping their arguments. */
 function fakeFfprobe(json: unknown) {
   let runs = 0;
-  const spawnFn = (() => {
+  const args: string[][] = [];
+  const spawnFn = ((_cmd: string, a: string[]) => {
     runs++;
+    args.push(a);
     const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), kill: () => true });
     child.stdout.on('end', () => child.emit('close', 0));
     setImmediate(() => child.stdout.end(JSON.stringify(json)));
     return child;
   }) as unknown as typeof spawn;
-  return { spawnFn, runs: () => runs };
+  return { spawnFn, runs: () => runs, args };
 }
 
 describe('createProber', () => {
@@ -142,6 +144,23 @@ describe('createProber', () => {
     expect(ffprobe.runs()).toBe(3);
     expect(await prober.probe(other, 'ua')).toEqual({ result, cached: true });
     prober.invalidate('http://provider.test/movie/someuser/secret/999.mkv'); // nothing cached: a no-op
+  });
+
+  test('reads from readFrom when given, but caches and forgets by the url', async () => {
+    const db = openDb(':memory:');
+    const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+    const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+    const relayUrl = (n: number) => `http://127.0.0.1:9/0f8fad5b-d9cb-469f-a165-7086772895${n}e/7.mkv`;
+
+    expect((await prober.probe(url, 'ua', relayUrl(1))).cached).toBe(false);
+    expect(ffprobe.args[0]!.at(-1)).toBe(relayUrl(1));
+    expect(ffprobe.args[0]).not.toContain(url);
+    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(url)]);
+    // The next session's relay URL is a new one, and the cached result is still found.
+    expect((await prober.probe(url, 'ua', relayUrl(2))).cached).toBe(true);
+    prober.invalidate(url);
+    expect((await prober.probe(url, 'ua', relayUrl(3))).cached).toBe(false);
+    expect(ffprobe.runs()).toBe(2);
   });
 
   test.each(['{"formatName":"hls",', 'null', '[]', '{"formatName":"hls"}'])(
