@@ -944,6 +944,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
     }
 
     // A frozen stream fails here: 3 s segments give about 19 new ones in 60 s. (MEDIA-SEQUENCE stays 0 with a 100-segment list.)
+    expect(highest[0]).toBeGreaterThanOrEqual(0); // the first poll already listed a segment
     expect(highest.at(-1)! - highest[0]!).toBeGreaterThanOrEqual(10);
     expect(lines.filter((l) => /restarting|reconnecting/.test(l))).toEqual([]);
     expect(w.sessions.touch(sessionId, 'A')).toBe(true); // still alive

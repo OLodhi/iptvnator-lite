@@ -194,7 +194,7 @@ describe('paced fake xtream', () => {
     await vi_waitFor(() => paced.openMediaConnections() === 0);
   });
 
-  test('loops a file back to its start, and ends an empty one', async () => {
+  test('loops a file back to its start, and ends an empty one', { timeout: 15_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'tv-fake-wrap-'));
     try {
       const file = Buffer.alloc(188 * 50);
@@ -218,7 +218,9 @@ describe('paced fake xtream', () => {
         expect(all.subarray(0, file.length).equals(file)).toBe(true);
         expect(all.subarray(file.length, file.length * 2).equals(file)).toBe(true); // the bytes after the wrap
 
-        const empty = await fetch(`${tiny.url}/live/u/p/3.ts`);
+        await vi_waitFor(() => tiny.openMediaConnections() === 0); // the one slot frees on the server's close
+        const empty = await fetch(`${tiny.url}/live/u/p/3.ts`, { signal: AbortSignal.timeout(3000) }); // a hang fails, not stalls
+        expect(empty.status).toBe(200);
         expect((await empty.arrayBuffer()).byteLength).toBe(0);
       } finally {
         await tiny.close();
