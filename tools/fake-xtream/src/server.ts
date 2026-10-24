@@ -16,6 +16,8 @@ export type FakeXtreamOptions = {
   catalogue?: FakeCatalogue;
   mediaDir: string;
   maxConnections?: number;
+  /** Serve live like a real provider: TS streamed at its real bitrate and looped forever, HLS as a sliding window. */
+  paced?: boolean;
 };
 
 export type FakeXtream = {
@@ -45,6 +47,13 @@ const CONTENT_TYPES: Record<string, string> = {
 
 const CHUNK = 1000;
 
+// Paced live: the generated live media are 30 s long (make-media), so bitrate = size / 30 s.
+const MEDIA_SECONDS = 30;
+const PACE_MS = 100;
+const HLS_SEGMENT_MS = 2000;
+const HLS_SEGMENTS = 15; // real segment files in media/hls
+const HLS_WINDOW = 6;
+
 export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtream> {
   const username = opts.username ?? 'u';
   const password = opts.password ?? 'p';
@@ -53,6 +62,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
   let catalogue = opts.catalogue ?? smallCatalogue();
   const open = new Map<ServerResponse, string>(); // open media responses → request path
   const refused: RefusedRequest[] = [];
+  const startedAt = Date.now();
   let baseUrl = '';
 
   const server: Server = createServer((req, res) => {
@@ -76,6 +86,11 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
       return serveMedia(req, res, join(mediaDir, ...file.split('/')), as);
     }
     const seg = /^\/hls\/([^/]+)$/.exec(path);
+    const liveSeg = opts.paced ? /^seg-live-(\d+)\.ts$/.exec(seg?.[1] ?? '') : null;
+    if (liveSeg) {
+      const name = `seg${String(Number(liveSeg[1]) % HLS_SEGMENTS).padStart(3, '0')}.ts`;
+      return serveMedia(req, res, join(mediaDir, 'hls', name), 'file');
+    }
     if (seg) return serveMedia(req, res, join(mediaDir, 'hls', basename(seg[1]!)), 'file');
     return status(res, 404);
   }
@@ -118,7 +133,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     const type = CONTENT_TYPES[file.split('.').pop() ?? ''] ?? 'application/octet-stream';
 
     if (as === 'playlist') {
-      const text = (await readFile(file, 'utf8'))
+      const text = opts.paced ? pacedPlaylist() : (await readFile(file, 'utf8'))
         .split(/\r?\n/)
         .map((l) => (l && !l.startsWith('#') ? `/hls/${basename(l)}` : l))
         .join('\n');
@@ -128,6 +143,10 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     }
     if (as === 'live') {
       res.writeHead(200, { 'content-type': type });
+      if (opts.paced) {
+        await paceLive(res, file, size);
+        return;
+      }
       const stream = createReadStream(file);
       pipeline(stream, res, () => stream.destroy());
       return;
@@ -159,6 +178,43 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
     res.writeHead(code, headers);
     const stream = createReadStream(file, { start, end });
     pipeline(stream, res, () => stream.destroy());
+  }
+
+  /** Writes `bitrate / 10` bytes every 100 ms, restarting at the file's start at the end, until the client goes. */
+  async function paceLive(res: ServerResponse, file: string, size: number): Promise<void> {
+    const data = await readFile(file);
+    const perTick = Math.max(188, Math.round(size / MEDIA_SECONDS / (1000 / PACE_MS)));
+    let offset = 0;
+    const timer = setInterval(() => {
+      if (res.destroyed) return clearInterval(timer);
+      if (res.writableNeedDrain) return; // the client is behind; don't pile up
+      let left = perTick;
+      while (left > 0) {
+        const n = Math.min(left, data.length - offset);
+        res.write(data.subarray(offset, offset + n));
+        offset = (offset + n) % data.length;
+        left -= n;
+      }
+    }, PACE_MS);
+    res.once('close', () => clearInterval(timer));
+  }
+
+  /** A live sliding-window playlist: no ENDLIST, the newest segment advances with wall-clock time. */
+  function pacedPlaylist(): string {
+    const newest = HLS_WINDOW - 1 + Math.floor((Date.now() - startedAt) / HLS_SEGMENT_MS);
+    const first = newest - (HLS_WINDOW - 1);
+    const lines = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      `#EXT-X-TARGETDURATION:${HLS_SEGMENT_MS / 1000}`,
+      `#EXT-X-MEDIA-SEQUENCE:${first}`,
+      `#EXT-X-DISCONTINUITY-SEQUENCE:${first > 0 ? Math.floor((first - 1) / HLS_SEGMENTS) : 0}`,
+    ];
+    for (let seq = first; seq <= newest; seq++) {
+      if (seq > 0 && seq % HLS_SEGMENTS === 0) lines.push('#EXT-X-DISCONTINUITY'); // the loop wraps here
+      lines.push(`#EXTINF:${(HLS_SEGMENT_MS / 1000).toFixed(6)},`, `/hls/seg-live-${seq}.ts`);
+    }
+    return lines.join('\n') + '\n';
   }
 
   async function api(url: URL, res: ServerResponse): Promise<void> {
@@ -328,6 +384,7 @@ if (import.meta.main) {
     port: flag('--port') ? Number(flag('--port')) : undefined,
     mediaDir: flag('--media') ?? defaultMedia,
     catalogue: generated ?? smallCatalogue(),
+    paced: args.includes('--paced'),
   });
   console.log(`fake xtream listening on ${fake.url} (username u, password p)`);
 }

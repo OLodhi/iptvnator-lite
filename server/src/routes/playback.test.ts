@@ -76,7 +76,7 @@ function collectingLog(lines: LogLine[]) {
 /** A fresh app with the fake provider added and its small catalogue synced. */
 async function makeWorld(
   makeSessions: (db: Db, providers: ProviderService) => SessionManager,
-  opts: { config?: Config; log?: Log } = {},
+  opts: { config?: Config; log?: Log; providerUrl?: string } = {},
 ): Promise<World> {
   const config = opts.config ?? testConfig();
   const db = openDb(':memory:');
@@ -89,7 +89,7 @@ async function makeWorld(
   const app = await buildApp({ config, db, providers, catalogue, seriesInfo, sync, sessions, curation, personal: createPersonalService({ db, now: Date.now }), log: opts.log });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const origin = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-  const providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
+  const providerId = (await providers.add({ kind: 'xtream', serverUrl: opts.providerUrl ?? fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });
   const lookup = db.prepare('SELECT id FROM items WHERE provider_id = ? AND kind = ? AND remote_id = ?').pluck();
   const itemId = (kind: string, remoteId: number) => {
@@ -877,3 +877,74 @@ function drain(res: IncomingMessage): Promise<number> {
     res.resume();
   });
 }
+
+// A real provider streams a live channel endlessly, in real time. The paced fake does the same, so a long
+// viewing shows what the session's stall watchdog, restarts and segment cleanup do over time.
+describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a paced provider', () => {
+  const LIVE_LIST_SIZE = 100; // -hls_list_size for live (server/src/playback/ffmpegArgs.ts)
+  const config = testConfig();
+  const lines: string[] = [];
+  const log = {
+    info: (o: object, m: string) => void lines.push(JSON.stringify({ m, ...o })),
+    warn: (o: object, m: string) => void lines.push(JSON.stringify({ m, ...o })),
+  };
+  let pacedFake: FakeXtream;
+  let w: World;
+
+  beforeAll(async () => {
+    pacedFake = await startFakeXtream({ mediaDir, catalogue: smallCatalogue(), paced: true });
+    w = await makeWorld(
+      (db, providers) => {
+        const prober = createProber({ ffprobePath: config.ffprobePath, db });
+        return createSessionManager({
+          ffmpegPath: config.ffmpegPath,
+          transcodeDir: config.transcodeDir,
+          spawn: spawnFfmpeg(log),
+          probe: (url, userAgent) => prober.probe(url, userAgent),
+          invalidateProbe: (url) => prober.invalidate(url),
+          transcodeInterlaced: false,
+          maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
+          isReady: defaultIsReady,
+          now: Date.now,
+          liveIdleMs: 20_000,
+          vodIdleMs: 60_000,
+          readyTimeoutMs: 10_000,
+          stallTimeoutMs: 20_000,
+          maxRestarts: 3,
+          log,
+        });
+      },
+      { config, log, providerUrl: pacedFake.url },
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await w?.sessions.stopAll();
+    await w?.app.close();
+    await pacedFake?.close();
+  });
+
+  test('a paced live channel plays for 60 s with no restarts and bounded disk', { timeout: 90_000 }, async () => {
+    const res = await playBody(w, { itemId: w.itemId('live', 1), clientId: 'A' });
+    expect(res.statusCode, res.body).toBe(200);
+    const { sessionId, url } = res.json() as PlayResponse;
+
+    // Watch like a player: refetch the playlist and heartbeat every few seconds for a minute.
+    const until = Date.now() + 60_000;
+    while (Date.now() < until) {
+      const pl = await w.app.inject(url);
+      expect(pl.statusCode).toBe(200);
+      expect(pl.body).not.toContain('#EXT-X-ENDLIST');
+      const beat = await w.app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/A/heartbeat` });
+      expect(beat.statusCode).toBe(204);
+      await new Promise((ok) => setTimeout(ok, 3_000));
+    }
+
+    expect(lines.filter((l) => /restarting|reconnecting/.test(l))).toEqual([]);
+    expect(w.sessions.touch(sessionId, 'A')).toBe(true); // still alive
+    const segments = readdirSync(join(config.transcodeDir, sessionId)).filter((f) => /^seg_\d+\.ts$/.test(f));
+    expect(segments.length).toBeGreaterThan(5);
+    expect(segments.length).toBeLessThanOrEqual(LIVE_LIST_SIZE + 2);
+    await w.sessions.release(sessionId, 'A');
+  });
+});
