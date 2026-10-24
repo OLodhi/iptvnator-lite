@@ -674,6 +674,19 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
     }
   });
 
+  test('reads an HLS live input over one connection, so a strict one-stream provider never refuses it', async () => {
+    const refusedBefore = fake.refusedMediaRequests().length;
+    const r = await playOk({ itemId: w.itemId('live', 1), clientId: 'A' });
+    // Keep the session alive while FFmpeg reads the whole (finite, ~30 s) input, which it does within seconds.
+    const until = Date.now() + 7_000;
+    while (Date.now() < until) {
+      expect((await w.app.inject(r.url)).statusCode).toBe(200);
+      await new Promise((ok) => setTimeout(ok, 250));
+    }
+    const refused = fake.refusedMediaRequests().slice(refusedBefore).filter((x) => contentOf(x.path) === 'live/1');
+    expect(refused).toEqual([]);
+  });
+
   test('switches from a direct movie that is still streaming to live on a one-connection provider', async () => {
     const movie = await playOk({ itemId: w.itemId('movie', 2), clientId: 'A' });
     expect(movie.mode).toBe('direct');

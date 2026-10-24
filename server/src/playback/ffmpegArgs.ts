@@ -9,6 +9,8 @@ export type FfmpegInput = {
   startAtSec: number;
   outDir: string;
   startNumber: number;
+  /** ffprobe's format_name for the input, when known. A `.m3u8` URL can serve plain TS (providers do). */
+  inputFormat?: string;
 };
 
 const SEGMENT_SECONDS = 3;
@@ -21,6 +23,14 @@ const LIVE_LIST_SIZE = 100;
 // beside the playlist and keeps the playlist reference relative. Windows accepts '/'.
 function outPath(dir: string, name: string): string {
   return join(dir, name).replaceAll('\\', '/');
+}
+
+function isHlsUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith('.m3u8');
+  } catch {
+    return false;
+  }
 }
 
 export function buildFfmpegArgs(input: FfmpegInput): string[] {
@@ -36,6 +46,11 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
     args.push('-user_agent', userAgent);
     args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '10');
   }
+  // The HLS demuxer fetches segments over several HTTP connections by default; a one-connection
+  // provider refuses the extra one. hls-demuxer option, so only for HLS inputs.
+  // Unknown or non-HLS content behind a .m3u8 URL must not get it: FFmpeg rejects the option.
+  const hlsContent = input.inputFormat === undefined || input.inputFormat.includes('hls');
+  if (remote && isHlsUrl(url) && hlsContent) args.push('-http_multiple', '0');
   if (startAtSec > 0) args.push('-ss', String(startAtSec));
   args.push('-i', url);
 

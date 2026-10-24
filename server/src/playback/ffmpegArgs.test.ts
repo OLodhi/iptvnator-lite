@@ -108,6 +108,26 @@ test('file inputs get no reconnect flags', () => {
   has(a, '-i', '/tmp/x.ts');
 });
 
+test('HLS inputs open one connection at a time (http_multiple 0, before -i)', () => {
+  for (const url of ['http://h/live/u/p/1.m3u8', 'http://h/live/u/p/1.M3U8', 'http://h/live/u/p/1.m3u8?token=x']) {
+    const a = buildFfmpegArgs({ ...base, url, plan: copyTs });
+    has(a, '-http_multiple', '0');
+    expect(a.indexOf('-http_multiple'), url).toBeLessThan(a.indexOf('-i'));
+  }
+});
+
+test('a .m3u8 URL that serves something other than HLS gets no http_multiple (FFmpeg rejects the option)', () => {
+  const url = 'http://h/live/u/p/2.m3u8';
+  expect(buildFfmpegArgs({ ...base, url, plan: copyTs, inputFormat: 'mpegts' })).not.toContain('-http_multiple');
+  has(buildFfmpegArgs({ ...base, url, plan: copyTs, inputFormat: 'hls,applehttp' }), '-http_multiple', '0');
+});
+
+test('other inputs get no http_multiple', () => {
+  for (const url of ['http://h/live/u/p/1.ts', 'http://h/movie/u/p/1.mkv', 'http://h/movie/u/p/1.mp4', '/tmp/x.ts', '/tmp/x.m3u8']) {
+    expect(buildFfmpegArgs({ ...base, url, plan: copyTs }), url).not.toContain('-http_multiple');
+  }
+});
+
 const ffmpeg = process.env.TV_FFMPEG_PATH;
 
 test.skipIf(!ffmpeg)('real ffmpeg writes the fmp4 init segment inside outDir and references it relatively', () => {

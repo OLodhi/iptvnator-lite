@@ -113,6 +113,7 @@ type Session = {
   mode: 'hls' | 'direct';
   durationSec: number | null;
   plan: HlsPlan | null;
+  inputFormat: string; // ffprobe's format_name for the source
   outDir: string | null;
   child: ChildLike | null;
   exit: Promise<number | null> | null; // resolves when the current child exits
@@ -253,6 +254,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       url: s.sourceUrl,
       userAgent: s.userAgent,
       plan: s.plan!,
+      inputFormat: s.inputFormat,
       live: s.kind === 'live',
       startAtSec: s.startAtSec,
       outDir: s.outDir!,
@@ -389,6 +391,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const probe = await probeWithin(s, deadline.expired);
       if (s.state !== 'starting') throw stoppedError();
       const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
+      s.inputFormat = probe.formatName;
       s.durationSec = s.kind === 'live' ? null : probe.durationSec;
       if (plan.mode === 'direct') {
         s.mode = 'direct';
@@ -488,6 +491,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       mode: 'hls',
       durationSec: null,
       plan: null,
+      inputFormat: '',
       outDir: null,
       child: null,
       exit: null,
