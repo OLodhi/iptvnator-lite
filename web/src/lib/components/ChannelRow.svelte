@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { CatalogItem } from '@tv/shared';
   import { longpress } from '$lib/actions/longpress';
+  import { watchHref } from '$lib/watch/links';
   import Artwork from './Artwork.svelte';
   import NowLine from './NowLine.svelte';
 
@@ -15,7 +16,7 @@
 <div class="channel-row">
   <a
     class="main"
-    href={`/watch?item=${item.id}`}
+    href={watchHref(item.id)}
     draggable="false"
     use:longpress={{ onLongPress: () => onLongPress?.(item) }}
   >

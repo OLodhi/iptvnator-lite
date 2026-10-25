@@ -238,6 +238,22 @@ test('channel cell plays live', async () => {
   expect(cell.textContent).toContain('Ch 7');
 });
 
+test('a category or favourites guide keeps its category in the channel and catch-up links', async () => {
+  guide.grid.mockResolvedValue(page([row(7, [prog(71, at(-60), at(-30), 'Old'), prog(70, at(-30), at(20), 'On')])]));
+  mountIt({ meta: meta(), filter: 'category:4' });
+  await vi.waitFor(() => expect(document.querySelector('a.channel')).not.toBeNull());
+  expect(document.querySelector('a.channel')!.getAttribute('href')).toBe('/watch?item=7&cat=4');
+  expect([...document.querySelectorAll('a.block')].map((a) => a.getAttribute('href'))).toEqual([
+    `/watch?item=7&from=${at(-60)}&to=${at(-30)}&title=Old&cat=4`,
+    '/watch?item=7&cat=4',
+  ]);
+  unmount(app!);
+  app = undefined;
+  mountIt({ meta: meta(), filter: 'favourites' });
+  await vi.waitFor(() => expect(document.querySelector('a.channel')).not.toBeNull());
+  expect(document.querySelector('a.channel')!.getAttribute('href')).toBe('/watch?item=7&cat=favourites');
+});
+
 test('long-pressing a channel cell hands over its channel and swallows the tap', async () => {
   const onLongPress = vi.fn();
   guide.grid.mockResolvedValue(page([row(6), row(7, [prog(70, at(-10), at(20))])]));

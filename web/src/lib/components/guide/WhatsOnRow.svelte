@@ -13,14 +13,18 @@
     /** How far through the programme on now is, 0 to 1; without one there is no bar. */
     progress?: number | null;
     action: 'play' | 'catchup' | null;
+    /** The channel on screen, under the watch page's video: highlighted, and marked Playing in place of the action. */
+    playing?: boolean;
     onLongPress?: (item: CatalogItem) => void;
   };
-  let { item, href, title, sub, progress = null, action, onLongPress }: Props = $props();
+  let { item, href, title, sub, progress = null, action, playing = false, onLongPress }: Props = $props();
 </script>
 
 <svelte:element
   this={href ? 'a' : 'div'}
   class="entry"
+  class:playing
+  aria-current={playing ? 'true' : undefined}
   {href}
   draggable="false"
   use:longpress={{ onLongPress: () => onLongPress?.(item) }}
@@ -33,7 +37,9 @@
       <span class="bar" aria-hidden="true"><span style:width="{Math.round(progress * 100)}%"></span></span>
     {/if}
   </span>
-  {#if action === 'play'}
+  {#if playing}
+    <span class="action tag">Playing</span>
+  {:else if action === 'play'}
     <span class="action play" aria-label="Watch live">▶</span>
   {:else if action === 'catchup'}
     <span class="action catchup">↺ Catch up</span>
@@ -101,6 +107,15 @@
   }
   .catchup {
     color: #ff9f43;
+    font-weight: 600;
+  }
+  .entry.playing {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .tag {
+    color: var(--accent);
+    font-size: 0.75rem;
     font-weight: 600;
   }
 </style>

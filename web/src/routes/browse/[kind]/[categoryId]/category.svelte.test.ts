@@ -225,7 +225,7 @@ test("a live category offers What's on and Grid: Grid first, and What's on lists
   // Every channel, each with what's on now underneath; a tap watches it live.
   await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 1', 'Ch 2']));
   expect(texts('.entry .sub')).toEqual(['No guide information', 'No guide information']);
-  expect([...document.querySelectorAll('a.entry')].map((a) => a.getAttribute('href'))).toEqual(['/watch?item=1', '/watch?item=2']);
+  expect([...document.querySelectorAll('a.entry')].map((a) => a.getAttribute('href'))).toEqual(['/watch?item=1&cat=4', '/watch?item=2&cat=4']);
   expect(guide.whatsOn).not.toHaveBeenCalled();
   viewButton('Grid').click();
   flushSync();

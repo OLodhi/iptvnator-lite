@@ -9,15 +9,18 @@
 
   type Props = {
     state: PlayerState;
-    mode: 'live' | 'catchup' | 'vod';
+    /** Catch-up counts from the programme's start, so its bar is the VOD one. */
+    mode: 'live' | 'vod';
     title: string;
     subtitle?: string;
     /** "Next · 21:00 Title", shown under the bar when fullscreen. */
     nextLabel?: string;
     fullscreen: boolean;
-    /** The programme the live and catch-up bar spans. */
+    /** The programme the live bar spans, in epoch seconds. */
     programme?: { startSec: number; stopSec: number } | null;
-    /** The probed length of a movie or episode (the element's own duration grows while remuxing). */
+    /** Live: added to the stream's own time to put it on the programme's clock. */
+    liveShiftSec?: number;
+    /** The probed length of a movie, episode or catch-up programme (the element's own duration grows while remuxing). */
     durationSec?: number | null;
     /** True while a sheet is open: the controls stay up. */
     holding?: boolean;
@@ -29,18 +32,22 @@
     onSkip: (delta: number) => void;
     onSeek: (sec: number) => void;
     onGoLive?: () => void;
+    /** Catch-up of a programme still airing: "● Watch live" beside the bar. */
+    onWatchLive?: () => void;
     onChannel?: (dir: -1 | 1) => void;
     onPip: () => void;
     onAirPlay: () => void;
     onToggleMute: () => void;
-    onFullscreen: () => void;
+    /** ⤢ in and out of fullscreen; without it there is no ⤢ (sideways, where turning the phone back is the way out). */
+    onFullscreen?: () => void;
     onTracks: (kind: 'audio' | 'subtitles') => void;
     onBack: () => void;
   };
 
   let {
-    state: player, mode, title, subtitle, nextLabel, fullscreen, programme = null, durationSec = null, holding = false, covered = false,
-    caps, tracks, onTogglePlay, onSkip, onSeek, onGoLive, onChannel, onPip, onAirPlay, onToggleMute, onFullscreen, onTracks, onBack,
+    state: player, mode, title, subtitle, nextLabel, fullscreen, programme = null, liveShiftSec = 0, durationSec = null, holding = false,
+    covered = false, caps, tracks, onTogglePlay, onSkip, onSeek, onGoLive, onWatchLive, onChannel, onPip, onAirPlay, onToggleMute,
+    onFullscreen, onTracks, onBack,
   }: Props = $props();
 
   let visible = $state(true);
@@ -93,7 +100,9 @@
 
   $effect(() => () => clearTimeout(flashTimer));
 
-  const scrubWindow = $derived(player.window);
+  // The live bar is the programme on the clock; positions and seeks stay in the stream's own time.
+  const shift = $derived(mode === 'live' ? liveShiftSec : 0);
+  const scrubWindow = $derived(player.window && { startSec: player.window.startSec + shift, endSec: player.window.endSec + shift });
   const vodTotal = $derived(durationSec ?? player.durationSec);
 </script>
 
@@ -103,8 +112,9 @@
   {#if flash}<div class="flash">{flash}</div>{/if}
 
   <div class="top">
-    <button type="button" class="vbtn" aria-label="Back" onclick={onBack}>‹</button>
+    <!-- Upright, the page's top bar has the one Back. -->
     {#if fullscreen}
+      <button type="button" class="vbtn" aria-label="Back" onclick={onBack}>‹</button>
       <div class="title-row">
         <b>{title}</b>
         {#if subtitle}<span class="sub">{subtitle}</span>{/if}
@@ -117,13 +127,16 @@
     <button type="button" class="vbtn" aria-label={player.muted ? 'Unmute' : 'Mute'} onclick={onToggleMute}>{player.muted ? '🔇' : '🔊'}</button>
   </div>
 
+  <!-- Outside the transport, so it stays usable while the next channel starts. -->
+  {#if fullscreen && onChannel}
+    <div class="channels">
+      <button type="button" class="vbtn" aria-label="Next channel" onclick={() => onChannel(1)}>▲</button>
+      <span aria-hidden="true">CH</span>
+      <button type="button" class="vbtn" aria-label="Previous channel" onclick={() => onChannel(-1)}>▼</button>
+    </div>
+  {/if}
+
   <div class="center">
-    {#if fullscreen && onChannel}
-      <div class="channels">
-        <button type="button" class="vbtn" aria-label="Next channel" onclick={() => onChannel(1)}>▲</button>
-        <button type="button" class="vbtn" aria-label="Previous channel" onclick={() => onChannel(-1)}>▼</button>
-      </div>
-    {/if}
     <button type="button" class="vbtn" aria-label="Back 10 seconds" onclick={() => onSkip(-SKIP_SEC)}>↺10</button>
     <button type="button" class="vbtn big" aria-label={player.paused ? 'Play' : 'Pause'} onclick={onTogglePlay}>{player.paused ? '▶' : '❚❚'}</button>
     <button type="button" class="vbtn" aria-label="Forward 10 seconds" onclick={() => onSkip(SKIP_SEC)}>10↻</button>
@@ -133,17 +146,20 @@
     <div class="bar-row">
       <div class="bar">
         <ScrubBar
-          mode={mode === 'vod' ? 'vod' : 'live'}
-          positionSec={player.positionSec}
+          {mode}
+          positionSec={player.positionSec + shift}
           durationSec={vodTotal}
           window={scrubWindow}
-          {programme}
-          {onSeek}
+          programme={mode === 'live' ? programme : null}
+          onSeek={(sec) => onSeek(sec - shift)}
           onScrubbing={(active) => (scrubbing = active)}
         />
       </div>
       {#if mode === 'live' && onGoLive}<LivePill behindSec={player.behindSec} onGoLive={onGoLive} />{/if}
-      <button type="button" class="vbtn" aria-label="Fullscreen" onclick={onFullscreen}>⤢</button>
+      {#if onWatchLive}<button type="button" class="watch-live" onclick={onWatchLive}>● Watch live</button>{/if}
+      {#if onFullscreen}
+        <button type="button" class="vbtn" aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} onclick={onFullscreen}>⤢</button>
+      {/if}
     </div>
     {#if fullscreen && (nextLabel || tracks.audio || tracks.subtitles)}
       <div class="extras">
@@ -251,10 +267,32 @@
   }
   .channels {
     position: absolute;
-    left: 0;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 10px;
+    color: var(--muted);
+    font-size: 11px;
+    pointer-events: none;
+  }
+  .channels > button {
+    pointer-events: auto;
+  }
+  .watch-live {
+    flex: none;
+    padding: 4px 10px;
+    border: 0;
+    border-radius: 999px;
+    background: #4a5160;
+    color: #dfe3ea;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
   }
   .bar-row {
     display: flex;

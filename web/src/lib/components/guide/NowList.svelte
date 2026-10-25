@@ -5,6 +5,7 @@
   import { messageFor } from '$lib/messages';
   import { grid } from '$lib/guide';
   import { formatClock, progress, sharedClock } from '$lib/guide/time';
+  import { filterCategory, watchHref } from '$lib/watch/links';
   import VirtualList from '$lib/components/VirtualList.svelte';
   import WhatsOnRow from './WhatsOnRow.svelte';
 
@@ -14,10 +15,12 @@
     label: string;
     /** A press held on a row. */
     onLongPress?: (item: CatalogItem) => void;
+    /** The channel playing on the watch page, whose row is highlighted. */
+    currentItemId?: number;
     /** IANA zone; the app leaves it unset to use the device zone. */
     tz?: string;
   };
-  let { filter, label, onLongPress, tz }: Props = $props();
+  let { filter, label, onLongPress, currentItemId, tz }: Props = $props();
 
   const clock = sharedClock();
   // The grid route's default page size, and its largest.
@@ -133,6 +136,8 @@
   // The rows follow the shared clock, so one whose programme ends moves on to the next without a request.
   const nowSec = $derived(Math.floor(clock.nowMs / 1000));
   const emptyText = $derived(filter === 'favourites' ? 'No favourite channels yet' : `No channels${label ? ` in ${label}` : ''}`);
+  // The watch page keeps the category, for its list and channel up and down.
+  const category = $derived(filterCategory(filter));
 </script>
 
 {#if error}
@@ -148,11 +153,12 @@
     {@const on = r.programmes.find((p) => p.startSec <= nowSec && nowSec < p.stopSec)}
     <WhatsOnRow
       item={r.item}
-      href={`/watch?item=${r.item.id}`}
+      href={watchHref(r.item.id, { category })}
       title={r.item.displayName}
       sub={on ? `${on.title} · until ${formatClock(on.stopSec, tz)}` : r.hasGuide ? 'Nothing on now' : 'No guide information'}
       progress={on ? progress(on.startSec, on.stopSec, clock.nowMs) : null}
       action="play"
+      playing={r.item.id === currentItemId}
       {onLongPress}
     />
   {/snippet}

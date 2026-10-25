@@ -40,7 +40,7 @@
 
 <div class="states">
   {#if view.kind === 'starting'}
-    <div class="starting">
+    <div class="starting" role="status">
       {#if name}
         <span class="art" class:poster><Artwork {name} src={artwork} fit={poster ? 'cover' : 'contain'} /></span>
       {/if}
@@ -60,7 +60,9 @@
       <button type="button" class="btn" onclick={onRestart}>Tap to restart</button>
     </div>
   {:else if view.kind === 'stopped'}
-    <button type="button" class="card tap" onclick={onRestart}>Playback stopped. Tap to restart.</button>
+    <div role="alert">
+      <button type="button" class="card tap" onclick={onRestart}>Playback stopped. Tap to restart.</button>
+    </div>
   {:else}
     <button type="button" class="btn" onclick={onPlay}>▶ Tap to play</button>
   {/if}

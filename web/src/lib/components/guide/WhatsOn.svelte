@@ -5,6 +5,7 @@
   import { messageFor } from '$lib/messages';
   import { whatsOn } from '$lib/guide';
   import { formatClock, progress, segmentQuery, sharedClock, type Segment, type SegmentQuery } from '$lib/guide/time';
+  import { filterCategory, watchHref } from '$lib/watch/links';
   import VirtualList from '$lib/components/VirtualList.svelte';
   import NowList from './NowList.svelte';
   import WhatsOnRow from './WhatsOnRow.svelte';
@@ -93,11 +94,13 @@
   const where = $derived(label ? ` in ${label}` : '');
   const emptyText = $derived(segment === 'earlier' ? `Nothing earlier${where}` : `Nothing on${where} ${segment === 'tonight' ? 'tonight' : 'tomorrow'}`);
 
+  // The watch page keeps the category, for its list and channel up and down.
+  const category = $derived(filterCategory(filter));
   const hrefFor = (e: WhatsOnEntry): string | null =>
     e.live
-      ? `/watch?item=${e.item.id}`
+      ? watchHref(e.item.id, { category })
       : e.catchup
-        ? `/watch?item=${e.item.id}&from=${e.programme.startSec}&to=${e.programme.stopSec}&title=${encodeURIComponent(e.programme.title)}`
+        ? watchHref(e.item.id, { category, catchup: e.programme })
         : null;
 </script>
 

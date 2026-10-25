@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
-import type { CatalogItem, PlayResponse, SavedPosition } from '@tv/shared';
+import type { CatalogItem, GridRow, PlayResponse, Programme, SavedPosition, WatchContext } from '@tv/shared';
 
 const route = vi.hoisted(() => ({ url: new URL('http://localhost/watch?item=7&t=600') }));
 const api = vi.hoisted(() => vi.fn());
+/** The channel list, its order, the next programme and the category, answered apart from each test's play and item answers. */
+const side = vi.hoisted(() => vi.fn());
 const attachStream = vi.hoisted(() => vi.fn((_v: HTMLVideoElement, _url: string, _opts: object) => ({ destroy: () => {}, showSubtitles: () => {} })));
-const heartbeats = vi.hoisted(() => [] as { onGone: () => void }[]);
+const heartbeats = vi.hoisted(() => [] as { sessionId: string; onGone: () => void; stopped: boolean }[]);
 type BeforeNav = (nav: { to: { url: URL } | null }) => void;
 type AfterNav = (nav: { from: { url: URL } | null; to: { url: URL } | null }) => void;
 const nav = vi.hoisted(() => ({
@@ -28,26 +30,37 @@ vi.mock('$app/navigation', () => ({
   afterNavigate: (cb: AfterNav) => (nav.after = cb),
 }));
 vi.mock('hls.js', () => ({ default: {} }));
-vi.mock('$lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api')>()), api }));
-const me = vi.hoisted(() => ({ positions: vi.fn(async (_id: number): Promise<SavedPosition[]> => []), reportPosition: vi.fn(async () => {}) }));
+vi.mock('$lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api')>()),
+  api: (path: string, init?: RequestInit) => (/^\/api\/(guide\/|items\/\d+\/context)/.test(path) ? side(path, init) : api(path, init)),
+}));
+const me = vi.hoisted(() => ({
+  positions: vi.fn(async (_id: number): Promise<SavedPosition[]> => []),
+  reportPosition: vi.fn(async () => {}),
+  favourite: vi.fn(async (_id: number) => {}),
+  unfavourite: vi.fn(async (_id: number) => {}),
+}));
 vi.mock('$lib/me', () => me);
 const released = vi.hoisted(() => vi.fn(async (_s: string, _c: string) => {}));
 vi.mock('$lib/session', () => ({
   releaseSession: released,
-  startHeartbeat: vi.fn((_s: string, _c: string, opts: { onGone: () => void }) => {
-    heartbeats.push(opts);
-    return () => {};
+  startHeartbeat: vi.fn((sessionId: string, _c: string, opts: { onGone: () => void }) => {
+    const beat = { sessionId, onGone: opts.onGone, stopped: false };
+    heartbeats.push(beat);
+    return () => {
+      beat.stopped = true;
+    };
   }),
 }));
 vi.mock('$lib/clientId', () => ({ getClientId: () => 'cid' }));
 vi.mock('$lib/player/attach', () => ({ attachStream }));
-const sys = vi.hoisted(() => ({ pip: false, airplay: false }));
+const sys = vi.hoisted(() => ({ pip: false, airplay: false, setNowPlaying: vi.fn() }));
 vi.mock('$lib/player/system', () => ({
   canPip: () => sys.pip,
   canAirPlay: () => sys.airplay,
   togglePip: async () => {},
   showAirPlay: () => {},
-  setNowPlaying: () => {},
+  setNowPlaying: sys.setNowPlaying,
 }));
 
 import { ApiClientError } from '$lib/api';
@@ -57,19 +70,41 @@ let app: ReturnType<typeof mount> | undefined;
 // 22:13:20 UTC on 1 January 1970: during liveItem's News at Ten (22:00–23:00).
 const NOW_MS = 80_000_000;
 
+/** What the side routes answer: the channels of any guide filter, in order, the guide's programmes, and the item's category. */
+const guide = { channels: [] as number[], programmes: [] as Programme[], context: { categoryId: null, label: null } as WatchContext };
+const channelRow = (id: number): GridRow => ({
+  item: { id, kind: 'live', displayName: `Ch ${id}`, logoUrl: null, catchupDays: 0, favourite: false } as CatalogItem,
+  programmes: [],
+  hasGuide: false,
+});
+async function answerSide(path: string) {
+  const url = new URL(path, 'http://localhost');
+  if (url.pathname === '/api/guide/grid') return { items: guide.channels.map(channelRow), nextCursor: null };
+  if (url.pathname === '/api/guide/programmes') return { [url.searchParams.get('items')!]: guide.programmes };
+  return guide.context;
+}
+const sideCalls = (pathname: string) => side.mock.calls.map(([p]) => new URL(p as string, 'http://localhost')).filter((u) => u.pathname === pathname);
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW_MS);
   api.mockReset();
+  side.mockReset().mockImplementation(answerSide);
+  guide.channels = [];
+  guide.programmes = [];
+  guide.context = { categoryId: null, label: null };
   attachStream.mockClear();
   heartbeats.length = 0;
-  nav.goto.mockClear();
+  nav.goto.mockReset();
   nav.after = undefined;
   released.mockClear();
   me.positions.mockClear();
   me.reportPosition.mockClear();
+  me.favourite.mockReset();
+  me.unfavourite.mockReset();
   sys.pip = false;
   sys.airplay = false;
+  sys.setNowPlaying.mockClear();
   // jsdom has no media playback.
   vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
@@ -172,6 +207,10 @@ const liveItem = (over: Partial<CatalogItem> = {}) =>
 const movieItem = (over: Partial<CatalogItem> = {}) =>
   ({ id: 5, kind: 'movie', displayName: 'Heat', logoUrl: '/api/logos/5', catchupDays: null, ...over }) as CatalogItem;
 const buttonWith = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes(text));
+function enterFullscreen() {
+  (document.querySelector('.controls [aria-label="Fullscreen"]') as HTMLElement).click();
+  flushSync();
+}
 /** The programme on now under the video: "title start–stop", or null when there is none. */
 function onNowLine(): string | null {
   const el = document.querySelector('.on-now');
@@ -232,6 +271,7 @@ test('Starting shows the logo and name', async () => {
   api.mockImplementation((path: string) => (path === '/api/play' ? new Promise(() => {}) : Promise.resolve(liveItem())));
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(states()?.textContent).toContain('Starting BBC One…'));
+  expect(states()!.querySelector('[role="status"]')?.textContent).toContain('Starting BBC One…');
   expect(states()!.querySelector('img')?.getAttribute('src')).toBe('/api/logos/7');
   expect(states()!.querySelector('button')).toBeNull();
 });
@@ -324,7 +364,7 @@ test('⤢ fills the screen and returns, without restarting playback', async () =
   (document.querySelector('.controls [aria-label="Fullscreen"]') as HTMLElement).click();
   flushSync();
   expect(fullscreen()).toBe(true);
-  (document.querySelector('.controls [aria-label="Fullscreen"]') as HTMLElement).click();
+  (document.querySelector('.controls [aria-label="Exit fullscreen"]') as HTMLElement).click();
   flushSync();
   expect(fullscreen()).toBe(false);
   expect(video()).toBe(v);
@@ -448,7 +488,9 @@ test('Back with history calls history.back()', async () => {
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
   nav.after!({ from: { url: new URL('http://localhost/browse/live/3') }, to: { url: route.url } });
+  expect(document.querySelector('.controls [aria-label="Back"]')).toBeNull(); // upright, the top bar has the one Back
   buttonWith('‹ Back')!.click();
+  enterFullscreen();
   (document.querySelector('.controls [aria-label="Back"]') as HTMLElement).click();
   expect(back).toHaveBeenCalledTimes(2);
   expect(nav.goto).not.toHaveBeenCalled();
@@ -463,6 +505,7 @@ test('Back without history goes to the category guide for live', async () => {
   nav.after?.({ from: null, to: { url: route.url } }); // opened from outside the app
   buttonWith('‹ Back')!.click();
   expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/3', { replaceState: true });
+  enterFullscreen();
   (document.querySelector('.controls [aria-label="Back"]') as HTMLElement).click();
   expect(nav.goto).toHaveBeenCalledTimes(2);
   expect(back).not.toHaveBeenCalled();
@@ -560,6 +603,7 @@ test('catch-up restart after Playback stopped keeps the place in the same progra
   v.currentTime = 630; // 10:30 into the programme
   heartbeats[0]!.onGone();
   flushSync();
+  expect(document.querySelector('[role=alert]')?.textContent).toBe('Playback stopped. Tap to restart.');
   buttonWith('Tap to restart')!.click();
   await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
   // The window starts on the minute, 10:00 in, and is seeked the rest of the way.
@@ -770,4 +814,270 @@ test('a catch-up label without a title has no double separator', async () => {
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
   expect(catchupLine()).toBe('↺ Catch-up · 01:00–02:00');
+});
+
+// Live and catch-up: the category's channels under the video, channel up and down, the live window and the lock screen.
+
+const nowListHrefs = () => [...document.querySelectorAll('.switch a.entry')].map((a) => a.getAttribute('href'));
+const infoText = () => document.querySelector('.info')!.textContent!.replace(/\s+/g, ' ').trim();
+const actionTexts = () => [...document.querySelectorAll('.actions .act')].map((b) => b.textContent?.trim());
+const gridFilters = () => new Set(sideCalls('/api/guide/grid').map((u) => u.searchParams.get('filter')));
+const control = (label: string) => document.querySelector(`.controls [aria-label="${label}"]`) as HTMLElement | null;
+const prog = (id: number, title: string, startSec: number, stopSec: number): Programme => ({
+  id, title, subtitle: null, description: null, category: null, startSec, stopSec,
+});
+
+test('live list uses cat, then context', async () => {
+  guide.channels = [5, 7, 9];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(nowListHrefs()).toEqual(['/watch?item=5&cat=3', '/watch?item=7&cat=3', '/watch?item=9&cat=3']));
+  expect(gridFilters()).toEqual(new Set(['category:3']));
+  expect(document.querySelector('.switch .entry.playing .title')?.textContent).toBe('Ch 7');
+  // The category's name comes from the server.
+  expect(sideCalls('/api/items/7/context').map((u) => u.search)).toEqual(['?category=3']);
+  await vi.waitFor(() => expect(infoText()).toContain('Sports · channel 2 of 3'));
+  expect(document.querySelector('.lhead')?.textContent).toContain('3 channels');
+  buttonWith('Guide')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/3');
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // Opened without a category (from Search, a deep link): the item's first visible live category.
+  side.mockClear();
+  guide.context = { categoryId: 4, label: 'News' };
+  route.url = new URL('http://localhost/watch?item=7');
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(nowListHrefs()).toEqual(['/watch?item=5&cat=4', '/watch?item=7&cat=4', '/watch?item=9&cat=4']));
+  expect(sideCalls('/api/items/7/context').map((u) => u.search)).toEqual(['']);
+  expect(gridFilters()).toEqual(new Set(['category:4']));
+  await vi.waitFor(() => expect(infoText()).toContain('News · channel 2 of 3'));
+  buttonWith('Guide')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/4');
+});
+
+test('▲ ▼ go to the neighbours in category order', async () => {
+  guide.channels = [9, 7, 4];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(infoText()).toContain('channel 2 of 3'));
+  enterFullscreen();
+  control('Next channel')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=4&cat=3');
+  control('Previous channel')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3');
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // The last channel has no next. Opened without a category, up and down keep to the one the list shows.
+  nav.goto.mockClear();
+  route.url = new URL('http://localhost/watch?item=4');
+  serve(liveRes, liveItem({ id: 4 }));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(infoText()).toContain('channel 3 of 3'));
+  enterFullscreen();
+  control('Next channel')!.click();
+  expect(nav.goto).not.toHaveBeenCalled();
+  control('Previous channel')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+});
+
+test('three quick ▲ taps end with one session for the last channel; earlier sessions are released', async () => {
+  guide.channels = [6, 7, 8, 9, 10, 11];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  nav.goto.mockImplementation(async (url: string) => go(`http://localhost${url}`));
+  const session = (id: number): PlayResponse => ({ ...liveRes, sessionId: `s${id}`, url: `/api/sessions/s${id}/cid/index.m3u8` });
+  const answers = new Map<number, (r: PlayResponse) => void>();
+  api.mockImplementation((path: string, init?: RequestInit) => {
+    if (path !== '/api/play') return Promise.resolve(liveItem({ id: Number(path.split('/').pop()) }));
+    const { itemId } = JSON.parse(init!.body as string) as { itemId: number };
+    if (itemId === 7) return Promise.resolve(session(7));
+    return new Promise<PlayResponse>((resolve) => answers.set(itemId, resolve));
+  });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  await vi.waitFor(() => expect(infoText()).toContain('channel 2 of 6'));
+  enterFullscreen();
+
+  // Each tap lands before the channel tapped to has started.
+  control('Next channel')!.click();
+  control('Next channel')!.click();
+  control('Next channel')!.click();
+  expect(playCalls().map((c) => bodyOf(c).itemId)).toEqual([7, 8, 9, 10]);
+  // The playing channel was let go before the next one was asked for.
+  expect(released.mock.calls).toEqual([['s7', 'cid']]);
+  expect(released.mock.invocationCallOrder[0]).toBeLessThan(api.mock.invocationCallOrder[api.mock.calls.indexOf(playCalls()[1]!)]!);
+
+  // The answers land out of order: the superseded sessions are released, and only the last channel plays.
+  answers.get(9)!(session(9));
+  answers.get(8)!(session(8));
+  answers.get(10)!(session(10));
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(released).toHaveBeenCalledTimes(3));
+  expect(attachStream.mock.calls[1]![1]).toBe('/api/sessions/s10/cid/index.m3u8');
+  expect(released.mock.calls.map(([s]) => s).sort()).toEqual(['s7', 's8', 's9']);
+  expect(heartbeats.filter((b) => !b.stopped).map((b) => b.sessionId)).toEqual(['s10']);
+  expect(route.url.search).toBe('?item=10&cat=3');
+  expect(fullscreen()).toBe(true);
+});
+
+test('live pill jumps to the window end', async () => {
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
+  // Live, with ten minutes buffered, watched 3:20 behind the live edge.
+  const v = video();
+  Object.defineProperty(v, 'duration', { configurable: true, get: () => Infinity });
+  Object.defineProperty(v, 'seekable', { configurable: true, get: () => ({ length: 1, start: () => 0, end: () => 600 }) });
+  v.currentTime = 400;
+  playing(v);
+  const pill = control('Go to live')!;
+  expect(pill.textContent?.trim()).toBe('● −3:20');
+  // The bar is the programme, 22:00–23:00, with the buffered ten minutes ending now (22:13:20).
+  const slider = document.querySelector('.controls [role="slider"]')!;
+  expect([slider.getAttribute('aria-valuemin'), slider.getAttribute('aria-valuemax')]).toEqual(['79200', '82800']);
+  expect(slider.getAttribute('aria-valuenow')).toBe('79800');
+  pill.click();
+  expect(v.currentTime).toBe(600);
+});
+
+test('catch-up shows Watch live for an airing programme', async () => {
+  guide.channels = [5, 7];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  // News at Ten from its start, while it is still on: the bar ends at now, 13:20 in.
+  route.url = new URL('http://localhost/watch?item=7&from=79200&to=82800&title=News%20at%20Ten&cat=3');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  expect(document.querySelector('.controls [role="slider"]')!.getAttribute('aria-valuemax')).toBe('800');
+  expect(control('Go to live')).toBeNull();
+  const pill = document.querySelector('.controls .watch-live') as HTMLElement;
+  expect(pill.textContent?.trim()).toBe('● Watch live');
+  pill.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+  expect(actionTexts()).toEqual(['★Favourite', '●Watch live', '▦Guide', '⋯More']);
+  // The category's channels below; a row plays live.
+  await vi.waitFor(() => expect(nowListHrefs()).toEqual(['/watch?item=5&cat=3', '/watch?item=7&cat=3']));
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // A programme that has ended: the bar is all of it, and Watch live is an action only.
+  nav.goto.mockClear();
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News&cat=3');
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  playing(video());
+  expect(document.querySelector('.controls [role="slider"]')!.getAttribute('aria-valuemax')).toBe('3600');
+  expect(document.querySelector('.controls .watch-live')).toBeNull();
+  buttonWith('Watch live')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+});
+
+test('media session gets channel, programme and previous/next', async () => {
+  guide.channels = [5, 7, 9];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(sys.setNowPlaying.mock.lastCall?.[1]).toHaveProperty('nexttrack'));
+  const [meta, actions] = sys.setNowPlaying.mock.lastCall! as [object, Record<string, () => void>];
+  expect(meta).toEqual({ title: 'BBC One', artist: 'News at Ten', artworkUrl: '/api/logos/7' });
+  expect(Object.keys(actions).sort()).toEqual(['nexttrack', 'pause', 'play', 'previoustrack']);
+  actions.nexttrack!();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3');
+  actions.previoustrack!();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=5&cat=3');
+  playing(video());
+  actions.pause!();
+  expect(vi.mocked(HTMLMediaElement.prototype.pause)).toHaveBeenCalledTimes(1);
+  actions.play!();
+  expect(mediaPlay()).toHaveBeenCalledTimes(2); // autoplay, then the lock screen's play
+  unmount(app);
+  app = undefined;
+  expect(sys.setNowPlaying).toHaveBeenLastCalledWith(null, {});
+});
+
+test('Next is the first programme after the one on now, and is refetched with the on-now line', async () => {
+  fakeTimeouts();
+  guide.programmes = [prog(1, 'News at Ten', 79200, 82800), prog(3, 'Late Film', 86400, 90000), prog(2, 'Film', 82800, 86400)];
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.querySelector('.info .next')?.textContent).toBe('Next · 23:00 Film'));
+  const asked = sideCalls('/api/guide/programmes');
+  expect(asked).toHaveLength(1);
+  expect(Object.fromEntries(asked[0]!.searchParams)).toEqual({ items: '7', from: '80000', to: String(80000 + 6 * 3600) });
+  enterFullscreen();
+  expect(document.querySelector('.controls .next')?.textContent).toBe('Next · 23:00 Film');
+
+  // News at Ten ends: the on-now line moves on to Film, and Next to what follows it.
+  serve(liveRes, liveItem({ now: { title: 'Film', startSec: 82800, stopSec: 86400 } }));
+  await vi.advanceTimersByTimeAsync(82_800_000 - Date.now());
+  await vi.waitFor(() => expect(document.querySelector('.controls .next')?.textContent).toBe('Next · 00:00 Late Film'));
+  expect(sideCalls('/api/guide/programmes')).toHaveLength(2);
+});
+
+test('★ Favourite toggles the channel, and goes back if the server refuses', async () => {
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
+  const fav = () => buttonWith('Favourite')!;
+  expect(fav().getAttribute('aria-pressed')).toBe('false');
+  fav().click();
+  flushSync();
+  expect(me.favourite).toHaveBeenCalledWith(7);
+  expect(fav().getAttribute('aria-pressed')).toBe('true');
+  me.unfavourite.mockRejectedValueOnce(new Error('offline'));
+  fav().click();
+  flushSync();
+  expect(me.unfavourite).toHaveBeenCalledWith(7);
+  expect(fav().getAttribute('aria-pressed')).toBe('false');
+  await vi.waitFor(() => expect(fav().getAttribute('aria-pressed')).toBe('true'));
+});
+
+test('turning the phone takes over from ⤢, which is not offered sideways', async () => {
+  const screen = fakeScreen();
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  enterFullscreen();
+  expect(fullscreen()).toBe(true);
+  screen.rotate(true);
+  expect(fullscreen()).toBe(true);
+  expect(document.querySelector('.controls [aria-label$="ullscreen"]')).toBeNull();
+  screen.rotate(false);
+  expect(fullscreen()).toBe(false); // upright again is the upright page, not the earlier ⤢
+  expect(control('Fullscreen')).not.toBeNull();
+  expect(playCalls()).toHaveLength(1);
+});
+
+test('the More sheet closes when turning the phone leaves nothing in it', async () => {
+  fakeTimeouts();
+  const screen = fakeScreen();
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
+  buttonWith('More')!.click();
+  flushSync();
+  const sheet = () => document.querySelector('[role="dialog"][aria-label="More"]');
+  expect(sheet()?.textContent).toContain('Full screen'); // Favourite, From start and Guide fill the row
+  screen.rotate(true);
+  expect(sheet()).toBeNull();
+  expect(buttonWith('More')).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(controlsHidden()).toBe(true); // nothing holds the controls up any more
 });

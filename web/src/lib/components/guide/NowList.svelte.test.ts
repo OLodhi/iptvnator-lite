@@ -38,7 +38,7 @@ afterEach(() => {
   Reflect.deleteProperty(document, 'visibilityState');
 });
 
-const mountIt = (props: { filter: string; label: string; onLongPress?: (item: CatalogItem) => void }) => {
+const mountIt = (props: { filter: string; label: string; onLongPress?: (item: CatalogItem) => void; currentItemId?: number }) => {
   app = mount(NowList, { target: document.body, props: { ...props, tz: 'UTC' } });
   flushSync();
 };
@@ -85,7 +85,8 @@ test('a tap watches the channel live, and a long-press hands the channel over an
   guide.grid.mockResolvedValue(page(row(1), row(2, { programmes: [], hasGuide: false })));
   mountIt({ filter: 'category:4', label: 'Sports', onLongPress });
   await vi.waitFor(() => expect(document.querySelectorAll('.entry')).toHaveLength(2));
-  expect([...document.querySelectorAll('a.entry')].map((a) => a.getAttribute('href'))).toEqual(['/watch?item=1', '/watch?item=2']);
+  // The watch page keeps the category, for its list and channel up and down.
+  expect([...document.querySelectorAll('a.entry')].map((a) => a.getAttribute('href'))).toEqual(['/watch?item=1&cat=4', '/watch?item=2&cat=4']);
   expect([...document.querySelectorAll('.entry .play')].map((e) => e.getAttribute('aria-label'))).toEqual(['Watch live', 'Watch live']);
   const unguided = document.querySelectorAll<HTMLElement>('.entry')[1]!;
   unguided.dispatchEvent(new MouseEvent('pointerdown', { button: 0, bubbles: true }));
@@ -95,6 +96,19 @@ test('a tap watches the channel live, and a long-press hands the channel over an
   const click = new MouseEvent('click', { bubbles: true, cancelable: true });
   unguided.dispatchEvent(click);
   expect(click.defaultPrevented).toBe(true); // a long-press does not also open the watch page
+});
+
+test('currentItemId highlights Playing', async () => {
+  guide.grid.mockResolvedValue(page(row(1), row(2), row(3)));
+  mountIt({ filter: 'favourites', label: 'Favourites', currentItemId: 2 });
+  await vi.waitFor(() => expect(document.querySelectorAll('.entry')).toHaveLength(3));
+  const entries = [...document.querySelectorAll<HTMLElement>('.entry')];
+  expect(entries.map((e) => e.classList.contains('playing'))).toEqual([false, true, false]);
+  expect(entries.map((e) => e.getAttribute('aria-current'))).toEqual([null, 'true', null]);
+  expect(entries[1]!.querySelector('.tag')?.textContent).toBe('Playing');
+  expect(entries[1]!.querySelector('.play')).toBeNull();
+  expect(texts('.entry .tag')).toEqual(['Playing']);
+  expect(entries.map((e) => e.getAttribute('href'))).toEqual(['/watch?item=1&cat=favourites', '/watch?item=2&cat=favourites', '/watch?item=3&cat=favourites']);
 });
 
 test('pages on scroll end', async () => {

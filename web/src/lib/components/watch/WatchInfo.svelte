@@ -10,9 +10,13 @@
     item: CatalogItem | null;
     onNow: NowProgramme | null;
     catchup: CatchupWindow | null;
+    /** Where the channel sits in the list below: "Sports · channel 4 of 85". */
+    where?: string | null;
+    /** Live: "Next · 21:00 Title". */
+    next?: string | null;
   };
 
-  let { kind, item, onNow, catchup }: Props = $props();
+  let { kind, item, onNow, catchup, where = null, next = null }: Props = $props();
 
   const clock = sharedClock();
   const fraction = $derived(onNow ? progress(onNow.startSec, onNow.stopSec, clock.nowMs) : 0);
@@ -31,7 +35,10 @@
     {#if item}
       <div class="chan">
         <span class="logo"><Artwork name={item.displayName} src={item.logoUrl} fit="contain" /></span>
-        <span class="chname">{item.displayName}</span>
+        <span class="names">
+          <span class="chname">{item.displayName}</span>
+          {#if where}<span class="where">{where}</span>{/if}
+        </span>
       </div>
     {/if}
     {#if kind === 'catchup'}
@@ -48,6 +55,7 @@
     {:else if item && !item.now}
       <p class="none">No guide information</p>
     {/if}
+    {#if kind === 'live' && next}<p class="next">{next}</p>{/if}
   {:else if item}
     <p class="prog title">{item.displayName}</p>
   {/if}
@@ -73,13 +81,30 @@
     overflow: hidden;
     background: var(--surface-2);
   }
-  .chname {
+  .names {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .chname,
+  .where {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .chname {
     font-weight: 700;
     font-size: 15px;
+  }
+  .where {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .next {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
   }
   .prog {
     margin: 12px 0 6px;

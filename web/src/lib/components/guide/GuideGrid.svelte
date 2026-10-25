@@ -6,6 +6,7 @@
   import { grid, programmes } from '$lib/guide';
   import { formatClock, sharedClock } from '$lib/guide/time';
   import { CHANNEL_COL, PAGE_SEC, ROW_HEIGHT, SLOT_MIN, initialWindow, layoutProgrammes, offsetPx, type Block } from '$lib/guide/layout';
+  import { filterCategory, watchHref } from '$lib/watch/links';
   import { longpress } from '$lib/actions/longpress';
   import Artwork from '$lib/components/Artwork.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
@@ -215,13 +216,15 @@
     setScroll(offsetPx(Math.floor(untrack(() => clock.nowMs) / 1000) - 1800, windowFrom));
   });
 
+  // The watch page keeps the category, for its list and channel up and down.
+  const category = $derived(filterCategory(filter));
+
   // The server's catch-up rule: a channel with catch-up days, and a programme that started within them.
   function hrefFor(item: CatalogItem, b: Block, now: number): string | null {
-    if (b.state === 'now') return `/watch?item=${item.id}`;
+    if (b.state === 'now') return watchHref(item.id, { category });
     const days = item.catchupDays ?? 0;
     if (b.state !== 'past' || days <= 0 || b.programme.startSec < now - days * DAY) return null;
-    const p = b.programme;
-    return `/watch?item=${item.id}&from=${p.startSec}&to=${p.stopSec}&title=${encodeURIComponent(p.title)}`;
+    return watchHref(item.id, { category, catchup: b.programme });
   }
 </script>
 
@@ -250,7 +253,7 @@
           <div class="lane-row">
             <a
               class="channel"
-              href={`/watch?item=${r.item.id}`}
+              href={watchHref(r.item.id, { category })}
               draggable="false"
               aria-label={`Watch ${r.item.displayName} live`}
               use:longpress={{ onLongPress: () => onLongPress?.(r.item) }}

@@ -74,8 +74,9 @@ test('catch-up rows link with from and to; future rows do not link', async () =>
   segment('Earlier').click();
   await vi.waitFor(() => expect(document.body.textContent).toContain('Show 2'));
   const links = [...document.querySelectorAll('a')].map((a) => a.getAttribute('href'));
-  expect(links).toContain(`/watch?item=1&from=1000&to=2000&title=${encodeURIComponent('Late & Live')}`);
-  expect(links).toContain('/watch?item=3');
+  // The watch page keeps the category, for its list and channel up and down.
+  expect(links).toContain(`/watch?item=1&from=1000&to=2000&title=${encodeURIComponent('Late & Live')}&cat=4`);
+  expect(links).toContain('/watch?item=3&cat=4');
   expect(links.some((h) => h?.includes('item=2'))).toBe(false);
   expect(document.body.textContent).toContain('↺ Catch up');
   expect(document.body.textContent).toContain('Ch 3 · until 12:10');
