@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { page } from '$app/state';
-  import type { CatalogItem, GuideMeta, Kind, Page } from '@tv/shared';
+  import type { CatalogItem, GuideMeta, GuideView, Kind, Page } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { browse, favourite, unfavourite } from '$lib/me';
-  import { guideMeta } from '$lib/guide';
+  import { guideMeta, saveGuidePrefs } from '$lib/guide';
   import { categoryName, rememberCategories } from '$lib/categoryNames';
   import { posterRowHeight } from '$lib/browseModel';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
@@ -13,6 +13,7 @@
   import PosterCell from '$lib/components/PosterCell.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
   import GuideGrid from '$lib/components/guide/GuideGrid.svelte';
+  import WhatsOn from '$lib/components/guide/WhatsOn.svelte';
 
   /** In place of a live category id: Live's Favourites row opens the favourites guide here. */
   const FAVOURITES = 'favourites';
@@ -23,6 +24,10 @@
   const filter = $derived(categoryId === FAVOURITES ? 'favourites' : `category:${categoryId}`);
   let items = $state<CatalogItem[]>([]);
   let meta = $state<GuideMeta | null>(null);
+  /** The guide's view, shared by every live category and the favourites; saved with the guide prefs. */
+  let view = $state<GuideView>('grid');
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let savePending = false;
   let nextCursor = $state<string | null>(null);
   let loading = $state(true);
   let error = $state('');
@@ -70,7 +75,10 @@
     error = '';
     try {
       const m = await guideMeta();
-      if (mine === seq) meta = m;
+      if (mine !== seq) return;
+      // The remembered view opens the page; a category switch on the page keeps the one on screen.
+      if (!meta) view = m.prefs.view;
+      meta = m;
     } catch (err) {
       if (mine !== seq) return;
       loadFailed = true;
@@ -120,6 +128,23 @@
     void load(categoryId, nextCursor);
   }
 
+  // Saved half a second after the last change, or on leaving the page. The prefs' filter no longer drives
+  // anything here, so it goes back as the server gave it.
+  function flushPrefs() {
+    clearTimeout(saveTimer);
+    savePending = false;
+    if (meta) saveGuidePrefs({ view, filter: meta.prefs.filter }).catch(() => {});
+  }
+  function setView(v: GuideView) {
+    view = v;
+    clearTimeout(saveTimer);
+    savePending = true;
+    saveTimer = setTimeout(flushPrefs, 500);
+  }
+  onDestroy(() => {
+    if (savePending) flushPrefs();
+  });
+
   async function toggleFavourite(item: CatalogItem) {
     const was = item.favourite;
     item.favourite = !was;
@@ -154,8 +179,19 @@
 
 <div class="body" bind:clientWidth={gridWidth}>
   {#if kind === 'live' && meta}
+    <div class="views" role="group" aria-label="Guide view">
+      <button type="button" aria-pressed={view === 'whatson'} class:on={view === 'whatson'} onclick={() => setView('whatson')}>What's on</button>
+      <button type="button" aria-pressed={view === 'grid'} class:on={view === 'grid'} onclick={() => setView('grid')}>Grid</button>
+    </div>
     {#key mapped}
-      <GuideGrid {meta} {filter} onLongPress={(i) => (sheetFor = i)} />
+      {#if view === 'whatson'}
+        <!-- Another category opens What's on afresh, on Now. -->
+        {#key filter}
+          <WhatsOn {filter} label={title} onLongPress={(i) => (sheetFor = i)} />
+        {/key}
+      {:else}
+        <GuideGrid {meta} {filter} onLongPress={(i) => (sheetFor = i)} />
+      {/if}
     {/key}
   {:else if items.length > 0}
     <VirtualList {items} rowHeight={posterHeight} columns={3} onEnd={loadMore}>
@@ -202,6 +238,30 @@
   }
   .retry {
     margin-bottom: 12px;
+  }
+  .views {
+    display: flex;
+    padding: 3px;
+    margin-bottom: 10px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .views button {
+    flex: 1;
+    min-height: 44px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .views button.on {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
   }
   .more-hint {
     text-align: center;

@@ -1,4 +1,4 @@
-import type { GridRow, GuideMeta, GuideSource, GuideStatus, Page, Programme, WhatsOnEntry } from '@tv/shared';
+import type { GridRow, GuideMeta, GuidePrefs, GuideSource, GuideStatus, Page, Programme, WhatsOnEntry } from '@tv/shared';
 import { api } from './api.ts';
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -30,7 +30,9 @@ export function programmes(itemIds: number[], from: number, to: number, signal?:
   return api<Record<string, Programme[]>>(`/api/guide/programmes${query({ items: itemIds.join(','), from, to })}`, signal ? { signal } : undefined);
 }
 
-export const refreshGuide = (providerId: number) => api<void>(`/api/providers/${providerId}/guide`, { method: 'POST' });
+export const saveGuidePrefs = (p: GuidePrefs) => api<void>('/api/me/prefs/guide', json('PUT', p));
+
+export const refreshGuide =(providerId: number) => api<void>(`/api/providers/${providerId}/guide`, { method: 'POST' });
 export const guideStatus = (providerId: number) => api<GuideStatus>(`/api/providers/${providerId}/guide`);
 
 export const guideSources = (providerId: number, q: string, signal?: AbortSignal) =>
