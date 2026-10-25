@@ -649,7 +649,7 @@ test('From start navigates to the catch-up URL', async () => {
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
   buttonWith('From start')!.click();
-  expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=79200&to=82800&title=News%20%26%20Co');
+  expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=79200&to=82800&title=News%20%26%20Co', { replaceState: true });
 });
 
 test('a query change while mounted starts a new session and tears down the old one', async () => {
@@ -716,7 +716,7 @@ test('From start after the programme has ended opens the programme on now, and d
   vi.setSystemTime(83_000_000);
   serve(liveRes, liveItem({ now: film }));
   buttonWith('From start')!.click();
-  await vi.waitFor(() => expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=82800&to=90000&title=Film'));
+  await vi.waitFor(() => expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=82800&to=90000&title=Film', { replaceState: true }));
   expect(nav.goto).toHaveBeenCalledTimes(1);
   expect(itemCalls()).toHaveLength(2);
 
@@ -867,9 +867,9 @@ test('▲ ▼ go to the neighbours in category order', async () => {
   await vi.waitFor(() => expect(infoText()).toContain('channel 2 of 3'));
   enterFullscreen();
   control('Next channel')!.click();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=4&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=4&cat=3', { replaceState: true });
   control('Previous channel')!.click();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3', { replaceState: true });
   unmount(app);
   document.body.innerHTML = '';
 
@@ -883,7 +883,7 @@ test('▲ ▼ go to the neighbours in category order', async () => {
   control('Next channel')!.click();
   expect(nav.goto).not.toHaveBeenCalled();
   control('Previous channel')!.click();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3', { replaceState: true });
 });
 
 test('three quick ▲ taps end with one session for the last channel; earlier sessions are released', async () => {
@@ -963,7 +963,7 @@ test('catch-up shows Watch live for an airing programme', async () => {
   const pill = document.querySelector('.controls .watch-live') as HTMLElement;
   expect(pill.textContent?.trim()).toBe('● Watch live');
   pill.click();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3', { replaceState: true });
   expect(actionTexts()).toEqual(['★Favourite', '●Watch live', '▦Guide', '⋯More']);
   // The category's channels below; a row plays live.
   await vi.waitFor(() => expect(nowListHrefs()).toEqual(['/watch?item=5&cat=3', '/watch?item=7&cat=3']));
@@ -979,7 +979,7 @@ test('catch-up shows Watch live for an airing programme', async () => {
   expect(document.querySelector('.controls [role="slider"]')!.getAttribute('aria-valuemax')).toBe('3600');
   expect(document.querySelector('.controls .watch-live')).toBeNull();
   buttonWith('Watch live')!.click();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=7&cat=3', { replaceState: true });
 });
 
 test('media session gets channel, programme and previous/next', async () => {
@@ -993,9 +993,9 @@ test('media session gets channel, programme and previous/next', async () => {
   expect(meta).toEqual({ title: 'BBC One', artist: 'News at Ten', artworkUrl: '/api/logos/7' });
   expect(Object.keys(actions).sort()).toEqual(['nexttrack', 'pause', 'play', 'previoustrack']);
   actions.nexttrack!();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=9&cat=3', { replaceState: true });
   actions.previoustrack!();
-  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=5&cat=3');
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=5&cat=3', { replaceState: true });
   playing(video());
   actions.pause!();
   expect(vi.mocked(HTMLMediaElement.prototype.pause)).toHaveBeenCalledTimes(1);
@@ -1080,4 +1080,142 @@ test('the More sheet closes when turning the phone leaves nothing in it', async 
   expect(buttonWith('More')).toBeUndefined();
   await vi.advanceTimersByTimeAsync(3000);
   expect(controlsHidden()).toBe(true); // nothing holds the controls up any more
+});
+
+// Back after switching channel: switches on the page replace its history entry, so Back still returns where you came from.
+
+/**
+ * The browser history as the page sees it: goto pushes or replaces an entry and, for /watch, navigates the page and
+ * runs afterNavigate as SvelteKit does; history.back pops. Returns the entries.
+ */
+function fakeHistory(...entries: string[]) {
+  const stack = [...entries];
+  nav.goto.mockImplementation(async (url: string, opts?: { replaceState?: boolean }) => {
+    if (opts?.replaceState) stack[stack.length - 1] = url;
+    else stack.push(url);
+    if (!url.startsWith('/watch')) return;
+    const from = route.url;
+    go(`http://localhost${url}`);
+    nav.after?.({ from: { url: from }, to: { url: route.url } });
+  });
+  vi.spyOn(history, 'back').mockImplementation(() => void stack.pop());
+  return stack;
+}
+
+/** Live on channel 7 of Sports (3), whose channels are 7, 8 and 9. */
+async function liveOnSeven(from: string | null) {
+  guide.channels = [7, 8, 9];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  api.mockImplementation(async (path: string) => (path === '/api/play' ? liveRes : liveItem({ id: Number(path.split('/').pop()) })));
+  app = mount(Watch, { target: document.body });
+  nav.after!({ from: from ? { url: new URL(`http://localhost${from}`) } : null, to: { url: route.url } });
+  await vi.waitFor(() => expect(infoText()).toContain('channel 1 of 3'));
+  enterFullscreen();
+}
+
+test('two ▲ then Back calls history.back() once (to the guide)', async () => {
+  const stack = fakeHistory('/browse/live/3', '/watch?item=7&cat=3');
+  await liveOnSeven('/browse/live/3');
+  control('Next channel')!.click();
+  control('Next channel')!.click();
+  expect(route.url.search).toBe('?item=9&cat=3');
+  expect(stack).toEqual(['/browse/live/3', '/watch?item=9&cat=3']);
+  control('Back')!.click();
+  expect(history.back).toHaveBeenCalledTimes(1);
+  expect(stack).toEqual(['/browse/live/3']);
+});
+
+test('a deep link, then ▲, then Back goes to the category guide with replaceState', async () => {
+  const stack = fakeHistory('/watch?item=7&cat=3');
+  await liveOnSeven(null);
+  control('Next channel')!.click();
+  expect(stack).toEqual(['/watch?item=8&cat=3']);
+  control('Back')!.click();
+  expect(history.back).not.toHaveBeenCalled();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/3', { replaceState: true });
+});
+
+test('channel switches call goto with replaceState: true', async () => {
+  guide.channels = [5, 7, 9];
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(sys.setNowPlaying.mock.lastCall?.[1]).toHaveProperty('nexttrack'));
+  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
+  enterFullscreen();
+  control('Next channel')!.click();
+  control('Previous channel')!.click();
+  const actions = sys.setNowPlaying.mock.lastCall![1] as Record<string, () => void>;
+  actions.nexttrack!();
+  actions.previoustrack!();
+  buttonWith('From start')!.click();
+  const replace = { replaceState: true };
+  expect(nav.goto.mock.calls).toEqual([
+    ['/watch?item=9&cat=3', replace],
+    ['/watch?item=5&cat=3', replace],
+    ['/watch?item=9&cat=3', replace],
+    ['/watch?item=5&cat=3', replace],
+    ['/watch?item=7&from=79200&to=82800&title=News%20at%20Ten&cat=3', replace],
+  ]);
+  // A tap on the list below replaces too: SvelteKit's link options apply to every link inside.
+  expect(document.querySelector('.switch')!.getAttribute('data-sveltekit-replacestate')).toBe('');
+  unmount(app);
+  document.body.innerHTML = '';
+
+  nav.goto.mockClear();
+  route.url = new URL('http://localhost/watch?item=7&from=79200&to=82800&title=News%20at%20Ten&cat=3');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  playing(video());
+  (document.querySelector('.controls .watch-live') as HTMLElement).click();
+  buttonWith('Watch live')!.click();
+  expect(nav.goto.mock.calls).toEqual([['/watch?item=7&cat=3', replace], ['/watch?item=7&cat=3', replace]]);
+});
+
+test('Back is labelled with the category name on live', async () => {
+  const topBack = () => document.querySelector('.topbar .back')!;
+  guide.context = { categoryId: 3, label: 'Sports' };
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(topBack().textContent).toBe('‹ Sports'));
+  expect(topBack().getAttribute('aria-label')).toBe('Back to Sports');
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // Catch-up too, and the favourites.
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News&cat=3');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(topBack().textContent).toBe('‹ Sports'));
+  unmount(app);
+  document.body.innerHTML = '';
+
+  guide.context = { categoryId: null, label: 'Favourites' };
+  route.url = new URL('http://localhost/watch?item=7&cat=favourites');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(topBack().textContent).toBe('‹ Favourites'));
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // A movie, and a channel whose category isn't known, keep the plain label.
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(movieRes, movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(4));
+  expect(topBack().textContent).toBe('‹ Back');
+  expect(topBack().hasAttribute('aria-label')).toBe(false);
+  unmount(app);
+  document.body.innerHTML = '';
+
+  guide.context = { categoryId: null, label: null };
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
+  expect(topBack().textContent).toBe('‹ Back');
 });

@@ -32,6 +32,8 @@
 
   /** How far ahead the next programme is looked for. */
   const NEXT_WINDOW_SEC = 6 * 3600;
+  /** Moving on within the page (another channel, From start, Watch live) replaces its history entry, so Back still leaves it. */
+  const REPLACE = { replaceState: true };
 
   let video = $state<HTMLVideoElement>();
   let player = $state<PlayerState>();
@@ -148,6 +150,8 @@
   const listLabel = $derived(
     context && (context.itemId === itemId || (askedCategory !== null && context.asked === askedCategory)) ? (context.label ?? '') : '',
   );
+  /** Back says where it goes: a channel's category, or Favourites, once known. */
+  const backLabel = $derived(channel && listLabel ? listLabel : null);
 
   /** The list's channels in order, for channel up and down and "channel 4 of 85": loaded once per list, not per channel. */
   let loadedOrder = $state.raw<{ filter: string; ids: number[] } | null>(null);
@@ -283,18 +287,18 @@
       now = onNow.onNow;
     }
     if (id === undefined || !now || onNow.item?.id !== id) return;
-    void goto(watchHref(id, { category, catchup: now }));
+    void goto(watchHref(id, { category, catchup: now }), REPLACE);
   }
 
   /** "● Watch live": this channel, live. */
   function watchLive() {
-    void goto(watchHref(itemId, { category }));
+    void goto(watchHref(itemId, { category }), REPLACE);
   }
 
   /** Channel up or down, in the list's order. The playing session is released as the next one starts. */
   function switchChannel(dir: -1 | 1) {
     const id = neighbour(order, itemId, dir);
-    if (id !== null) void goto(watchHref(id, { category }));
+    if (id !== null) void goto(watchHref(id, { category }), REPLACE);
   }
 
   function openGuide() {
@@ -313,8 +317,9 @@
     }
   }
 
+  // Navigations within the page don't count: they replace their entry, so behind it is still where it was opened from.
   afterNavigate((nav) => {
-    if (nav.from) inAppHistory = true;
+    if (nav.from && nav.from.url.pathname !== '/watch') inAppHistory = true;
   });
 
   /** Back where you came from. Opened from outside the app (a bookmark, a link, a relaunch), to the list it belongs to. */
@@ -422,7 +427,7 @@
 
 <div class="watch" class:fullscreen>
   <header class="topbar">
-    <button type="button" class="back" onclick={back}>‹ Back</button>
+    <button type="button" class="back" aria-label={backLabel ? `Back to ${backLabel}` : undefined} onclick={back}>‹ {backLabel ?? 'Back'}</button>
   </header>
 
   <div class="player">
@@ -475,8 +480,9 @@
   <WatchActions {actions} bind:moreOpen />
 
   {#if listFilter}
-    <!-- Something to switch to: the category's channels, the playing one highlighted. A row plays it live. -->
-    <section class="switch" aria-label="Channels">
+    <!-- Something to switch to: the category's channels, the playing one highlighted. A row plays it live, in place of
+         this history entry, as channel up and down do. -->
+    <section class="switch" aria-label="Channels" data-sveltekit-replacestate>
       <div class="lhead">
         <strong>{listLabel}</strong>
         {#if order.length > 0}<span>{order.length} {order.length === 1 ? 'channel' : 'channels'}</span>{/if}
