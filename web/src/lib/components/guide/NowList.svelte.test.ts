@@ -125,12 +125,16 @@ test('a new filter starts again from page 1 and ignores the old answer', async (
   expect(texts('.entry .title')).toEqual(['Ch 2']);
 });
 
-test('an empty list says so, with the name when there is one', async () => {
+test('an empty list says it has no channels, with the name when there is one', async () => {
   mountIt({ filter: 'category:5', label: 'Sport' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on in Sport right now'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels in Sport'));
   unmount(app!);
   mountIt({ filter: 'category:5', label: '' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on right now'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels'));
+  expect(document.body.textContent).not.toContain('No channels in');
+  unmount(app!);
+  mountIt({ filter: 'favourites', label: 'Favourites' });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No favourite channels yet'));
 });
 
 test('an error shows Retry, which reloads from page 1', async () => {
@@ -262,4 +266,40 @@ test('a refresh that lands after the filter changes is ignored and asks for noth
   await new Promise((r) => setTimeout(r, 20));
   expect(texts('.entry .title')).toEqual(['Ch 5']);
   expect(guide.grid).toHaveBeenCalledTimes(3);
+});
+
+test('a tick during the first load does not abort it', async () => {
+  tallNow();
+  let resolveFirst!: (p: Page<GridRow>) => void;
+  guide.grid.mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)));
+  mountIt({ filter: 'category:4', label: 'Sports' });
+  await vi.waitFor(() => expect(guide.grid).toHaveBeenCalledTimes(1));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(guide.grid).toHaveBeenCalledTimes(1);
+  expect((guide.grid.mock.calls[0]![1] as AbortSignal).aborted).toBe(false);
+  resolveFirst(page(row(1)));
+  await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 1']));
+});
+
+test('a failed load never shows the empty text', async () => {
+  tallNow();
+  // A refresh with no rows (e.g. after an error) that fails shows the error and Retry.
+  guide.grid.mockRejectedValueOnce(new Error('boom'));
+  mountIt({ filter: 'category:4', label: 'Sports' });
+  await vi.waitFor(() => expect(document.querySelector('.retry')).not.toBeNull());
+  guide.grid.mockRejectedValueOnce(new Error('boom again'));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(document.querySelector('.retry')).not.toBeNull();
+  expect(document.body.textContent).not.toContain('No channels');
+});
+
+test('a quiet refresh with no rows that fails shows the error, not the empty text', async () => {
+  tallNow();
+  guide.grid.mockResolvedValueOnce(page());
+  mountIt({ filter: 'category:4', label: 'Sports' });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels in Sports'));
+  guide.grid.mockRejectedValueOnce(new Error('boom'));
+  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => expect(document.querySelector('.retry')).not.toBeNull());
+  expect(document.body.textContent).not.toContain('No channels');
 });

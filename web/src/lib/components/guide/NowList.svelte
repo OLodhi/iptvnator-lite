@@ -73,8 +73,9 @@
       rows = items;
       nextCursor = cursor;
       error = '';
-    } catch {
-      // Quiet: the rows on screen stay.
+    } catch (err) {
+      // Quiet: the rows on screen stay. With none, there is nothing to stay: say it failed.
+      if (mine === seq && rows.length === 0) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
       if (mine === seq) {
         refreshing = false;
@@ -85,6 +86,8 @@
 
   // A full reload starts the list again from page 1; a quiet one refreshes the loaded rows in place.
   function reload(quiet: boolean) {
+    // The first page is still on its way and nothing is shown yet: it will bring fresh rows, so leave it be.
+    if (quiet && loading && rows.length === 0) return;
     const mine = ++seq;
     refreshing = false;
     controller?.abort();
@@ -129,7 +132,7 @@
 
   // The rows follow the shared clock, so one whose programme ends moves on to the next without a request.
   const nowSec = $derived(Math.floor(clock.nowMs / 1000));
-  const emptyText = $derived(`Nothing on${label ? ` in ${label}` : ''} right now`);
+  const emptyText = $derived(filter === 'favourites' ? 'No favourite channels yet' : `No channels${label ? ` in ${label}` : ''}`);
 </script>
 
 {#if error}

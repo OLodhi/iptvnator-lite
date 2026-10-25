@@ -244,7 +244,7 @@ test("Live favourites' What's on lists the favourites", async () => {
   expect(nowListCalls()[0]![0]).toMatchObject({ filter: 'favourites', cursor: null });
   expect(guideGrid()).toBeNull();
   expect(guide.whatsOn).not.toHaveBeenCalled();
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on in Favourites right now'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No favourite channels yet'));
 });
 
 test('the view is saved with the guide prefs, and another category opens on it', async () => {

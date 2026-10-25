@@ -114,7 +114,7 @@ test('pages on scroll end', async () => {
 
 test('an empty segment says so', async () => {
   mountIt({ filter: 'category:5', label: 'Sport' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on in Sport right now'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels in Sport'));
   segment('Earlier').click();
   await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing earlier in Sport'));
   segment('Tomorrow').click();
@@ -123,7 +123,7 @@ test('an empty segment says so', async () => {
 
 test('with no name for the filter yet, the empty text leaves it out', async () => {
   mountIt({ filter: 'category:5', label: '' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on right now'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels'));
 });
 
 test('a segment with no window shows nothing more tonight without a request', async () => {
