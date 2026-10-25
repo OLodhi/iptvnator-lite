@@ -138,18 +138,18 @@ describe('computeLinks past a channel without listings', () => {
 
   test('an id match to a channel with no programmes falls through to a later step that has listings, with its method', () => {
     const channels = [
-      ch('Alpha'), ch('a2', 'Alpha'),
+      ch('Alpha'), ch('a2.uk', 'Alpha'),
       ch('empty2', 'Old'), ch('bravo.uk', 'UK| Bravo'),
       ch('empty3', 'Old C'), ch('charlie.uk', 'C1'),
     ];
     const items = [
-      item(1, 'X', { epgChannelId: 'Alpha' }), // its guide id is also a2's display-name
+      item(1, 'UK| X', { epgChannelId: 'Alpha', tag: 'UK' }), // its guide id is also a2.uk's display-name
       item(2, 'UK| Bravo HD', { epgChannelId: 'empty2', tag: 'UK' }),
       item(3, 'UK| Charlie HD', { epgChannelId: 'empty3', tag: 'UK' }),
       item(4, 'UK| Charlie HD ◉', { epgChannelId: 'charlie.uk', tag: 'UK' }),
     ];
-    const links = run(items, channels, new Map(), guide(['a2', 'bravo.uk', 'charlie.uk']));
-    expect(links.get(1)).toEqual({ key: 'a2', method: 'name' });
+    const links = run(items, channels, new Map(), guide(['a2.uk', 'bravo.uk', 'charlie.uk']));
+    expect(links.get(1)).toEqual({ key: 'a2.uk', method: 'name' });
     expect(links.get(2)).toEqual({ key: 'bravo.uk', method: 'normalised' });
     expect(links.get(3)).toEqual({ key: 'charlie.uk', method: 'sibling' });
     expect(links.get(4)).toEqual({ key: 'charlie.uk', method: 'id' });
@@ -184,7 +184,8 @@ describe('computeLinks past a channel without listings', () => {
   });
 
   test('an id match to a case variant with listings is still an id match', () => {
-    const links = run([item(1, 'X', { epgChannelId: 'bbc1.uk' })], [ch('bbc1.uk'), ch('BBC1.UK')], new Map(), guide(['BBC1.UK']));
+    const items = [item(1, 'UK| X', { epgChannelId: 'bbc1.uk', tag: 'UK' })];
+    const links = run(items, [ch('bbc1.uk'), ch('BBC1.UK')], new Map(), guide(['BBC1.UK']));
     expect(links.get(1)).toEqual({ key: 'BBC1.UK', method: 'id' });
   });
 
@@ -221,27 +222,111 @@ describe('computeLinks past a channel without listings', () => {
   });
 });
 
-describe('linkCandidates', () => {
-  test("lists each item's candidates at every step, shares them among siblings, and only the map for a mapped item", () => {
+describe('the fall-through stays in the item own country (P3-R32)', () => {
+  const guide = (listed: string[]) => ({ keysWithListings: new Set(listed), keysWithProgrammes: new Set(listed) });
+
+  test('a foreign channel with listings never replaces an empty id (the real cases)', () => {
+    // Item, its own guide id (an empty channel), the foreign channel with listings matching found, its display-name.
+    const cases: [string, string, string, string][] = [
+      ['UK| SKY CINEMA PREMIERE HD', 'SkyCinemaPremiere.uk', 'SkyCinemaPremiere.de', 'WOW| SKY CINEMA PREMIERE ᴴᴰ ◉'],
+      ['UK| EUROSPORT 1 HD', 'uk.Eurosport 1', 'Eurosport', 'PL| EUROSPORT 1 FHD'],
+      ['UK| EUROSPORT 2 HD', 'uk.Eurosport 2', 'Eurosport2.cz', 'CZ| EUROSPORT 2 HD'],
+      ['UK| TRAVEL CHANNEL', 'TravelChannel.uk', 'TVPaprika.hu', 'HU| TRAVEL CHANNEL'],
+      ['UK| MTV CLASSIC', 'MTVClassic.uk', 'MTVClassic.us', 'US| MTV CLASSIC'],
+      ['UK| DISNEY CHANNEL FHD', 'DisneyChannel.uk', 'DisneyChannel.ca', 'CA| DISNEY CHANNEL HD'],
+      ['UK| BEIN SPORTS 1 HD', 'beINSports5En.qa', 'BeinSports1.fr', 'FR| BEIN SPORTS 1 4K'],
+    ];
+    const items = cases.map(([name, id], i) => item(i + 1, name, { epgChannelId: id, tag: 'UK' }));
+    const channels = cases.flatMap(([name, id, foreign, display]) => [ch(id, name), ch(foreign, display)]);
+    const links = run(items, channels, new Map(), guide(cases.map((c) => c[2])));
+    cases.forEach(([, id], i) => expect(links.get(i + 1)).toEqual({ key: id, method: 'id' }));
+  });
+
+  test("nor does a foreign sibling's key", () => {
+    const items = [
+      item(1, 'UK| EUROSPORT 1 HD', { epgChannelId: 'uk.Eurosport 1', tag: 'UK' }),
+      item(2, 'PL| EUROSPORT 1 FHD', { epgChannelId: 'Eurosport', tag: 'PL' }),
+    ];
+    const links = run(items, [ch('uk.Eurosport 1', 'Old'), ch('Eurosport', 'Eurosport PL')], new Map(), guide(['Eurosport']));
+    expect(links.get(1)).toEqual({ key: 'uk.Eurosport 1', method: 'id' });
+    expect(links.get(2)).toEqual({ key: 'Eurosport', method: 'id' });
+  });
+
+  test('a candidate of its own country still takes over: by key suffix, display-name, or sibling (the real cases)', () => {
+    const items = [
+      item(1, 'UK| LFC TV', { epgChannelId: 'uk.425 LFCTV HD', tag: 'UK' }),
+      item(2, 'UK| CRIME INVESTIGATION HEVC HD', { epgChannelId: 'CrimeInvestigation.uk', tag: 'UK' }),
+      item(3, 'UK| PREMIER SPORTS 2 FHD', { epgChannelId: 'ViaplaySports2.uk', tag: 'UK' }),
+      item(4, 'UK| PREMIER SPORTS 2 HD', { epgChannelId: 'PremierSports2', tag: 'UK' }),
+    ];
     const channels = [
-      ch('Alpha', 'Zed'), ch('ALPHA', 'Yak'), ch('b', 'Alpha'), ch('c', 'alpha'), ch('d', 'UK| Alpha HD'),
-      ch('e', 'Other'), ch('f', 'Elsewhere'),
+      ch('uk.425 LFCTV HD', 'Old LFC'), ch('LiverpoolFCTV.uk', 'SPT| LFC TV FHD'), // the key's suffix
+      ch('CrimeInvestigation.uk', 'Old CI'), ch('CrimeAndInvestigationNetwork.uk', 'UK| CRIME INVESTIGATION FHD'),
+      ch('ViaplaySports2.uk', 'Old PS2'), ch('PremierSports2', 'UK-NOWTV| PREMIER SPORTS 2 FHD'), // a sub-tagged name
+    ];
+    const links = run(items, channels, new Map(), guide(['LiverpoolFCTV.uk', 'CrimeAndInvestigationNetwork.uk', 'PremierSports2']));
+    expect(links.get(1)).toEqual({ key: 'LiverpoolFCTV.uk', method: 'normalised' });
+    expect(links.get(2)).toEqual({ key: 'CrimeAndInvestigationNetwork.uk', method: 'normalised' });
+    expect(links.get(3)).toEqual({ key: 'PremierSports2', method: 'sibling' });
+  });
+
+  test("a display-name leads with the item's tag as a whole token, in any known pattern", () => {
+    const linkFor = (display: string) =>
+      run(
+        [item(1, 'UK| Kilo HD', { epgChannelId: 'kilo.empty', tag: 'UK' }), item(2, 'UK| Kilo FHD', { epgChannelId: 'k', tag: 'UK' })],
+        [ch('kilo.empty', 'Old'), ch('k', display)],
+        new Map(),
+        guide(['k']),
+      ).get(1)?.key;
+    for (const own of ['UK| Kilo', '|UK| Kilo', '[UK] Kilo', 'UK: Kilo', 'UK - Kilo', 'UK-NOWTV| Kilo', 'uk| Kilo']) {
+      expect(linkFor(own), own).toBe('k');
+    }
+    for (const foreign of ['UKTV| Kilo', 'WOW| Kilo', 'PL| Kilo', 'SPT| Kilo', 'Kilo UK', 'Kilo']) {
+      expect(linkFor(foreign), foreign).toBe('kilo.empty');
+    }
+  });
+
+  test('an item without a tag never falls through', () => {
+    const items = [item(1, 'LFC TV', { epgChannelId: 'uk.425 LFCTV HD' })];
+    const links = run(items, [ch('uk.425 LFCTV HD', 'Old LFC'), ch('LiverpoolFCTV.uk', 'UK| LFC TV FHD')], new Map(), guide(['LiverpoolFCTV.uk']));
+    expect(links.get(1)).toEqual({ key: 'uk.425 LFCTV HD', method: 'id' });
+  });
+
+  test('without an id hit, the ladder is not restricted', () => {
+    const channels = [ch('MTVClassic.us', 'US| MTV CLASSIC')];
+    const items = [item(1, 'UK| MTV CLASSIC', { epgChannelId: 'gone.uk', tag: 'UK' }), item(2, 'MTV CLASSIC HD')];
+    const links = run(items, channels, new Map(), guide(['MTVClassic.us']));
+    expect(links.get(1)).toEqual({ key: 'MTVClassic.us', method: 'normalised' });
+    expect(links.get(2)).toEqual({ key: 'MTVClassic.us', method: 'normalised' });
+  });
+});
+
+describe('linkCandidates', () => {
+  test("lists each item's possible first matches, and later candidates of its own country only; siblings share", () => {
+    const channels = [
+      ch('alpha.uk', 'UK| Alpha'), ch('ALPHA.UK', 'Old'), ch('alpha.de', 'DE| Alpha'), ch('alpha.x', '[UK] Alpha'),
+      ch('bravo.de', 'DE| Bravo'), ch('bravo.uk', 'Bravo'),
+      ch('charlie.uk', 'Old C'), ch('charlie2.uk', 'Charlie'),
+      ch('m', 'Mike'),
     ];
     const items = [
-      item(1, 'UK| Alpha', { epgChannelId: 'Alpha', tag: 'UK' }),
-      item(2, 'UK| Alpha FHD', { tag: 'UK' }),
-      item(3, 'UK| Alpha HEVC', { tag: 'UK' }),
-      item(4, '##### X #####'),
-      item(5, 'Nothing'),
-      item(6, 'Lone', { epgChannelId: 'f' }),
+      item(1, 'UK| Alpha', { epgChannelId: 'alpha.uk', tag: 'UK' }),
+      item(2, 'UK| Bravo HD', { tag: 'UK' }),
+      item(3, 'Charlie', { epgChannelId: 'charlie.uk' }),
+      item(4, 'UK| Alpha HEVC', { tag: 'UK' }),
+      item(5, '##### X #####'),
+      item(6, 'Nothing'),
     ];
-    const c = linkCandidates({ items, channels, manual: new Map([['r3', 'e']]) });
-    expect([...c.get(1)!].sort()).toEqual(['ALPHA', 'Alpha', 'b', 'c', 'd', 'e']);
-    expect(c.get(2)).toBe(c.get(1));
-    expect([...c.get(3)!]).toEqual(['e']);
-    expect(c.has(4)).toBe(false);
-    expect([...(c.get(5) ?? [])]).toEqual([]);
-    expect([...c.get(6)!]).toEqual(['f']);
+    const c = linkCandidates({ items, channels, manual: new Map([['r4', 'm']]) });
+    // Its id, then (falling through) the UK case variant and the UK-named channel, and a sibling's map; not alpha.de.
+    expect([...c.get(1)!].sort()).toEqual(['ALPHA.UK', 'alpha.uk', 'alpha.x', 'm']);
+    // Its first step is the normalised one, any of whose keys may be its first match.
+    expect([...c.get(2)!].sort()).toEqual(['bravo.de', 'bravo.uk']);
+    // No tag: it never falls through, so its later candidates are not wanted.
+    expect([...c.get(3)!]).toEqual(['charlie.uk']);
+    expect([...c.get(4)!]).toEqual(['m']);
+    expect(c.has(5)).toBe(false);
+    expect([...(c.get(6) ?? [])]).toEqual([]);
   });
 });
 
@@ -377,18 +462,18 @@ describe('relinkGuide', () => {
   const channels = [{ key: 'BBC1.uk', name: 'x', names: [] }, { key: 'o', name: 'o', names: [] }];
   // A fixed "now", long ago, so the real clock never decides which channels have listings.
   const T = 1_000_000;
-  // BBC1.uk (item 1's guide id) has one programme, which ended an hour before T; bbc.live's is on at T.
+  // BBC1.uk (item 1's guide id) has one programme, which ended an hour before T; live.uk's is on at T.
   const stubAndLive = () => {
     const store = createGuideStore(db);
     const g = store.beginGeneration(P, 1);
-    store.insertChannels(P, g, [{ key: 'BBC1.uk', name: 'x', names: ['x'] }, { key: 'bbc.live', name: 'BBC One', names: ['BBC One'] }]);
+    store.insertChannels(P, g, [{ key: 'BBC1.uk', name: 'x', names: ['x'] }, { key: 'live.uk', name: 'BBC One', names: ['BBC One'] }]);
     const row = (channelKey: string, start: number, stop: number) => ({
       channelKey, start, stop, title: 'T', subtitle: null, description: null, category: null,
     });
-    store.insertProgrammes(P, g, [row('BBC1.uk', T - 7200, T - 3600), row('bbc.live', T - 600, T + 3000)]);
+    store.insertProgrammes(P, g, [row('BBC1.uk', T - 7200, T - 3600), row('live.uk', T - 600, T + 3000)]);
     store.commitGeneration(P, g, { fetchedAt: 1, source: 'xmltv' });
   };
-  const toLive = [{ id: 1, key: 'bbc.live', method: 'normalised' }, { id: 2, key: 'bbc.live', method: 'normalised' }];
+  const toLive = [{ id: 1, key: 'live.uk', method: 'normalised' }, { id: 2, key: 'live.uk', method: 'normalised' }];
 
   test('an id match whose only programme has stopped falls through to a key with listings at that time', () => {
     stubAndLive();
@@ -398,7 +483,7 @@ describe('relinkGuide', () => {
     relinkGuide(db, P, T - 3601);
     expect(links()[0]).toEqual({ id: 1, key: 'BBC1.uk', method: 'id' });
     relinkGuide(db, P, T - 3600);
-    expect(links()[0]).toEqual({ id: 1, key: 'bbc.live', method: 'normalised' });
+    expect(links()[0]).toEqual({ id: 1, key: 'live.uk', method: 'normalised' });
   });
 
   test("listings are found from each channel's own programmes, never by reading the whole guide's", () => {
@@ -441,10 +526,10 @@ describe('relinkGuide', () => {
   test('a plan that must match again judges listings at its own time', async () => {
     stubAndLive();
     const plan = await planLinks(db, P, generation(), 'xmltv', new Map(), T);
-    expect(plan.links.get(1)).toEqual({ key: 'bbc.live', method: 'normalised' });
+    expect(plan.links.get(1)).toEqual({ key: 'live.uk', method: 'normalised' });
     db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'b', 'BBC1.uk')").run();
     applyLinks(db, P, plan, new Map());
-    expect(links()).toEqual([{ id: 1, key: 'bbc.live', method: 'normalised' }, { id: 2, key: 'BBC1.uk', method: 'manual' }]);
+    expect(links()).toEqual([{ id: 1, key: 'live.uk', method: 'normalised' }, { id: 2, key: 'BBC1.uk', method: 'manual' }]);
   });
 
   test('relinkGuideInSteps judges a generation committed while it matched at its own time', async () => {

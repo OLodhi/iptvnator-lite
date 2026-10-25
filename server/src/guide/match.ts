@@ -113,6 +113,8 @@ type ChannelIndex = {
   byName: Map<string, Set<string>>;
   byNameLower: Map<string, Set<string>>;
   byNorm: Map<string, Set<string>>;
+  /** The tags a channel's display-names lead with, upper-case; channels with none are absent. */
+  tagsByKey: Map<string, Set<string>>;
 };
 
 const add = (m: Map<string, Set<string>>, k: string, key: string) => {
@@ -121,6 +123,15 @@ const add = (m: Map<string, Set<string>>, k: string, key: string) => {
   if (!set) m.set(k, (set = new Set()));
   set.add(key);
 };
+
+// The known tag patterns (curation/tags.ts), each also allowing a hyphenated sub-tag: "UK-NOWTV| …" leads with UK.
+const LEADING_TAGS = [
+  /^([A-Z0-9]{2,6})(?:-[A-Z0-9]+)*\s*\|/i,
+  /^\|\s*([A-Z0-9]{2,6})(?:-[A-Z0-9]+)*\s*\|/i,
+  /^\[\s*([A-Z0-9]{2,6})(?:-[A-Z0-9]+)*\s*\]/i,
+  /^([A-Z]{2,4})(?:-[A-Z0-9]+)*\s+-\s+/i,
+  /^([A-Z]{2,4})(?:-[A-Z0-9]+)*:\s+/i,
+];
 
 function indexChannels(channels: Channels, norm: Normalise): ChannelIndex {
   const keys = new Set(channels.map((c) => c.key));
@@ -134,42 +145,61 @@ function indexChannels(channels: Channels, norm: Normalise): ChannelIndex {
   const byName = new Map<string, Set<string>>();
   const byNameLower = new Map<string, Set<string>>();
   const byNorm = new Map<string, Set<string>>();
+  const tagsByKey = new Map<string, Set<string>>();
   for (const c of channels) {
     for (const n of c.names) {
       add(byName, n, c.key);
       add(byNameLower, n.toLowerCase(), c.key);
       for (const form of nameForms(n, norm)) add(byNorm, form, c.key);
+      for (const pattern of LEADING_TAGS) {
+        const m = pattern.exec(n);
+        if (m) add(tagsByKey, c.key, m[1]!.toUpperCase());
+      }
     }
   }
-  return { keys, byKeyLower, byName, byNameLower, byNorm };
+  return { keys, byKeyLower, byName, byNameLower, byNorm, tagsByKey };
 }
 
 /**
- * An item's candidates at the ladder's id step (the exact key first, then the others equal ignoring case, smallest
- * first), its display-name step (exact, then ignoring case) and its normalised step. Siblings come after these.
+ * Whether a channel is of the item's country (its tag): its key ends `.<tag>`, or a display-name leads with the tag.
+ * Only such a channel may replace a match without listings (P3-R32); an item without a tag keeps its match.
  */
-type Candidates = {
-  ids: string[];
-  names: Set<string> | undefined;
-  namesLower: Set<string> | undefined;
-  normalised: Set<string>;
-};
+function ofCountry(index: ChannelIndex, key: string, tag: string | null): boolean {
+  if (!tag) return false;
+  return key.toLowerCase().endsWith(`.${tag.toLowerCase()}`) || index.tagsByKey.get(key)?.has(tag.toUpperCase()) === true;
+}
 
-function candidatesOf(item: MatchItem, norms: Set<string>, index: ChannelIndex): Candidates {
+/** One step of the ladder: the method it links with and its candidates; `ordered` ones are in preference order. */
+type Step = { method: LinkMethod; keys: string[]; ordered: boolean };
+
+/**
+ * An item's steps after the manual map, in ladder order, without those that find nothing: id (the exact key, then
+ * the others equal to it ignoring case, smallest first), display-name (exact, then ignoring case) and normalised.
+ * Siblings come after these.
+ */
+function stepsOf(item: MatchItem, norms: Set<string>, index: ChannelIndex): Step[] {
   const key = item.epgChannelId ?? item.name;
   const lower = key.toLowerCase();
+  const steps: Step[] = [];
   const variants = index.byKeyLower.get(lower) ?? [];
-  const ids = index.keys.has(key) ? [key, ...variants.filter((k) => k !== key)] : variants;
+  const exact = index.keys.has(key);
+  if (exact) steps.push({ method: 'id', keys: [key], ordered: true });
+  const others = exact ? variants.filter((k) => k !== key) : variants;
+  if (others.length > 0) steps.push({ method: 'id', keys: others, ordered: true });
+  for (const names of [index.byName.get(key), index.byNameLower.get(lower)]) {
+    if (names) steps.push({ method: 'name', keys: [...names], ordered: false });
+  }
   const normalised = new Set<string>();
   for (const n of norms) for (const k of index.byNorm.get(n) ?? []) normalised.add(k);
-  return { ids, names: index.byName.get(key), namesLower: index.byNameLower.get(lower), normalised };
+  if (normalised.size > 0) steps.push({ method: 'normalised', keys: [...normalised], ordered: false });
+  return steps;
 }
 
 /**
  * `manual` is keyed by item remote id; the result is keyed by item id. `names` serves and keeps normalised names.
  * A channel with listings has a programme on now or upcoming (`keysWithListings`). A match to one without them (empty,
- * or a stale stub) holds only until a later step finds one with them, which then links with that step's method. A
- * manual map always holds.
+ * or a stale stub) holds only until a later step finds one with them from the item's own country, which then links
+ * with that step's method. A manual map always holds.
  */
 export function computeLinks(input: {
   items: MatchItem[];
@@ -213,24 +243,23 @@ export function computeLinks(input: {
       links.set(item.id, { key: manualKey, method: 'manual' });
       continue;
     }
-    // Down the ladder to the first key with listings; failing that, the first key found.
+    // The first step's key, unless it has no listings: then the first later key with listings from the item's own
+    // country, failing which that first key after all.
     let first: GuideLink | undefined;
-    const settles = (key: string | null | undefined, method: LinkMethod): boolean => {
-      if (key == null) return false;
+    let found: GuideLink | undefined;
+    for (const { method, keys, ordered } of stepsOf(item, norms, index)) {
+      let key: string | null;
+      if (first) key = pick(keys.filter((k) => listed.has(k) && ofCountry(index, k, item.tag)), item.tag);
+      else key = ordered ? (keys.find((k) => listed.has(k)) ?? keys[0]!) : pick(keys, item.tag);
+      if (key === null) continue;
       if (listed.has(key)) {
-        links.set(item.id, { key, method });
-        return true;
+        found = { key, method };
+        break;
       }
-      first ??= { key, method };
-      return false;
-    };
-    const c = candidatesOf(item, norms, index);
-    const settled =
-      settles(c.ids.find((k) => listed.has(k)) ?? c.ids[0], 'id') ||
-      settles(pick(c.names ?? [], item.tag), 'name') ||
-      settles(pick(c.namesLower ?? [], item.tag), 'name') ||
-      settles(pick(c.normalised, item.tag), 'normalised');
-    if (!settled && first) links.set(item.id, first);
+      first = { key, method };
+    }
+    const link = found ?? first;
+    if (link) links.set(item.id, link);
   }
 
   const linkedByNorm = new Map<string, Set<string>>();
@@ -244,8 +273,10 @@ export function computeLinks(input: {
     if (!norm) continue;
     const link = links.get(item.id);
     if (link && (link.method === 'manual' || listed.has(link.key))) continue;
-    // Over a match of its own, only a sibling's key with listings.
-    const siblings = [...(linkedByNorm.get(norm) ?? [])].filter((k) => !link || listed.has(k));
+    // Over a match of its own, only a sibling's key with listings, from the item's own country.
+    const siblings = [...(linkedByNorm.get(norm) ?? [])].filter(
+      (k) => !link || (listed.has(k) && ofCountry(index, k, item.tag)),
+    );
     const hit = pick(siblings, item.tag);
     if (hit !== null) links.set(item.id, { key: hit, method: 'sibling' });
   }
@@ -254,8 +285,9 @@ export function computeLinks(input: {
 
 /**
  * Every key the ladder could link each item to, whichever channels turn out to have listings: its manual map, or
- * else its candidates at every step plus its siblings' (sibling inheritance can give it any key they link to), so
- * siblings share one set. Ingest stores programmes for these, so that matching can then see which have listings.
+ * else any key of its first step and its own country's keys of later steps (the only ones it can fall through to),
+ * plus its siblings' (sibling inheritance can give it a key they link to), so siblings share one set. Ingest stores
+ * programmes for these, so that matching can then see which have listings.
  */
 export function linkCandidates(input: {
   items: MatchItem[];
@@ -279,8 +311,9 @@ export function linkCandidates(input: {
       continue;
     }
     const keys = shared ?? new Set<string>();
-    const c = candidatesOf(item, norms, index);
-    for (const step of [c.ids, c.names ?? [], c.namesLower ?? [], c.normalised]) for (const k of step) keys.add(k);
+    stepsOf(item, norms, index).forEach((step, i) => {
+      for (const k of step.keys) if (i === 0 || ofCountry(index, k, item.tag)) keys.add(k);
+    });
     result.set(item.id, keys);
   }
   return result;

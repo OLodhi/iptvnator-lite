@@ -178,6 +178,10 @@ describe('refreshGuide past a guide channel without listings', () => {
   const rename = (remoteId: string, name: string, epgChannelId: string) =>
     db.prepare("UPDATE items SET name = ?, epg_channel_id = ? WHERE kind = 'live' AND remote_id = ?").run(name, epgChannelId, remoteId);
   const allLinks = () => db.prepare('SELECT item_id, channel_key, method FROM guide_links ORDER BY item_id').all();
+  // Only an item with a tag falls through, to a channel of its own country (P3-R32). The fake's one UK category is
+  // too few for a tag (P2-R4), unlike the owner's many, so item 1's gets one here.
+  const tagItemOne = (tag: string | null) =>
+    db.prepare("UPDATE categories SET tag = ? WHERE kind = 'live' AND remote_id = '1'").run(tag);
   // The guide id's channel holds one programme, which ended yesterday; the schedule is under TNTSports1.uk, one
   // programme of it older than a day.
   const tnt = (stubName: string, scheduleName: string) =>
@@ -188,18 +192,24 @@ describe('refreshGuide past a guide channel without listings', () => {
   test("an item's later-step candidates are wanted, so it links to a populated channel its guide id does not name", async () => {
     const real = await setup();
     rename('1', 'UK| TNT SPORTS 1 HD', 'TNT.Sports.1.HD.uk'); // 2 days of catch-up
+    tagItemOne('UK');
     await refresh(feeding(real, tnt('TNT Sports 1 (old)', 'UK| TNT Sports 1 HD')));
 
     expect(link('1')).toEqual({ key: 'TNTSports1.uk', method: 'normalised' });
     // Stored for the item's own 2 days, as a guide it may link to.
     expect(span('TNTSports1.uk')).toEqual({ first: NOW - 30 * HOUR, last: NOW + HOUR, n: 3 });
     expect(span('TNT.Sports.1.HD.uk')).toMatchObject({ n: 1 });
+    // Without a tag, the item stays on its own guide id.
+    tagItemOne(null);
+    relinkGuide(db, providerId, NOW);
+    expect(link('1')).toEqual({ key: 'TNT.Sports.1.HD.uk', method: 'id' });
   });
 
   test('the TNT shape: X HD links to the populated guide of X HD ◉, and every relink path agrees', async () => {
     const real = await setup();
     rename('1', 'UK| TNT SPORTS 1 HD', 'TNT.Sports.1.HD.uk'); // 2 days of catch-up
     rename('3', 'UK| TNT SPORTS 1 HD ◉', 'TNTSports1.uk'); // none
+    tagItemOne('UK');
     await refresh(feeding(real, tnt('UK| TNT SPORTS 1 HD', 'TNT S1')));
 
     expect(link('1')).toEqual({ key: 'TNTSports1.uk', method: 'sibling' });

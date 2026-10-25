@@ -59,6 +59,8 @@ afterAll(async () => {
 test('the guide-source PUT relinks with the app clock, not the real one', async () => {
   const one = db.prepare("SELECT id, name FROM items WHERE kind = 'live' AND remote_id = '1'").get() as { id: number; name: string };
   const two = db.prepare("SELECT id FROM items WHERE kind = 'live' AND remote_id = '2'").pluck().get() as number;
+  // Only a tagged item falls through, to its own country's channel (P3-R32); the fake's lone UK category has no tag.
+  db.prepare("UPDATE categories SET tag = 'UK' WHERE kind = 'live' AND remote_id = '1'").run();
   db.prepare("INSERT INTO guide_state (provider_id, generation, fetched_at, source) VALUES (?, 1, ?, 'xmltv')").run(providerId, PINNED);
   const channel = db.prepare('INSERT INTO guide_channels (provider_id, generation, key, name, names) VALUES (?, 1, ?, ?, ?)');
   channel.run(providerId, 'hls.uk', 'hls.uk', JSON.stringify(['hls.uk']));
