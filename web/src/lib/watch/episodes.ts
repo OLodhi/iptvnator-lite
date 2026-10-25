@@ -1,10 +1,13 @@
 import type { EpisodeDetail, SeasonDetail } from '@tv/shared';
 
+/** Seasons in watching order: 1, 2, 3 …, then the specials (season 0), which are extras. */
+export function bySeason(a: { season: number }, b: { season: number }): number {
+  return Number(a.season === 0) - Number(b.season === 0) || a.season - b.season;
+}
+
 /** Every episode in watching order: season by season, then by episode number. */
 function inOrder(seasons: SeasonDetail[]): EpisodeDetail[] {
-  return [...seasons]
-    .sort((a, b) => a.season - b.season)
-    .flatMap((s) => [...s.episodes].sort((a, b) => a.episodeNum - b.episodeNum));
+  return [...seasons].sort(bySeason).flatMap((s) => [...s.episodes].sort((a, b) => a.episodeNum - b.episodeNum));
 }
 
 /** The episode after `remoteId`, into the next season when it ends one; null after the last, or for an unknown one. */

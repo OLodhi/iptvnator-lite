@@ -23,3 +23,10 @@ test('last has none', () => {
   expect(seasonOf(seasons, 'unknown')).toBeNull();
   expect(nextEpisode([], '111')).toBeNull();
 });
+
+test('specials come last in watching order', () => {
+  const withSpecials = [season(0, [ep('100', 1)]), ...seasons];
+  expect(nextEpisode(withSpecials, '112')?.remoteId).toBe('121'); // season 1 into season 2, not into the specials
+  expect(nextEpisode(withSpecials, '121')?.remoteId).toBe('100'); // the specials follow the last season
+  expect(nextEpisode(withSpecials, '100')).toBeNull();
+});
