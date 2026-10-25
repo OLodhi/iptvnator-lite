@@ -137,4 +137,8 @@ export const migrations: string[] = [
   CREATE TABLE user_prefs (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (user_id, key));
   `,
+  // 4: manual "watched" marks, kept apart from real playback (manual rows are always finished)
+  `
+  ALTER TABLE positions ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;
+  `,
 ];

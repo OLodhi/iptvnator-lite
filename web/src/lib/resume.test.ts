@@ -8,7 +8,7 @@ const seasons: Season[] = [
   { season: 1, episodes: [ep('s1e2', 2), ep('s1e1', 1)] },
 ];
 const pos = (episodeRemoteId: string | null, updatedAt: number, finished = false, positionSec = 100): SavedPosition => ({
-  episodeRemoteId, positionSec, durationSec: 1000, finished, updatedAt,
+  episodeRemoteId, positionSec, durationSec: 1000, finished, manual: false, updatedAt,
 });
 
 test('pickResume: movie (null episode) picks the unfinished whole-title position', () => {

@@ -19,6 +19,17 @@ const positionBody = {
   additionalProperties: false,
 };
 
+const watchedBody = {
+  type: 'object',
+  required: ['itemId', 'episodeRemoteIds', 'watched'],
+  properties: {
+    itemId: { type: 'integer' },
+    episodeRemoteIds: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, maxItems: 500, uniqueItems: true },
+    watched: { type: 'boolean' },
+  },
+  additionalProperties: false,
+};
+
 export const meRoutes = (deps: {
   personal: PersonalService;
   catalogue: CatalogueRepo;
@@ -80,6 +91,30 @@ export const meRoutes = (deps: {
       personal.savePosition(currentUserId(req), req.body, label);
       return reply.code(204).send();
     });
+    app.put<{ Body: { itemId: number; episodeRemoteIds: string[]; watched: boolean } }>(
+      '/me/watched',
+      { schema: { body: watchedBody } },
+      async (req, reply) => {
+        const { itemId, episodeRemoteIds, watched } = req.body;
+        const item = catalogue.getItem(itemId);
+        if (!item) return reply.code(404).send(notFound('Item', itemId));
+        if (item.kind !== 'series') {
+          return reply.code(400).send({ code: 'VALIDATION', message: 'Only episodes of a series can be marked watched' } satisfies ApiError);
+        }
+        const known = new Map<string, { label: string; durationSec: number | null }>();
+        for (const season of (await deps.seriesInfo.getDetails(itemId)).seasons) {
+          for (const e of season.episodes) known.set(e.remoteId, { label: `S${season.season} E${e.episodeNum}`, durationSec: e.durationSec });
+        }
+        const episodes = [];
+        for (const remoteId of episodeRemoteIds) {
+          const e = known.get(remoteId);
+          if (!e) return reply.code(404).send(notFound('Episode', remoteId));
+          episodes.push({ remoteId, ...e });
+        }
+        personal.markWatched(currentUserId(req), itemId, episodes, watched);
+        return reply.code(204).send();
+      },
+    );
     app.get<{ Params: { itemId: number } }>(
       '/me/positions/:itemId',
       { schema: { params: idParams('itemId') } },

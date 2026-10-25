@@ -172,6 +172,8 @@ export type SavedPosition = {
   positionSec: number;
   durationSec: number | null;
   finished: boolean;
+  /** Marked watched by hand rather than played: it never counts as a resume point. */
+  manual: boolean;
   updatedAt: number;
 };
 export type BrowseCategory = { id: number; displayName: string; itemCount: number; pinned: boolean };

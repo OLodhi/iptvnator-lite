@@ -163,3 +163,36 @@ test('a history write that throws never fails a stream that has started', async 
   expect(warnings).toHaveLength(1);
   expect(warnings[0]!.m).toBe('play: could not record history');
 });
+
+test('PUT /me/watched marks a season', async () => {
+  const s = item('series', 10);
+  const put = (body: object) => send('PUT', '/api/me/watched', body);
+  expect((await put({ itemId: s, episodeRemoteIds: ['101', '102'], watched: true })).statusCode).toBe(204);
+  const got = (await send('GET', `/api/me/positions/${s}`)).json<SavedPosition[]>();
+  expect(got.map((p) => [p.episodeRemoteId, p.finished, p.manual]).sort()).toEqual([['101', true, true], ['102', true, true]]);
+  expect(db.prepare("SELECT episode_label FROM positions WHERE content_key = 'episode:102'").pluck().get()).toBe('S1 E2');
+  expect(personal.continueWatching(USER, providerId, 'series', 5)).toEqual([]);
+
+  expect((await put({ itemId: s, episodeRemoteIds: ['101'], watched: false })).statusCode).toBe(204);
+  expect((await send('GET', `/api/me/positions/${s}`)).json<SavedPosition[]>().map((p) => p.episodeRemoteId)).toEqual(['102']);
+});
+
+test('PUT /me/watched: unknown item or episode is 404, a movie is 400', async () => {
+  const s = item('series', 10);
+  const put = (body: object) => send('PUT', '/api/me/watched', body);
+  expect((await put({ itemId: 98765, episodeRemoteIds: ['101'], watched: true })).statusCode).toBe(404);
+  expect((await put({ itemId: s, episodeRemoteIds: ['101', 'nope'], watched: true })).statusCode).toBe(404);
+  const movie = await put({ itemId: item('movie', 1), episodeRemoteIds: ['101'], watched: true });
+  expect(movie.statusCode).toBe(400);
+  expect(movie.json()).toMatchObject({ code: 'VALIDATION' });
+  expect(db.prepare('SELECT COUNT(*) FROM positions').pluck().get()).toBe(0);
+});
+
+test('PUT /me/watched rejects extra fields, empty or duplicate lists', async () => {
+  const s = item('series', 10);
+  const put = (body: object) => send('PUT', '/api/me/watched', body);
+  expect((await put({ itemId: s, episodeRemoteIds: ['101'], watched: true, extra: 1 })).statusCode).toBe(400);
+  expect((await put({ itemId: s, episodeRemoteIds: [], watched: true })).statusCode).toBe(400);
+  expect((await put({ itemId: s, episodeRemoteIds: ['101', '101'], watched: true })).statusCode).toBe(400);
+  expect((await put({ itemId: s, episodeRemoteIds: ['101'] })).statusCode).toBe(400);
+});

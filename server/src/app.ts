@@ -83,7 +83,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     });
   const art = deps.art ?? createArtCache(config);
   const vodInfo = deps.vodInfo ?? createVodInfoCache({ catalogue: deps.catalogue, providers: deps.providers });
-  const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
+  // removeAdditional false: Fastify's default silently strips fields a schema forbids with additionalProperties: false.
+  const app = Fastify({
+    logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false,
+    ajv: { customOptions: { removeAdditional: false } },
+  });
 
   await app.register(
     async (api) => {

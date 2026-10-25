@@ -205,3 +205,50 @@ describe('positions', () => {
     expect(personal.positions(USER, 999)).toEqual([]);
   });
 });
+
+describe('watched marks', () => {
+  const eps = [
+    { remoteId: '101', label: 'S1 E1', durationSec: 1200 },
+    { remoteId: '102', label: 'S1 E2', durationSec: null },
+  ];
+  const row = (key: string) =>
+    db.prepare('SELECT finished, manual, position_sec AS positionSec, duration_sec AS durationSec, episode_label AS label, series_remote_id AS series, updated_at AS at FROM positions WHERE content_key = ?').get(key);
+
+  test('marking watched sets finished and manual', () => {
+    const s = addItem('series', '10');
+    personal.markWatched(USER, s, eps, true);
+    expect(row('episode:101')).toMatchObject({ finished: 1, manual: 1, positionSec: 1200, durationSec: 1200, label: 'S1 E1', series: '10' });
+    expect(row('episode:102')).toMatchObject({ finished: 1, manual: 1, positionSec: 0, durationSec: null });
+    expect(personal.positions(USER, s).map((p) => [p.episodeRemoteId, p.finished, p.manual]).sort()).toEqual([
+      ['101', true, true],
+      ['102', true, true],
+    ]);
+  });
+
+  test('unwatching deletes the rows', () => {
+    const s = addItem('series', '10');
+    personal.markWatched(USER, s, eps, true);
+    personal.markWatched(USER, s, [eps[0]], false);
+    expect(row('episode:101')).toBeUndefined();
+    expect(row('episode:102')).toBeDefined();
+  });
+
+  test('a real report clears manual', () => {
+    const s = addItem('series', '10');
+    personal.markWatched(USER, s, eps, true);
+    personal.savePosition(USER, { itemId: s, episodeRemoteId: '101', positionSec: 60, durationSec: 1200 }, 'S1 E1');
+    expect(row('episode:101')).toMatchObject({ finished: 0, manual: 0, positionSec: 60 });
+  });
+
+  test('manual marks are not continue-watching entries', () => {
+    const s = addItem('series', '10');
+    personal.savePosition(USER, { itemId: s, episodeRemoteId: '102', positionSec: 600, durationSec: 1200 }, 'S1 E2');
+    personal.markWatched(USER, s, [eps[0]], true);
+    expect(personal.continueWatching(USER, providerId, 'series', 5)).toMatchObject([{ itemId: s, episodeRemoteId: '102', positionSec: 600 }]);
+  });
+
+  test('an unknown or non-series item changes nothing', () => {
+    personal.markWatched(USER, 98765, eps, true);
+    expect(db.prepare('SELECT COUNT(*) FROM positions').pluck().get()).toBe(0);
+  });
+});

@@ -37,6 +37,11 @@ export interface PersonalService {
   /** `episodeLabel` is kept with an episode's position so browsing never has to ask the provider. */
   savePosition(userId: number, report: PositionReport, episodeLabel?: string): boolean;
   positions(userId: number, itemId: number): SavedPosition[];
+  /**
+   * Marks episodes of a series watched (a finished, manual row) or unwatched (the rows are deleted), in one
+   * transaction. Manual rows are finished, so they never become a Continue entry. An unknown item changes nothing.
+   */
+  markWatched(userId: number, itemId: number, episodes: { remoteId: string; label: string; durationSec: number | null }[], watched: boolean): void;
   continueWatching(userId: number, providerId: number, kind: 'movie' | 'series', limit: number): ContinueEntry[];
 }
 
@@ -47,6 +52,7 @@ type PositionRow = {
   positionSec: number;
   durationSec: number | null;
   finished: number;
+  manual: number;
   updatedAt: number;
 };
 
@@ -113,14 +119,14 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
     .pluck();
 
   const upsertPosition = db.prepare(
-    `INSERT INTO positions (user_id, provider_id, content_key, series_remote_id, episode_label, position_sec, duration_sec, finished, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO positions (user_id, provider_id, content_key, series_remote_id, episode_label, position_sec, duration_sec, finished, manual, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
      ON CONFLICT (user_id, provider_id, content_key) DO UPDATE SET
        series_remote_id = excluded.series_remote_id, episode_label = excluded.episode_label, position_sec = excluded.position_sec,
-       duration_sec = excluded.duration_sec, finished = excluded.finished, updated_at = excluded.updated_at`,
+       duration_sec = excluded.duration_sec, finished = excluded.finished, manual = 0, updated_at = excluded.updated_at`,
   );
   const POSITION_COLUMNS = `content_key AS contentKey, position_sec AS positionSec, duration_sec AS durationSec,
-    finished, updated_at AS updatedAt`;
+    finished, manual, updated_at AS updatedAt`;
   const moviePosition = db.prepare(
     `SELECT ${POSITION_COLUMNS} FROM positions WHERE user_id = ? AND provider_id = ? AND content_key = ?`,
   );
@@ -128,6 +134,14 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
     `SELECT ${POSITION_COLUMNS} FROM positions WHERE user_id = ? AND provider_id = ? AND series_remote_id = ?
      ORDER BY updated_at DESC, rowid DESC`,
   );
+  const upsertWatched = db.prepare(
+    `INSERT INTO positions (user_id, provider_id, content_key, series_remote_id, episode_label, position_sec, duration_sec, finished, manual, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
+     ON CONFLICT (user_id, provider_id, content_key) DO UPDATE SET
+       series_remote_id = excluded.series_remote_id, episode_label = excluded.episode_label, position_sec = excluded.position_sec,
+       duration_sec = excluded.duration_sec, finished = 1, manual = 1, updated_at = excluded.updated_at`,
+  );
+  const deletePosition = db.prepare('DELETE FROM positions WHERE user_id = ? AND provider_id = ? AND content_key = ?');
   const continueMovies = db.prepare(CONTINUE_MOVIES_SQL);
   const continueSeries = db.prepare(
     `SELECT i.id AS itemId, substr(p.content_key, ${EPISODE_PREFIX.length + 1}) AS episodeRemoteId,
@@ -144,6 +158,7 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
     positionSec: r.positionSec,
     durationSec: r.durationSec,
     finished: r.finished === 1,
+    manual: r.manual === 1,
     updatedAt: r.updatedAt,
   });
 
@@ -210,6 +225,17 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
             ? moviePosition.all(userId, i.providerId, `movie:${i.remoteId}`)
             : [];
       return (rows as PositionRow[]).map(toSaved);
+    },
+    markWatched(userId, itemId, episodes, watched) {
+      const i = ref(item, itemId);
+      if (!i || i.kind !== 'series') return;
+      db.transaction(() => {
+        for (const e of episodes) {
+          const key = `${EPISODE_PREFIX}${e.remoteId}`;
+          if (watched) upsertWatched.run(userId, i.providerId, key, i.remoteId, e.label, e.durationSec ?? 0, e.durationSec, deps.now());
+          else deletePosition.run(userId, i.providerId, key);
+        }
+      })();
     },
     continueWatching(userId, providerId, kind, limit) {
       const stmt = kind === 'movie' ? continueMovies : continueSeries;

@@ -69,7 +69,7 @@ test('deleting a provider removes its categories, items and links', () => {
 
 test('migration 3 creates the guide tables', () => {
   const db = openDb(':memory:');
-  expect(db.pragma('user_version', { simple: true })).toBe(3);
+  expect(db.pragma('user_version', { simple: true })).toBe(migrations.length);
   const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'programmes'").pluck().all();
   expect(indexes).toEqual(expect.arrayContaining(['programmes_slot', 'programmes_time', 'programmes_stop']));
   seed(db);
@@ -144,4 +144,17 @@ test('deleting a provider cascades personal and curation rows', () => {
   for (const table of ['category_rules', 'pins', 'favourites', 'history', 'positions', 'curation_state', 'catalogue_styles']) {
     expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
   }
+});
+
+test('migration 4 adds positions.manual defaulting to 0', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-db-'));
+  const file = path.join(dir, 'tv.sqlite');
+  const old = openDb(file, { migrations: migrations.slice(0, 3) });
+  seed(old);
+  old.prepare("INSERT INTO positions (user_id, provider_id, content_key, position_sec, finished, updated_at) VALUES (1, 1, 'movie:a', 5, 1, 0)").run();
+  old.close();
+  const db = openDb(file);
+  expect(db.pragma('user_version', { simple: true })).toBe(migrations.length);
+  expect(db.prepare('SELECT content_key AS k, finished, manual FROM positions').all()).toEqual([{ k: 'movie:a', finished: 1, manual: 0 }]);
+  db.close();
 });
