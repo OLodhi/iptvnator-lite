@@ -4,7 +4,7 @@
   import { ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { browse, hideCategory, pin, unpin } from '$lib/me';
-  import { browseSections, newCategoriesBanner } from '$lib/browseModel';
+  import { browseSections, favouritesRow, newCategoriesBanner } from '$lib/browseModel';
   import { rememberCategories } from '$lib/categoryNames';
   import { longpress } from '$lib/actions/longpress';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
@@ -23,6 +23,7 @@
 
   const sections = $derived(view ? browseSections(view) : []);
   const banner = $derived(view ? newCategoriesBanner(view) : null);
+  const favourites = $derived(view ? favouritesRow(view) : null);
 
   async function load(k: Kind, quiet: boolean) {
     const mine = ++seq;
@@ -141,6 +142,14 @@
       {@const cats = s.key === 'pinned' ? view.pinned : view.categories}
       <h2>{s.title}</h2>
       <ul class="list">
+        {#if s.key === 'pinned' && favourites}
+          <li>
+            <a class="row" href={favourites.href}>
+              <span class="cat-name"><span class="star" aria-hidden="true">★</span>Favourites</span>
+              <span class="count">{favourites.count} <span aria-hidden="true">›</span></span>
+            </a>
+          </li>
+        {/if}
         {#each cats as c (c.id)}
           <li>
             <a
@@ -205,6 +214,10 @@
     font-size: 0.6rem;
     margin-right: 8px;
     vertical-align: middle;
+  }
+  .star {
+    color: #ffc542;
+    margin-right: 8px;
   }
   .chan {
     width: 92px;

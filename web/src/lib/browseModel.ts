@@ -10,11 +10,17 @@ export function browseSections(view: BrowseView): Section[] {
     live
       ? { key: 'recent', title: 'Recently watched', kind: 'items', count: view.recent.length }
       : { key: 'continue', title: 'Continue watching', kind: 'continue', count: view.continueWatching.length },
-    { key: 'favourites', title: live ? 'Favourite channels' : 'Favourites', kind: 'items', count: view.favourites.length },
-    { key: 'pinned', title: 'Pinned', kind: 'categories', count: view.pinned.length },
+    // Live has its favourites row in Pinned instead.
+    { key: 'favourites', title: 'Favourites', kind: 'items', count: live ? 0 : view.favourites.length },
+    { key: 'pinned', title: 'Pinned', kind: 'categories', count: view.pinned.length + (favouritesRow(view) ? 1 : 0) },
     { key: 'all', title: 'All categories', kind: 'categories', count: view.categories.length },
   ];
   return candidates.filter((c) => c.count > 0).map(({ count: _count, ...section }) => section);
+}
+
+/** Live's category-style Favourites row, leading Pinned; it opens the favourites guide. Null without live favourites. */
+export function favouritesRow(view: BrowseView): { href: string; count: number } | null {
+  return view.kind === 'live' && view.favouriteCount > 0 ? { href: '/browse/live/favourites', count: view.favouriteCount } : null;
 }
 
 export const POSTER_GUTTER = 12;

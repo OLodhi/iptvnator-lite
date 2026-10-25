@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { BrowseView, CatalogItem, ContinueItem, Kind } from '@tv/shared';
-import { browseSections, hueFor, initials, newCategoriesBanner, posterRowHeight } from './browseModel.ts';
+import { browseSections, favouritesRow, hueFor, initials, newCategoriesBanner, posterRowHeight } from './browseModel.ts';
 
 const item = (id: number, kind: Kind = 'live'): CatalogItem => ({
   id, providerId: 1, kind, name: `n${id}`, displayName: `n${id}`, logoUrl: null,
@@ -11,17 +11,26 @@ const cat = (id: number, pinned = false) => ({ id, displayName: `c${id}`, itemCo
 
 const full = (kind: Kind): BrowseView => ({
   providerId: 1, kind, categories: [cat(1), cat(2, true)], pinned: [cat(2, true)],
-  recent: [item(1)], favourites: [item(2)], continueWatching: [cont], newCategories: 0,
+  recent: [item(1)], favourites: [item(2)], favouriteCount: 1, continueWatching: [cont], newCategories: 0,
 });
 const keys = (v: BrowseView) => browseSections(v).map((s) => s.key);
 
-test('live order: recently watched, favourite channels, pinned, all categories', () => {
+test('live order: recently watched, pinned, all categories; favourites are a row, not a carousel', () => {
   expect(browseSections(full('live'))).toEqual([
     { key: 'recent', title: 'Recently watched', kind: 'items' },
-    { key: 'favourites', title: 'Favourite channels', kind: 'items' },
     { key: 'pinned', title: 'Pinned', kind: 'categories' },
     { key: 'all', title: 'All categories', kind: 'categories' },
   ]);
+});
+
+test("Live's favourites row leads Pinned, which it keeps even with no pinned categories", () => {
+  expect(favouritesRow({ ...full('live'), favouriteCount: 73 })).toEqual({ href: '/browse/live/favourites', count: 73 });
+  expect(keys({ ...full('live'), pinned: [] })).toEqual(['recent', 'pinned', 'all']);
+  const none = { ...full('live'), favourites: [], favouriteCount: 0 };
+  expect(favouritesRow(none)).toBeNull();
+  expect(keys({ ...none, pinned: [] })).toEqual(['recent', 'all']);
+  expect(favouritesRow(full('movie'))).toBeNull();
+  expect(favouritesRow(full('series'))).toBeNull();
 });
 
 test('movies and series order: continue watching, favourites, pinned, all categories', () => {
@@ -36,7 +45,7 @@ test('movies and series order: continue watching, favourites, pinned, all catego
 });
 
 test('empty sections are omitted', () => {
-  const v = { ...full('live'), recent: [], pinned: [], favourites: [] };
+  const v = { ...full('live'), recent: [], pinned: [], favourites: [], favouriteCount: 0 };
   expect(keys(v)).toEqual(['all']);
   expect(keys({ ...full('movie'), continueWatching: [], categories: [] })).toEqual(['favourites', 'pinned']);
 });
