@@ -6,7 +6,6 @@
 
   const tabs = [
     { href: '/browse/live', label: 'Live' },
-    { href: '/guide', label: 'Guide' },
     { href: '/browse/movie', label: 'Movies' },
     { href: '/browse/series', label: 'Series' },
     { href: '/search', label: 'Search' },
