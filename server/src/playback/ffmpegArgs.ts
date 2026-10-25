@@ -14,7 +14,7 @@ export type FfmpegInput = {
 };
 
 const SEGMENT_SECONDS = 3;
-// 100 segments x 3 s = the 300 s rewind window for live.
+// 200 segments x 3 s = the 600 s rewind window for live.
 const LIVE_LIST_SIZE = 200;
 
 /**
