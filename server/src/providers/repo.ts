@@ -42,6 +42,8 @@ export interface ProviderRepo {
   get(id: number): ProviderRow | undefined;
   markSynced(id: number, at: number): void;
   updateAccount(id: number, account: XtreamAccount): void;
+  /** Providers whose stored account lacks the timezone key; one that stores null (the provider sent none) is not listed. */
+  withoutTimezone(): number[];
 }
 
 export function createProviderRepo(db: Db): ProviderRepo {
@@ -64,6 +66,13 @@ export function createProviderRepo(db: Db): ProviderRepo {
     },
     updateAccount(id, account) {
       db.prepare('UPDATE providers SET account = ? WHERE id = ?').run(JSON.stringify(account), id);
+    },
+    withoutTimezone() {
+      // json_type is NULL for a missing key and 'null' for a stored null.
+      return db
+        .prepare(`SELECT id FROM providers WHERE account IS NOT NULL AND json_type(account, '$.timezone') IS NULL ORDER BY id`)
+        .pluck()
+        .all() as number[];
     },
   };
 }

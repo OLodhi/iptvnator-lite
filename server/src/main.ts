@@ -20,7 +20,7 @@ import { createProber, withProbeLog } from './playback/probe.ts';
 import { startUpstreamRelay } from './playback/relay.ts';
 import { createSessionManager, defaultIsReady } from './playback/sessions.ts';
 import { spawnFfmpeg } from './playback/spawn.ts';
-import { createProviderService } from './providers/service.ts';
+import { createProviderService, refreshLegacyAccounts } from './providers/service.ts';
 import { consoleLog } from './util/log.ts';
 
 const log = consoleLog();
@@ -98,6 +98,8 @@ async function shutdown(): Promise<void> {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// Accounts stored before the timezone field get it now, not at the next daily sync; in the background, never awaited.
+void refreshLegacyAccounts({ providers, log });
 await app.listen({ port: config.port, host: config.host });
 scheduler.start();
 logos.start();
