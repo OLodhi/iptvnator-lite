@@ -46,14 +46,46 @@ test('pickTarget: latest finished on the last episode falls back to latest unfin
 });
 
 test('manual marks do not move the target', () => {
-  // Halfway through S2 E1, then season 1 marked watched: still Continue S2 E1.
+  // Design 7.4: halfway through S2 E1, then season 1 marked watched: still Continue S2 E1.
   expect(pickTarget(seasons, [pos('s2e1', 5), marked('s1e1', 9), marked('s1e2', 9)])).toEqual({
     episodeRemoteId: 's2e1', label: 'S2 E1', mode: 'continue',
   });
   // S1 E1 played to the end, then S2 E1 marked later: Play next still follows what was played.
   expect(pickTarget(seasons, [pos('s1e1', 5, true), marked('s2e1', 9)])).toEqual({ episodeRemoteId: 's1e2', label: 'S1 E2', mode: 'next' });
-  // Nothing played: marks alone leave Play on the first episode.
-  expect(pickTarget(seasons, [marked('s1e1', 9)])).toEqual({ episodeRemoteId: 's1e1', label: 'S1 E1', mode: 'play' });
+  // Nothing played: a mark is never where you are, so Play starts at the first episode not yet watched.
+  expect(pickTarget(seasons, [marked('s1e1', 9)])).toEqual({ episodeRemoteId: 's1e2', label: 'S1 E2', mode: 'play' });
+});
+
+test('marking the episode you are halfway through offers the next unwatched one', () => {
+  const bear: Season[] = [
+    { season: 1, episodes: [ep('s1e1', 1)] },
+    { season: 3, episodes: [ep('s3e1', 1), ep('s3e2', 2), ep('s3e3', 3)] },
+  ];
+  // S3 E1 played to the end, S3 E2 halfway: Continue S3 E2.
+  expect(pickTarget(bear, [pos('s3e1', 1, true), pos('s3e2', 5)])).toEqual({ episodeRemoteId: 's3e2', label: 'S3 E2', mode: 'continue' });
+  // Then S3 E2 marked: the server finishes the real row in place (still real, same time), so it is the anchor.
+  expect(pickTarget(bear, [pos('s3e1', 1, true), pos('s3e2', 5, true, 1000)])).toEqual({ episodeRemoteId: 's3e3', label: 'S3 E3', mode: 'next' });
+  // A row the mark made manual instead: the anchor is S3 E1, and the watched S3 E2 is skipped.
+  expect(pickTarget(bear, [pos('s3e1', 1, true), marked('s3e2', 9)])).toEqual({ episodeRemoteId: 's3e3', label: 'S3 E3', mode: 'next' });
+});
+
+test('Play next skips watched episodes', () => {
+  // S1 E1 played to the end, S1 E2 marked watched: S2 E1 is next.
+  expect(pickTarget(seasons, [pos('s1e1', 5, true), marked('s1e2', 9)])).toEqual({ episodeRemoteId: 's2e1', label: 'S2 E1', mode: 'next' });
+  // Watched by playing counts too.
+  expect(pickTarget(seasons, [pos('s1e1', 5, true), pos('s1e2', 3, true)])).toEqual({ episodeRemoteId: 's2e1', label: 'S2 E1', mode: 'next' });
+});
+
+test('no anchor plays the first unwatched episode', () => {
+  // A fresh series with season 1 marked watched.
+  expect(pickTarget(seasons, [marked('s1e1', 9), marked('s1e2', 9)])).toEqual({ episodeRemoteId: 's2e1', label: 'S2 E1', mode: 'play' });
+  // Every episode watched: the first episode.
+  expect(pickTarget(seasons, [marked('s1e1', 9), marked('s1e2', 9), marked('s2e1', 9)])).toEqual({
+    episodeRemoteId: 's1e1', label: 'S1 E1', mode: 'play',
+  });
+  expect(pickTarget(seasons, [pos('s2e1', 9, true), marked('s1e1', 9), marked('s1e2', 9)])).toEqual({
+    episodeRemoteId: 's1e1', label: 'S1 E1', mode: 'play',
+  });
 });
 
 test('specials come last: a fresh series plays S1 E1, and they follow the last season', () => {

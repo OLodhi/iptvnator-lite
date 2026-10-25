@@ -249,7 +249,10 @@ test('long-press marks watched and refreshes', async () => {
   await vi.waitFor(() => expect(text(rows()[1]!.querySelector('.s'))).toBe('watched'));
   expect(me.markWatched).toHaveBeenCalledWith(11, ['112'], true);
   expect(me.positions).toHaveBeenCalledTimes(2);
-  expect(text(document.querySelector('a.play .label'))).toBe('▶ Play next: S1 E2'); // a mark never moves it
+  // What comes next skips the episode now watched; the list stays on season 1.
+  expect(text(document.querySelector('a.play .label'))).toBe('▶ Play next: S2 E1');
+  expect(document.querySelector('.ep-row.current')).toBeNull();
+  expect(text(seasonButton())).toBe('Season 1 ▾');
 
   me.positions.mockResolvedValue([pos('111', { finished: true, positionSec: 1980 })]);
   await longPress(rows()[1]!);
@@ -257,6 +260,8 @@ test('long-press marks watched and refreshes', async () => {
   await vi.waitFor(() => expect(text(rows()[1]!.querySelector('.s'))).toBe('33 min'));
   expect(me.markWatched).toHaveBeenLastCalledWith(11, ['112'], false);
   expect(me.positions).toHaveBeenCalledTimes(3);
+  expect(text(document.querySelector('a.play .label'))).toBe('▶ Play next: S1 E2');
+  expect(rows()[1]!.classList.contains('current')).toBe(true);
 });
 
 test('Mark season watched sends every episode', async () => {

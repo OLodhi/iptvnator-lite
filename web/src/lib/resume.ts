@@ -11,9 +11,10 @@ export function pickResume(positions: SavedPosition[], episodeRemoteId: string |
 export type ResumeTarget = { episodeRemoteId: string; label: string; mode: 'continue' | 'play' | 'next' };
 
 /**
- * The series page's primary button, following what was actually played: the episode after a finished latest one,
- * else the latest unfinished, else the first, in watching order (specials last). Episodes marked watched by hand stay
- * watched, but never count as where you are.
+ * The series page's primary button, in watching order (specials last). Where you are is the latest episode actually
+ * played: Continue it while unfinished, else Play next, the first unwatched episode after it. A mark made by hand is
+ * never where you are, but what comes next skips every watched episode. With nothing played, Play the first unwatched
+ * episode; with everything watched, the first.
  */
 export function pickTarget(seasons: Season[], positions: SavedPosition[]): ResumeTarget | null {
   const ordered = [...seasons]
@@ -25,22 +26,22 @@ export function pickTarget(seasons: Season[], positions: SavedPosition[]): Resum
     );
   if (ordered.length === 0) return null;
   const known = new Set(ordered.map((e) => e.remoteId));
-  const played = positions
-    .filter((p) => !p.manual && p.episodeRemoteId !== null && known.has(p.episodeRemoteId))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  const make = (remoteId: string, mode: ResumeTarget['mode']): ResumeTarget => ({
-    episodeRemoteId: remoteId,
-    label: ordered.find((e) => e.remoteId === remoteId)!.label,
-    mode,
-  });
+  const mine = positions.filter((p) => p.episodeRemoteId !== null && known.has(p.episodeRemoteId));
+  // Watched means finished, played or marked.
+  const watched = new Set(mine.filter((p) => p.finished).map((p) => p.episodeRemoteId));
+  const played = mine.filter((p) => !p.manual).sort((a, b) => b.updatedAt - a.updatedAt);
+  const make = (e: (typeof ordered)[number], mode: ResumeTarget['mode']): ResumeTarget => ({ episodeRemoteId: e.remoteId, label: e.label, mode });
+  const firstUnwatched = (from: number) => ordered.slice(from).find((e) => !watched.has(e.remoteId));
 
-  const latest = played[0];
-  if (latest?.finished) {
-    const i = ordered.findIndex((e) => e.remoteId === latest.episodeRemoteId);
-    const next = ordered[i + 1];
-    if (next) return make(next.remoteId, 'next');
+  const anchor = played[0];
+  if (anchor) {
+    const at = ordered.findIndex((e) => e.remoteId === anchor.episodeRemoteId);
+    if (!anchor.finished) return make(ordered[at]!, 'continue');
+    const next = firstUnwatched(at + 1);
+    if (next) return make(next, 'next');
   }
+  // After the last unwatched episode: an older one left unfinished, else from the top.
   const unfinished = played.find((p) => !p.finished);
-  if (unfinished) return make(unfinished.episodeRemoteId!, 'continue');
-  return make(ordered[0]!.remoteId, 'play');
+  if (unfinished) return make(ordered.find((e) => e.remoteId === unfinished.episodeRemoteId)!, 'continue');
+  return make(firstUnwatched(0) ?? ordered[0]!, 'play');
 }
