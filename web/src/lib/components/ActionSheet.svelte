@@ -1,5 +1,5 @@
 <script lang="ts">
-  type Action = { label: string; danger?: boolean; run: () => void };
+  type Action = { label: string; danger?: boolean; disabled?: boolean; selected?: boolean; run: () => void };
   type Props = { open: boolean; title: string; actions: Action[]; onClose: () => void };
 
   let { open, title, actions, onClose }: Props = $props();
@@ -26,7 +26,14 @@
   <div class="sheet" role="dialog" aria-modal="true" aria-label={title}>
     <p class="sheet-title">{title}</p>
     {#each actions as a (a.label)}
-      <button type="button" class="sheet-action" class:danger={a.danger} onclick={() => choose(a)}>{a.label}</button>
+      <button
+        type="button"
+        class="sheet-action"
+        class:danger={a.danger}
+        disabled={a.disabled}
+        aria-pressed={a.selected}
+        onclick={() => choose(a)}
+      >{#if a.selected}<span class="tick" aria-hidden="true">✓</span>{/if}{a.label}</button>
     {/each}
     <button type="button" class="sheet-action cancel" onclick={onClose}>Cancel</button>
   </div>
@@ -75,6 +82,14 @@
   }
   .sheet-action:active {
     background: var(--border);
+  }
+  .sheet-action:disabled {
+    color: var(--muted);
+    cursor: default;
+  }
+  .tick {
+    margin-right: 8px;
+    color: var(--accent);
   }
   .sheet-action.danger {
     color: var(--danger);
