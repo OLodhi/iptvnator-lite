@@ -98,6 +98,27 @@ test('a tap watches the channel live, and a long-press hands the channel over an
   expect(click.defaultPrevented).toBe(true); // a long-press does not also open the watch page
 });
 
+test('without a long-press handler (the watch page), a slow press still plays the channel', async () => {
+  guide.grid.mockResolvedValue(page(row(1)));
+  mountIt({ filter: 'category:4', label: 'Sports', currentItemId: 1 });
+  await vi.waitFor(() => expect(document.querySelectorAll('a.entry')).toHaveLength(1));
+  const entry = document.querySelector<HTMLElement>('a.entry')!;
+  entry.dispatchEvent(new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 560));
+  entry.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+  let followed = false;
+  // jsdom doesn't navigate: a listener after the row's own records whether the click was let through.
+  const follow = (e: Event) => {
+    followed = !e.defaultPrevented;
+    e.preventDefault();
+  };
+  document.addEventListener('click', follow);
+  entry.dispatchEvent(click);
+  document.removeEventListener('click', follow);
+  expect(followed).toBe(true);
+});
+
 test('currentItemId highlights Playing', async () => {
   guide.grid.mockResolvedValue(page(row(1), row(2), row(3)));
   mountIt({ filter: 'favourites', label: 'Favourites', currentItemId: 2 });

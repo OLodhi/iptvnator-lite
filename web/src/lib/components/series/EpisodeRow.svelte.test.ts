@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import type { EpisodeDetail, SavedPosition } from '@tv/shared';
 import EpisodeRow from './EpisodeRow.svelte';
@@ -7,6 +7,7 @@ const apps: ReturnType<typeof mount>[] = [];
 afterEach(() => {
   apps.splice(0).forEach((a) => unmount(a));
   document.body.innerHTML = '';
+  vi.useRealTimers();
 });
 
 const ep = (over: Partial<EpisodeDetail> = {}): EpisodeDetail => ({
@@ -17,7 +18,7 @@ const saved = (over: Partial<SavedPosition>): SavedPosition => ({
 });
 
 /** Mounts a row in its own box and returns the box. */
-function row(props: { episode: EpisodeDetail; saved: SavedPosition | null; current?: boolean }): HTMLElement {
+function row(props: { episode: EpisodeDetail; saved: SavedPosition | null; current?: boolean; onLongPress?: (ep: EpisodeDetail) => void }): HTMLElement {
   const target = document.body.appendChild(document.createElement('div'));
   apps.push(mount(EpisodeRow, { target, props: { itemId: 11, href: `/watch?item=11&episode=${props.episode.remoteId}`, ...props } }));
   flushSync();
@@ -55,4 +56,33 @@ test('watched shows ✓; started shows progress and min left; quality badge', ()
   expect(text(bare.querySelector('.s'))).toBe('');
   expect(bare.querySelector('.badge')).toBeNull();
   expect(bare.querySelector('.thumb .tile')).not.toBeNull();
+});
+
+/** Holds the link down for `ms` and lets go: whether the click that follows would still follow the link. */
+function slowPress(link: HTMLElement, ms: number): boolean {
+  link.dispatchEvent(new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+  vi.advanceTimersByTime(ms);
+  link.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+  // jsdom doesn't navigate: a listener after the row's own records whether the click was let through.
+  let followed = false;
+  const follow = (e: Event) => {
+    followed = !e.defaultPrevented;
+    e.preventDefault();
+  };
+  document.addEventListener('click', follow);
+  link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  document.removeEventListener('click', follow);
+  return followed;
+}
+
+test('without a long-press handler (the watch page), a slow press still plays the episode', () => {
+  vi.useFakeTimers();
+  const link = row({ episode: ep(), saved: null }).querySelector('a')!;
+  expect(slowPress(link, 800)).toBe(true);
+
+  // With one (the series page), the long press is handled and the tap swallowed.
+  const onLongPress = vi.fn();
+  const pressable = row({ episode: ep({ remoteId: '113' }), saved: null, onLongPress }).querySelector('a')!;
+  expect(slowPress(pressable, 800)).toBe(false);
+  expect(onLongPress).toHaveBeenCalledWith(expect.objectContaining({ remoteId: '113' }));
 });

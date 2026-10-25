@@ -37,7 +37,7 @@
   {href}
   aria-current={current ? 'true' : undefined}
   draggable="false"
-  use:longpress={{ onLongPress: () => onLongPress?.(episode) }}
+  use:longpress={{ onLongPress: onLongPress && (() => onLongPress(episode)) }}
 >
   <span class="thumb">
     <Artwork name={episode.title} src={episode.imageUrl} />

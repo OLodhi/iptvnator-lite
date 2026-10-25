@@ -27,7 +27,7 @@
   aria-current={playing ? 'true' : undefined}
   {href}
   draggable="false"
-  use:longpress={{ onLongPress: () => onLongPress?.(item) }}
+  use:longpress={{ onLongPress: onLongPress && (() => onLongPress(item)) }}
 >
   <span class="thumb"><Artwork name={item.displayName} src={item.logoUrl} fit="contain" /></span>
   <span class="text">

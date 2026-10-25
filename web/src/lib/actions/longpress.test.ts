@@ -70,6 +70,20 @@ test('a normal tap click is not suppressed', () => {
   document.removeEventListener('click', clicks);
 });
 
+test('without a handler, a slow press is an ordinary click', () => {
+  action.destroy?.();
+  action = longpress(node, {}) as { destroy?: () => void };
+  const clicks = vi.fn();
+  document.addEventListener('click', clicks);
+  fire('pointerdown');
+  vi.advanceTimersByTime(800);
+  fire('pointerup');
+  fire('click');
+  expect(clicks).toHaveBeenCalledTimes(1);
+  expect(clicks.mock.calls[0]![0].defaultPrevented).toBe(false);
+  document.removeEventListener('click', clicks);
+});
+
 test('contextmenu is prevented to stop the native callout', () => {
   const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
   node.dispatchEvent(e);

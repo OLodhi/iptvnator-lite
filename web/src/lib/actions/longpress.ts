@@ -1,4 +1,5 @@
-export type LongPressParams = { ms?: number; onLongPress: () => void };
+/** Without `onLongPress` nothing is pressed long: a slow press is an ordinary click. */
+export type LongPressParams = { ms?: number; onLongPress?: () => void };
 
 const MOVE_TOLERANCE_PX = 10;
 
@@ -32,12 +33,15 @@ export function longpress(node: HTMLElement, initial: LongPressParams) {
     cancel();
     clearTimeout(clearSuppress);
     suppressClick = false;
+    if (!params.onLongPress) return;
     startX = e.clientX;
     startY = e.clientY;
     timer = setTimeout(() => {
       timer = undefined;
+      const fire = params.onLongPress;
+      if (!fire) return; // the handler went while the pointer was down
       suppressClick = true;
-      params.onLongPress();
+      fire();
     }, params.ms ?? 500);
   };
   const onMove = (e: PointerEvent) => {
