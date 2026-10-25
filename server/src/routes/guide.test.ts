@@ -247,6 +247,22 @@ describe('guide API', () => {
     expect(rest.items[1]!.programmes).toEqual([]);
   });
 
+  test('grid for a visible, unpinned category gives its channels in category order', async () => {
+    const general = categoryId('1');
+    personal.unpin(USER, general);
+    const positions = db.prepare('SELECT item_id, position FROM item_categories WHERE category_id = ?').all(general) as
+      { item_id: number; position: number }[];
+    const setPosition = db.prepare('UPDATE item_categories SET position = ? WHERE category_id = ? AND item_id = ?');
+    setPosition.run(-1, general, itemId('2')); // the provider lists Raw TS first
+    try {
+      const page = (await app.inject(`/api/guide/grid?${q({ filter: `category:${general}`, from: NOW, to: NOW + HOUR })}`)).json() as Page<GridRow>;
+      expect(page.items.map((r) => r.item.name)).toEqual(['UK| Raw TS Channel', 'UK| HLS Channel']);
+      expect(page.nextCursor).toBeNull();
+    } finally {
+      for (const p of positions) setPosition.run(p.position, general, p.item_id);
+    }
+  });
+
   test('programmes extends the window for given items', async () => {
     const ids = [itemId('1'), itemId('3')];
     const res = await app.inject(`/api/guide/programmes?${q({ items: ids.join(','), from: NOW + HOUR, to: NOW + 3 * HOUR })}`);
