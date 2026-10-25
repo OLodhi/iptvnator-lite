@@ -47,7 +47,7 @@ beforeAll(async () => {
     sessions: stubSessions({
       start: async (req) => {
         if (failStart) throw new PlaybackError('PROVIDER_CONNECTION_LIMIT', 'busy');
-        return { sessionId: 's1', mode: 'hls', url: `/api/sessions/s1/${req.clientId}/index.m3u8`, durationSec: null, startAtSec: 0 };
+        return { sessionId: 's1', mode: 'hls', url: `/api/sessions/s1/${req.clientId}/index.m3u8`, durationSec: null, startAtSec: 0, tracks: null };
       },
     }),
     curation: createCurationService({ db, now: Date.now }),

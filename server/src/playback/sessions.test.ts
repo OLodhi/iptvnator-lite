@@ -24,6 +24,18 @@ const MP4_MOVIE: ProbeResult = {
   audio: AAC,
   subtitles: [],
 };
+/** Like the fake's movie 5: Dutch audio (the default disposition), then English; English, then Dutch text subtitles. */
+const MULTI_TRACKS: Pick<ProbeResult, 'audio' | 'subtitles'> = {
+  audio: [
+    { index: 1, codec: 'aac', channels: 2, language: 'nld', title: null, isDefault: true },
+    { index: 2, codec: 'aac', channels: 2, language: 'eng', title: null, isDefault: false },
+  ],
+  subtitles: [
+    { index: 3, codec: 'subrip', language: 'eng', title: null, isDefault: false, forced: false, text: true },
+    { index: 4, codec: 'subrip', language: 'nld', title: null, isDefault: false, forced: false, text: true },
+  ],
+};
+const MULTI_MKV: ProbeResult = { ...MKV_MOVIE, ...MULTI_TRACKS };
 /** What the prober returns: a result from a fresh ffprobe run, or one from its cache. */
 const fresh = (result: ProbeResult): ProbeOutcome => ({ result, cached: false });
 const fromCache = (result: ProbeResult): ProbeOutcome => ({ result, cached: true });
@@ -242,6 +254,7 @@ describe('session manager', () => {
       url: `/api/sessions/${a.sessionId}/A/index.m3u8`,
       durationSec: null,
       startAtSec: 0,
+      tracks: null,
     });
     expect(b.url).toBe(`/api/sessions/${a.sessionId}/B/index.m3u8`);
     expect(h.spawn.mock.calls[0]![0]).toBe('ffmpeg');
@@ -396,6 +409,7 @@ describe('session manager', () => {
       url: `/api/sessions/${s.sessionId}/A/direct`,
       durationSec: 60,
       startAtSec: 0,
+      tracks: null,
     });
     expect(h.spawn).not.toHaveBeenCalled();
     expect(h.m.activeUpstreams(1)).toBe(1);
@@ -1451,6 +1465,105 @@ describe('session manager', () => {
     expect(ok.url).toContain(`/Az_9-${'x'.repeat(59)}/index.m3u8`);
     expect(h.m.touch(ok.sessionId, 'a b')).toBe(false);
   });
+
+  /** Starts `req`, letting the client's previous FFmpeg exit (50 ms after its kill) on the way. */
+  const startNext = async (m: SessionManager, req: StartRequest) => {
+    const started = m.start(req);
+    await vi.advanceTimersByTimeAsync(100);
+    return started;
+  };
+  /** The source streams an FFmpeg run reads: every `-map` value. */
+  const mapsOf = (args: string[]) => args.flatMap((a, i) => (args[i - 1] === '-map' ? [a] : []));
+
+  test('a different audio or subtitle at the same position starts a new session and releases the old one', async () => {
+    const h = harness({ probe: async () => fresh(MULTI_MKV) });
+    const req = { ...movie(5, 'A'), startAtSec: 600 };
+
+    const first = await h.m.start(req);
+    expect(first).toEqual({
+      sessionId: first.sessionId,
+      mode: 'hls',
+      url: `/api/sessions/${first.sessionId}/A/index.m3u8`,
+      durationSec: 60,
+      startAtSec: 600,
+      tracks: {
+        audio: [
+          { index: 1, label: 'Dutch', language: 'nl', isDefault: true, forced: false, available: true },
+          { index: 2, label: 'English', language: 'en', isDefault: false, forced: false, available: true },
+        ],
+        subtitles: [
+          { index: 3, label: 'English', language: 'en', isDefault: false, forced: false, available: true },
+          { index: 4, label: 'Dutch', language: 'nl', isDefault: false, forced: false, available: true },
+        ],
+        audioIndex: 2, // English, though Dutch is the default disposition
+        subtitleIndex: null,
+      },
+    });
+
+    const second = await startNext(h.m, { ...req, audioIndex: 1 });
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(second.tracks).toMatchObject({ audioIndex: 1, subtitleIndex: null });
+    expect(alive(h.m, first.sessionId)).toBe(false);
+
+    const third = await startNext(h.m, { ...req, audioIndex: 1, subtitleIndex: 3 });
+    expect(third.url).toBe(`/api/sessions/${third.sessionId}/A/master.m3u8`);
+    expect(third.tracks).toMatchObject({ audioIndex: 1, subtitleIndex: 3 });
+    expect(alive(h.m, second.sessionId)).toBe(false);
+    expect(alive(h.m, third.sessionId)).toBe(true);
+
+    // Each old FFmpeg has exited before the next one starts, from the same position, with its own tracks.
+    expect(h.events).toEqual(['spawn:1', 'kill:1', 'exit:1', 'spawn:2', 'kill:2', 'exit:2', 'spawn:3']);
+    expect(h.children.map((c) => argAfter(c.args, '-ss'))).toEqual(['600', '600', '600']);
+    expect(h.children.map((c) => mapsOf(c.args))).toEqual([
+      ['0:v:0', '0:2'],
+      ['0:v:0', '0:1'],
+      ['0:v:0', '0:1', '0:3'],
+    ]);
+    expect(h.m.activeUpstreams(1)).toBe(1);
+  });
+
+  test('subtitleLanguage picks a text track in that language, unless subtitleIndex is given', async () => {
+    const h = harness({ probe: async () => fresh(MULTI_MKV) });
+    const req = movie(5, 'A');
+    const tracksOf = async (choice: Partial<StartRequest>) => {
+      const s = await startNext(h.m, { ...req, ...choice });
+      return { url: s.url.split('/').pop(), audioIndex: s.tracks?.audioIndex, subtitleIndex: s.tracks?.subtitleIndex };
+    };
+
+    expect(await tracksOf({ subtitleLanguage: 'nl' })).toEqual({ url: 'master.m3u8', audioIndex: 2, subtitleIndex: 4 });
+    expect(await tracksOf({ subtitleLanguage: 'nld' })).toEqual({ url: 'master.m3u8', audioIndex: 2, subtitleIndex: 4 });
+    expect(await tracksOf({ subtitleLanguage: 'fr' })).toEqual({ url: 'index.m3u8', audioIndex: 2, subtitleIndex: null });
+    expect(await tracksOf({ subtitleLanguage: null })).toEqual({ url: 'index.m3u8', audioIndex: 2, subtitleIndex: null });
+    // An explicit choice, Off included, wins over the remembered language.
+    expect(await tracksOf({ subtitleLanguage: 'nl', subtitleIndex: 3 })).toEqual({ url: 'master.m3u8', audioIndex: 2, subtitleIndex: 3 });
+    expect(await tracksOf({ subtitleLanguage: 'nl', subtitleIndex: null })).toEqual({ url: 'index.m3u8', audioIndex: 2, subtitleIndex: null });
+  });
+
+  test('tracks are null for live and catch-up', async () => {
+    const probes: Record<string, ProbeResult> = {
+      m3u8: { ...LIVE_HLS, ...MULTI_TRACKS },
+      ts: { ...TIMESHIFT_TS, ...MULTI_TRACKS },
+      mp4: { ...MP4_MOVIE, ...MULTI_TRACKS },
+    };
+    const h = harness({ relay: stubRelay(() => {}), probe: async (url) => fresh(probes[url.split('.').pop()!]!) });
+    const choice = { audioIndex: 2, subtitleLanguage: 'en' };
+
+    const l = await h.m.start({ ...live(1, 'A'), ...choice });
+    const c = await h.m.start({ ...catchup('B'), ...choice });
+    for (const s of [l, c]) {
+      expect(s).toMatchObject({ mode: 'hls', tracks: null });
+      expect(s.url).toMatch(/\/index\.m3u8$/);
+    }
+    // They play their first audio stream, without subtitles, whatever the request says.
+    expect(h.children.map((child) => mapsOf(child.args))).toEqual([
+      ['0:v:0', '0:1'],
+      ['0:v:0', '0:1'],
+    ]);
+
+    // A direct movie's tracks are the player's own.
+    const d = await h.m.start({ ...movie(2, 'C', 'mp4'), audioIndex: 1 });
+    expect(d).toMatchObject({ mode: 'direct', tracks: null });
+  });
 });
 
 describe('pruneSegments', () => {
@@ -1482,7 +1595,7 @@ const realFfmpeg = process.env.TV_FFMPEG_PATH;
 // Drives pruneSegments directly (as the session manager does after a relaunch), with two real FFmpeg runs.
 describe.skipIf(!realFfmpeg)('pruneSegments with real FFmpeg', () => {
   const media = (name: string) => join(import.meta.dirname, '../../../tools/fake-xtream/media', name);
-  const copyTs: HlsPlan = { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false };
+  const copyTs: HlsPlan = { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false, subtitle: null };
   const copyHevc: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, audio: null };
   const listed = (dir: string) =>
     readFileSync(join(dir, 'index.m3u8'), 'utf8')
@@ -1529,5 +1642,20 @@ describe('defaultIsReady', () => {
     expect(await defaultIsReady(dir)).toBe(false);
     writePlaylist(dir, 0, 0);
     expect(await defaultIsReady(dir)).toBe(true);
+  });
+
+  test('with a subtitle rendition, is true once master.m3u8 names the variant and stream_0.m3u8 lists a segment', async () => {
+    const dir = join(transcodeDir, 'ready-master');
+    mkdirSync(dir);
+    const rendition = '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="subtitle_0",DEFAULT=YES,URI="stream_0_vtt.m3u8"\n';
+    const variant = '#EXT-X-STREAM-INF:BANDWIDTH=8976000,SUBTITLES="subs"\nstream_0.m3u8\n';
+    writeFileSync(join(dir, 'stream_0.m3u8'), '#EXTM3U\n#EXTINF:3.000000,\nseg_0_00000.ts\n');
+    expect(await defaultIsReady(dir)).toBe(false); // FFmpeg writes the master just after the variant
+    writeFileSync(join(dir, 'master.m3u8'), `#EXTM3U\n${rendition}`);
+    expect(await defaultIsReady(dir)).toBe(false); // a master that names no variant yet
+    writeFileSync(join(dir, 'master.m3u8'), `#EXTM3U\n${rendition}${variant}`);
+    expect(await defaultIsReady(dir)).toBe(true);
+    writeFileSync(join(dir, 'stream_0.m3u8'), '#EXTM3U\n#EXT-X-VERSION:6\n');
+    expect(await defaultIsReady(dir)).toBe(false);
   });
 });

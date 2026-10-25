@@ -51,13 +51,14 @@ type DirectProxy = {
 
 const TOUCH_INTERVAL_MS = 10_000;
 const UPSTREAM_HEADERS_TIMEOUT_MS = 15_000;
-// Only what FFmpeg writes into a session dir: playlists, segments and the fMP4 init file.
+// Only what FFmpeg writes into a session dir: playlists, segments, WebVTT subtitle segments and the fMP4 init file.
 // Plain names only, so nothing can climb out of the dir (the session manager checks again).
-const SESSION_FILE = /^(?:[\w-]+\.(m3u8|ts|m4s)|init\.(mp4))$/;
+const SESSION_FILE = /^(?:[\w-]+\.(m3u8|ts|m4s|vtt)|init\.(mp4))$/;
 const FILE_TYPES: Record<string, string> = {
   m3u8: 'application/vnd.apple.mpegurl',
   ts: 'video/mp2t',
   m4s: 'video/iso.segment',
+  vtt: 'text/vtt',
   mp4: 'video/mp4',
 };
 
@@ -77,6 +78,9 @@ const playSchema = {
         stopSec: { type: 'integer', minimum: 0 },
       },
     },
+    audioIndex: { type: 'integer', minimum: 0 },
+    subtitleIndex: { type: ['integer', 'null'], minimum: 0 },
+    subtitleLanguage: { type: ['string', 'null'], pattern: '^[a-z]{2,3}$' },
   },
 };
 
@@ -123,12 +127,17 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
       // already counts as free once it preempts that session. Close it first, or a one-connection
       // provider refuses the new stream.
       await endProxies((p) => p.clientId === req.body.clientId);
+      const { audioIndex, subtitleIndex, subtitleLanguage } = req.body;
       const started = await sessions.start({
         ...source,
         userAgent: deps.userAgent,
         startAtSec: req.body.startAtSec ?? 0,
         clientId: req.body.clientId,
         quality: 'original',
+        // Resolved against the probe: subtitleLanguage counts only when subtitleIndex is left out.
+        audioIndex,
+        subtitleIndex,
+        subtitleLanguage,
       });
       // Only a stream that actually started counts as watched.
       // Best-effort: a failed history write must not fail a stream that is already running.

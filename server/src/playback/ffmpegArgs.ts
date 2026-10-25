@@ -17,6 +17,18 @@ const SEGMENT_SECONDS = 3;
 // 100 segments x 3 s = the 300 s rewind window for live.
 const LIVE_LIST_SIZE = 100;
 
+/**
+ * With a subtitle rendition FFmpeg writes a master playlist naming one variant (stream_%v.m3u8, %v = 0) and its
+ * WebVTT playlist (stream_0_vtt.m3u8, with segments stream_0<n>.vtt), all beside it.
+ */
+export const MASTER_PLAYLIST = 'master.m3u8';
+export const VARIANT_PLAYLIST = 'stream_0.m3u8';
+// FFmpeg names a variant in the master only once it knows a bit rate for it, and it takes that from the streams
+// alone; a stream copied from an MKV has none, so the master would name no variant until the whole title was
+// written. These label copied streams (they don't change them): BANDWIDTH is a hint, and there is only one variant.
+const NOMINAL_VIDEO_BITRATE = '8M';
+const NOMINAL_AUDIO_BITRATE = '192k';
+
 // Forward slashes are deliberate. With backslash paths on Windows, FFmpeg 9 writes the
 // bare fMP4 init file into the process cwd (or, given a full path, puts that full path in
 // #EXT-X-MAP). With forward-slash output paths its own directory logic puts init.mp4
@@ -37,6 +49,7 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   const { url, userAgent, plan, live, startAtSec, outDir, startNumber } = input;
   const remote = url.startsWith('http://') || url.startsWith('https://');
   const fmp4 = plan.segment === 'fmp4';
+  const subtitle = plan.subtitle;
 
   const args: string[] = ['-hide_banner', '-loglevel', 'warning', '-nostdin'];
 
@@ -59,6 +72,7 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   else args.push('-map', '0:v:0');
   if (plan.audio === null) args.push('-an');
   else args.push('-map', `0:${plan.audio.index}`);
+  if (subtitle) args.push('-map', `0:${subtitle.index}`);
 
   // Codecs
   if (plan.video === 'copy') {
@@ -70,9 +84,21 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   }
   if (plan.audio?.action === 'copy') args.push('-c:a', 'copy');
   else if (plan.audio?.action === 'aac') args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2');
+  if (subtitle) {
+    args.push('-c:s', 'webvtt');
+    if (plan.video === 'copy') args.push('-b:v', NOMINAL_VIDEO_BITRATE);
+    if (plan.audio?.action === 'copy') args.push('-b:a', NOMINAL_AUDIO_BITRATE);
+    // FFmpeg's WebVTT segments carry no X-TIMESTAMP-MAP, so players read their cue times against MPEG-TS time 0.
+    // Without the muxer's default 1.4 s start offset the video starts there too, and the cues line up.
+    args.push('-muxdelay', '0');
+  }
 
   // HLS muxer
   args.push('-f', 'hls', '-hls_time', String(SEGMENT_SECONDS), '-hls_init_time', '1');
+  if (subtitle) {
+    const streams = [plan.video === 'none' ? null : 'v:0', plan.audio === null ? null : 'a:0', 's:0', 'sgroup:subs'];
+    args.push('-master_pl_name', MASTER_PLAYLIST, '-var_stream_map', streams.filter((x) => x !== null).join(','));
+  }
   if (live) {
     args.push('-hls_list_size', String(LIVE_LIST_SIZE));
     // omit_endlist: an FFmpeg that exits (and is relaunched) must not mark the live playlist finished,
@@ -85,8 +111,11 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
   }
   if (startNumber > 0) args.push('-start_number', String(startNumber));
   args.push('-hls_segment_type', fmp4 ? 'fmp4' : 'mpegts');
+  // A single variant's init file keeps this name.
   if (fmp4) args.push('-hls_fmp4_init_filename', 'init.mp4');
-  args.push('-hls_segment_filename', outPath(outDir, fmp4 ? 'seg_%05d.m4s' : 'seg_%05d.ts'));
-  args.push(outPath(outDir, 'index.m3u8'));
+  // Variant streams need FFmpeg's %v in their file names.
+  const segment = subtitle ? 'seg_%v_%05d' : 'seg_%05d';
+  args.push('-hls_segment_filename', outPath(outDir, `${segment}.${fmp4 ? 'm4s' : 'ts'}`));
+  args.push(outPath(outDir, subtitle ? 'stream_%v.m3u8' : 'index.m3u8'));
   return args;
 }

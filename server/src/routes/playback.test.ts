@@ -10,7 +10,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { PlayResponse } from '@tv/shared';
-import { smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
+import { richCatalogue, smallCatalogue } from '../../../tools/fake-xtream/src/catalogue.ts';
 import { formatInZone } from '../../../tools/fake-xtream/src/guide.ts';
 import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../tools/fake-xtream/src/server.ts';
@@ -104,6 +104,32 @@ async function makeWorld(
   return { app, origin, db, providers, catalogue, seriesInfo, sessions, providerId, itemId };
 }
 
+/** A session manager as the server wires it: the real prober, FFmpeg and relay, and the provider's connection limit. */
+function realSessions(opts: { config: Config; log: Log; relay: UpstreamRelay; readyTimeoutMs: number }) {
+  const { config, log, relay, readyTimeoutMs } = opts;
+  return (db: Db, providers: ProviderService): SessionManager => {
+    const prober = createProber({ ffprobePath: config.ffprobePath, db });
+    return createSessionManager({
+      ffmpegPath: config.ffmpegPath,
+      transcodeDir: config.transcodeDir,
+      spawn: spawnFfmpeg(log),
+      probe: (url, userAgent, readFrom, probeOpts) => prober.probe(url, userAgent, readFrom, probeOpts),
+      invalidateProbe: (url) => prober.invalidate(url),
+      transcodeInterlaced: false,
+      maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
+      isReady: defaultIsReady,
+      now: Date.now,
+      liveIdleMs: 20_000,
+      vodIdleMs: 60_000,
+      readyTimeoutMs,
+      stallTimeoutMs: 20_000,
+      maxRestarts: 3,
+      log,
+      relay,
+    });
+  };
+}
+
 /** The hour before this one: it has aired, and is inside live 1's 2-day archive. */
 function lastHour(): { startSec: number; stopSec: number } {
   const startSec = Math.floor(Date.now() / 3_600_000) * 3600 - 3600;
@@ -143,6 +169,7 @@ describe('playback routes', () => {
     url: `/api/sessions/s1/${clientId}/index.m3u8`,
     durationSec: null,
     startAtSec,
+    tracks: null,
   });
 
   test('POST /api/play rejects a malformed body with 400 VALIDATION', async () => {
@@ -163,6 +190,14 @@ describe('playback routes', () => {
       { itemId: id, clientId: 'A', catchup: { startSec: 1.5, stopSec: 3600 } },
       { itemId: id, clientId: 'A', catchup: { startSec: 0, stopSec: -1 } },
       { itemId: id, clientId: 'A', catchup: { startSec: 0 } },
+      { itemId: id, clientId: 'A', audioIndex: -1 },
+      { itemId: id, clientId: 'A', audioIndex: 1.5 },
+      { itemId: id, clientId: 'A', subtitleIndex: -1 },
+      { itemId: id, clientId: 'A', subtitleIndex: 'two' },
+      { itemId: id, clientId: 'A', subtitleLanguage: 'english' },
+      { itemId: id, clientId: 'A', subtitleLanguage: 'EN' },
+      { itemId: id, clientId: 'A', subtitleLanguage: 'e' },
+      { itemId: id, clientId: 'A', subtitleLanguage: 'en-gb' },
     ];
     for (const body of bodies) {
       const res = await playBody(w, body);
@@ -211,6 +246,15 @@ describe('playback routes', () => {
         sourceUrl: `${fake.url}/series/u/p/201.mkv`,
       }),
     );
+
+    // Track choices pass through to the session manager, which resolves them against the probe.
+    const tracks = { audioIndex: 2, subtitleIndex: null, subtitleLanguage: 'nld' };
+    const chosen = await playBody(w, { itemId: w.itemId('movie', 1), clientId: 'A', ...tracks });
+    expect(chosen.statusCode).toBe(200);
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'movie', ...tracks }));
+    await playBody(w, { itemId: w.itemId('movie', 1), clientId: 'A', subtitleIndex: 0, subtitleLanguage: null });
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ subtitleIndex: 0, subtitleLanguage: null }));
+    expect(start.mock.lastCall![0].audioIndex).toBeUndefined();
   });
 
   test('POST /api/play starts catch-up on a live channel and records the channel in history', async () => {
@@ -284,6 +328,10 @@ describe('playback routes', () => {
       'seg_00000.ts': 'video/mp2t',
       'seg_00001.m4s': 'video/iso.segment',
       'init.mp4': 'video/mp4',
+      'master.m3u8': 'application/vnd.apple.mpegurl',
+      'stream_0_vtt.m3u8': 'application/vnd.apple.mpegurl',
+      'stream_00.vtt': 'text/vtt',
+      'seg_0_00000.ts': 'video/mp2t',
     };
     for (const name of [...Object.keys(files), 'notes.txt']) writeFileSync(join(dir, name), `contents of ${name}`);
     const touch = vi.spyOn(sessions, 'touch').mockImplementation((id, clientId) => id === 'sess' && clientId === 'A');
@@ -623,30 +671,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
       throw new Error('Fake media is missing. Run: npm run make-media -w @tv/fake-xtream (needs TV_FFMPEG_PATH)');
     }
     relay = await startUpstreamRelay({ log });
-    w = await makeWorld(
-      (db, providers) => {
-        const prober = createProber({ ffprobePath: config.ffprobePath, db });
-        return createSessionManager({
-          ffmpegPath: config.ffmpegPath,
-          transcodeDir: config.transcodeDir,
-          spawn: spawnFfmpeg(log),
-          probe: (url, userAgent, readFrom, opts) => prober.probe(url, userAgent, readFrom, opts),
-          invalidateProbe: (url) => prober.invalidate(url),
-          transcodeInterlaced: false,
-          maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
-          isReady: defaultIsReady,
-          now: Date.now,
-          liveIdleMs: 20_000,
-          vodIdleMs: 60_000,
-          readyTimeoutMs: 5_000,
-          stallTimeoutMs: 20_000,
-          maxRestarts: 3,
-          log,
-          relay,
-        });
-      },
-      { config, log },
-    );
+    w = await makeWorld(realSessions({ config, log, relay, readyTimeoutMs: 5_000 }), { config, log });
   }, 30_000);
 
   afterEach(async () => {
@@ -1020,6 +1045,151 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('playback with real FFmpeg', { time
   });
 });
 
+// Movie 5 of the rich catalogue is multi.mkv: stream 0 h264; audio 1 nld (the default disposition) and 2 eng; text
+// subtitles 3 eng and 4 nld, whose cues read "English 1" / "Nederlands 1" from the start, then every 5 s.
+describe.skipIf(!ffmpegPath || !ffprobePath)('audio and subtitle tracks with real FFmpeg', { timeout: 30_000 }, () => {
+  const config = testConfig();
+  const logs: string[] = [];
+  const log = {
+    info: (o: object, m: string) => void logs.push(JSON.stringify({ m, ...o })),
+    warn: (o: object, m: string) => void logs.push(JSON.stringify({ m, ...o })),
+  };
+  const playing: { sessionId: string; clientId: string }[] = [];
+  const scratch = mkdtempSync(join(tmpdir(), 'tv-tracks-'));
+  let richFake: FakeXtream;
+  let relay: UpstreamRelay;
+  let w: World;
+
+  beforeAll(async () => {
+    if (!existsSync(join(mediaDir, 'multi.mkv'))) {
+      throw new Error('Fake media is missing. Run: npm run make-media -w @tv/fake-xtream (needs TV_FFMPEG_PATH)');
+    }
+    richFake = await startFakeXtream({ mediaDir, catalogue: richCatalogue() }); // maxConnections 1
+    relay = await startUpstreamRelay({ log });
+    w = await makeWorld(realSessions({ config, log, relay, readyTimeoutMs: 5_000 }), { config, log, providerUrl: richFake.url });
+  }, 30_000);
+
+  afterEach(async () => {
+    for (const p of playing.splice(0)) await w.sessions.release(p.sessionId, p.clientId);
+  });
+
+  afterAll(async () => {
+    await w?.sessions.stopAll();
+    await w?.app.close();
+    await relay?.close();
+    await richFake?.close();
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  async function playMovie5(choice: { audioIndex?: number; subtitleIndex?: number | null; subtitleLanguage?: string | null } = {}) {
+    const res = await playBody(w, { itemId: w.itemId('movie', 5), clientId: 'A', ...choice });
+    expect(res.statusCode, res.body).toBe(200);
+    const r = res.json() as PlayResponse;
+    playing.push({ sessionId: r.sessionId, clientId: 'A' });
+    return r;
+  }
+
+  /** `name` (a playlist entry) as a server path, resolved against the URL of the playlist that lists it. */
+  const beside = (playlistUrl: string, name: string) => new URL(name, `http://server${playlistUrl}`).pathname;
+  const entries = (playlist: string) => playlist.split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('#'));
+
+  /** Fetches the playlist at `url`, then the first file it lists. */
+  async function firstEntry(url: string) {
+    const playlist = await w.app.inject(url);
+    expect(playlist.statusCode, url).toBe(200);
+    const first = entries(playlist.body)[0];
+    if (!first) throw new Error(`${url} lists nothing:\n${playlist.body}`);
+    return w.app.inject(beside(url, first));
+  }
+
+  /** The language tag of a segment's audio: movie 5's two audio streams differ in nothing else. */
+  function audioLanguage(segment: Buffer): string | undefined {
+    const file = join(scratch, `seg-${Date.now()}.ts`);
+    writeFileSync(file, segment);
+    const out = execFileSync(ffprobePath!, ['-v', 'error', '-print_format', 'json', '-show_streams', file], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    const streams = (JSON.parse(out) as { streams: { codec_type: string; tags?: { language?: string } }[] }).streams;
+    return streams.find((s) => s.codec_type === 'audio')?.tags?.language;
+  }
+
+  /** The master's subtitle rendition: its first WebVTT segment. */
+  async function firstCues(masterUrl: string) {
+    const master = await w.app.inject(masterUrl);
+    expect(master.statusCode).toBe(200);
+    expect(master.headers['content-type']).toContain('mpegurl');
+    expect(master.body).toContain('TYPE=SUBTITLES');
+    const uri = /TYPE=SUBTITLES.*URI="([^"]+)"/.exec(master.body)?.[1];
+    if (!uri) throw new Error(`no subtitle playlist in the master:\n${master.body}`);
+    return firstEntry(beside(masterUrl, uri));
+  }
+
+  test('movie 5 defaults to English audio', async () => {
+    const r = await playMovie5();
+    expect(r).toMatchObject({ mode: 'hls', url: expect.stringMatching(/\/A\/index\.m3u8$/) });
+    expect(r.tracks).toEqual({
+      audio: [
+        { index: 1, label: 'Dutch', language: 'nl', isDefault: true, forced: false, available: true },
+        { index: 2, label: 'English', language: 'en', isDefault: false, forced: false, available: true },
+      ],
+      subtitles: [
+        { index: 3, label: 'English', language: 'en', isDefault: false, forced: false, available: true },
+        { index: 4, label: 'Dutch', language: 'nl', isDefault: false, forced: false, available: true },
+      ],
+      audioIndex: 2,
+      subtitleIndex: null,
+    });
+    const segment = await firstEntry(r.url);
+    expect(segment.statusCode).toBe(200);
+    expect(audioLanguage(segment.rawPayload)).toBe('eng');
+  });
+
+  test('subtitleIndex produces master.m3u8 with a SUBTITLES rendition and vtt segments', async () => {
+    const r = await playMovie5({ subtitleIndex: 3 });
+    expect(r).toMatchObject({ mode: 'hls', url: expect.stringMatching(/\/A\/master\.m3u8$/) });
+    expect(r.tracks).toMatchObject({ audioIndex: 2, subtitleIndex: 3 });
+
+    const vtt = await firstCues(r.url);
+    expect(vtt.statusCode).toBe(200);
+    expect(vtt.headers['content-type']).toBe('text/vtt');
+    expect(vtt.body).toContain('English 1');
+
+    // The variant carries the video and the chosen audio.
+    const master = (await w.app.inject(r.url)).body;
+    const segment = await firstEntry(beside(r.url, entries(master)[0]!));
+    expect(segment.statusCode).toBe(200);
+    expect(segment.headers['content-type']).toBe('video/mp2t');
+    expect(audioLanguage(segment.rawPayload)).toBe('eng');
+  });
+
+  test('subtitleLanguage nl picks the Dutch text track', async () => {
+    const r = await playMovie5({ subtitleLanguage: 'nl' });
+    expect(r.url).toMatch(/\/A\/master\.m3u8$/);
+    expect(r.tracks).toMatchObject({ audioIndex: 2, subtitleIndex: 4 });
+    const vtt = await firstCues(r.url);
+    expect(vtt.body).toContain('Nederlands 1');
+    expect(vtt.body).not.toContain('English');
+  });
+
+  test('one provider connection: each track change releases the old session before the new one reads', async () => {
+    const refusedBefore = richFake.refusedMediaRequests().length;
+    const logsBefore = logs.length;
+    const plain = await playMovie5();
+    const english = await playMovie5({ subtitleIndex: 3 });
+    const dutch = await playMovie5({ audioIndex: 1, subtitleIndex: 4 });
+
+    expect(new Set([plain, english, dutch].map((r) => r.sessionId)).size).toBe(3);
+    expect(dutch.tracks).toMatchObject({ audioIndex: 1, subtitleIndex: 4 });
+    expect((await w.app.inject(plain.url)).statusCode).toBe(404);
+    expect((await w.app.inject(english.url)).statusCode).toBe(404);
+    const segment = await firstEntry(beside(dutch.url, entries((await w.app.inject(dutch.url)).body)[0]!));
+    expect(audioLanguage(segment.rawPayload)).toBe('nld');
+    expect(richFake.refusedMediaRequests().slice(refusedBefore)).toEqual([]);
+    expect(logs.slice(logsBefore).filter((l) => /HTTP error 403/.test(l))).toEqual([]);
+  });
+});
+
 /** Which of the fake's streams a media path belongs to: `live/<n>`, `movie/<n>`, ...; `/hls/...` is live channel 1. */
 function contentOf(path: string): string {
   if (path.startsWith('/hls/')) return 'live/1';
@@ -1093,30 +1263,7 @@ describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a 
   beforeAll(async () => {
     pacedFake = await startFakeXtream({ mediaDir, catalogue: smallCatalogue(), paced: true });
     relay = await startUpstreamRelay({ log });
-    w = await makeWorld(
-      (db, providers) => {
-        const prober = createProber({ ffprobePath: config.ffprobePath, db });
-        return createSessionManager({
-          ffmpegPath: config.ffmpegPath,
-          transcodeDir: config.transcodeDir,
-          spawn: spawnFfmpeg(log),
-          probe: (url, userAgent, readFrom, opts) => prober.probe(url, userAgent, readFrom, opts),
-          invalidateProbe: (url) => prober.invalidate(url),
-          transcodeInterlaced: false,
-          maxConnections: (id) => providers.account(id)?.maxConnections ?? null,
-          isReady: defaultIsReady,
-          now: Date.now,
-          liveIdleMs: 20_000,
-          vodIdleMs: 60_000,
-          readyTimeoutMs: 10_000,
-          stallTimeoutMs: 20_000,
-          maxRestarts: 3,
-          log,
-          relay,
-        });
-      },
-      { config, log, providerUrl: pacedFake.url },
-    );
+    w = await makeWorld(realSessions({ config, log, relay, readyTimeoutMs: 10_000 }), { config, log, providerUrl: pacedFake.url });
   }, 30_000);
 
   afterAll(async () => {

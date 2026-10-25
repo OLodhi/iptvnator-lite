@@ -3,13 +3,14 @@ import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { PlayResponse } from '@tv/shared';
+import type { PlayResponse, SessionTracks } from '@tv/shared';
 import { redactUrl } from '../util/redact.ts';
-import { buildFfmpegArgs, isHlsUrl } from './ffmpegArgs.ts';
+import { buildFfmpegArgs, isHlsUrl, MASTER_PLAYLIST, VARIANT_PLAYLIST } from './ffmpegArgs.ts';
 import { choosePlan } from './policy.ts';
-import type { HlsPlan } from './policy.ts';
+import type { HlsPlan, PlaybackPlan } from './policy.ts';
 import type { ProbeResult, Prober } from './probe.ts';
 import type { UpstreamRelay } from './relay.ts';
+import { describeTracks, subtitleFor } from './tracks.ts';
 
 export type ChildLike = {
   pid?: number;
@@ -61,9 +62,18 @@ export type StartRequest = {
   startAtSec: number;
   clientId: string;
   quality: 'original';
+  /** Movies and episodes only, like the two below: the audio stream to play; English, else the default, if left out. */
+  audioIndex?: number;
+  /** The text subtitle stream to add as a WebVTT rendition; null for none. */
+  subtitleIndex?: number | null;
+  /** When `subtitleIndex` is left out: add a text subtitle track in this language, if there is one. */
+  subtitleLanguage?: string | null;
 };
 
-/** `url` is `/api/sessions/<sessionId>/<clientId>/index.m3u8` or `/api/sessions/<sessionId>/<clientId>/direct`. */
+/**
+ * `url` is `/api/sessions/<sessionId>/<clientId>/index.m3u8`, `.../master.m3u8` (with a subtitle rendition) or
+ * `/api/sessions/<sessionId>/<clientId>/direct`.
+ */
 export type StartedSession = PlayResponse;
 
 export type PlaybackErrorCode = 'PROVIDER_CONNECTION_LIMIT' | 'STREAM_START_TIMEOUT' | 'UPSTREAM_ERROR';
@@ -143,13 +153,15 @@ export function pruneSegments(outDir: string, below: number): { deleted: number;
   return { deleted, failed };
 }
 
-/** True once FFmpeg has written a playlist that lists at least one segment. */
+/**
+ * True once FFmpeg has written a playlist that lists at least one segment. With a subtitle rendition that is the
+ * variant's, and the master (written just after it) must name the variant too.
+ */
 export async function defaultIsReady(outDir: string): Promise<boolean> {
-  try {
-    return (await readFile(join(outDir, 'index.m3u8'), 'utf8')).includes('#EXTINF');
-  } catch {
-    return false;
-  }
+  const read = (name: string) => readFile(join(outDir, name), 'utf8').catch(() => '');
+  const master = await read(MASTER_PLAYLIST);
+  if (master) return master.includes('#EXT-X-STREAM-INF') && (await read(VARIANT_PLAYLIST)).includes('#EXTINF');
+  return (await read('index.m3u8')).includes('#EXTINF');
 }
 
 type Session = {
@@ -166,6 +178,7 @@ type Session = {
   durationHintSec: number | null;
   durationSec: number | null;
   plan: HlsPlan | null;
+  tracks: SessionTracks | null; // movie and episode HLS sessions only
   inputFormat: string; // ffprobe's format_name for the source
   outDir: string | null;
   child: ChildLike | null;
@@ -189,6 +202,12 @@ type Session = {
 };
 
 const errorText = (err: unknown) => redactUrl(err instanceof Error ? err.message : String(err));
+/**
+ * Completes a non-live session's key with the audio and subtitle streams it plays: a track change is another
+ * session, which preempts this one. In direct play the player chooses its own tracks.
+ */
+const trackKey = (plan: PlaybackPlan) =>
+  plan.mode === 'hls' ? `|a${plan.audio?.index ?? '-'}|s${plan.subtitle?.index ?? '-'}` : '|a-|s-';
 const stoppedError = () => new PlaybackError('UPSTREAM_ERROR', 'Playback was stopped');
 
 function lastSegment(outDir: string): number {
@@ -267,9 +286,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   }
 
   function toResponse(s: Session, clientId: string): StartedSession {
-    const file = s.mode === 'hls' ? 'index.m3u8' : 'direct';
-    const { id: sessionId, mode, durationSec, startAtSec } = s;
-    return { sessionId, mode, url: `/api/sessions/${sessionId}/${clientId}/${file}`, durationSec, startAtSec };
+    const file = s.mode === 'direct' ? 'direct' : s.plan?.subtitle ? MASTER_PLAYLIST : 'index.m3u8';
+    const { id: sessionId, mode, durationSec, startAtSec, tracks } = s;
+    return { sessionId, mode, url: `/api/sessions/${sessionId}/${clientId}/${file}`, durationSec, startAtSec, tracks };
   }
 
   function stopSession(s: Session, reason: string): Promise<void> {
@@ -579,7 +598,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return probe;
   }
 
-  async function open(s: Session, fallbackUrl: string | undefined): Promise<void> {
+  async function open(s: Session, req: StartRequest): Promise<void> {
     const deadline = startDeadline(deps.readyTimeoutMs); // probes + spawn + ready, all together
     try {
       // Through the relay from the probe on: ffprobe seeks as FFmpeg does (to an MP4's moov atom at the end of the
@@ -591,11 +610,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       let probe = await probeSource(s, deadline.expired);
       if (s.state !== 'starting') throw stoppedError();
-      if (fallbackUrl && finitePlaylist(s, probe)) {
-        probe = await continuousInstead(s, probe, fallbackUrl, deadline.expired);
+      if (req.fallbackSourceUrl && finitePlaylist(s, probe)) {
+        probe = await continuousInstead(s, probe, req.fallbackSourceUrl, deadline.expired);
         if (s.state !== 'starting') throw stoppedError();
       }
-      const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced });
+      // An explicit subtitle choice, Off included, wins over the remembered language.
+      const subtitleIndex =
+        req.subtitleIndex !== undefined ? req.subtitleIndex : subtitleFor(probe.subtitles, req.subtitleLanguage ?? null);
+      const { audioIndex } = req;
+      const plan = choosePlan(probe, { kind: s.kind, transcodeInterlaced: deps.transcodeInterlaced, audioIndex, subtitleIndex });
+      if (s.kind !== 'live') s.key += trackKey(plan); // the tracks in use, known only now
+      if (plan.mode === 'hls' && (s.kind === 'movie' || s.kind === 'episode')) {
+        const chosen = { audioIndex: plan.audio?.index ?? null, subtitleIndex: plan.subtitle?.index ?? null };
+        s.tracks = { ...describeTracks(probe), ...chosen };
+      }
       s.inputFormat = probe.formatName;
       s.durationSec = s.kind === 'live' ? null : (s.durationHintSec ?? probe.durationSec);
       if (plan.mode === 'direct') {
@@ -664,6 +692,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   async function startNow(req: StartRequest): Promise<StartedSession> {
     const live = req.kind === 'live';
     const startAtSec = live || req.kind === 'catchup' ? 0 : req.startAtSec;
+    // A non-live key is completed with its tracks once they are resolved (trackKey).
     const key = live
       ? `${req.providerId}|${req.contentKey}|${req.quality}`
       : `${req.clientId}|${req.contentKey}|${startAtSec}`;
@@ -711,6 +740,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       durationHintSec: req.durationHintSec ?? null,
       durationSec: null,
       plan: null,
+      tracks: null,
       inputFormat: '',
       outDir: null,
       child: null,
@@ -730,7 +760,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       clients: new Map([[req.clientId, deps.now()]]),
       stopped: null,
     };
-    const done = open(s, req.fallbackSourceUrl);
+    const done = open(s, req);
     starting.set(key, { session: s, done });
     try {
       await done;

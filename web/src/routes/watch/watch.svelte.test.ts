@@ -84,21 +84,21 @@ async function resumeThenRestart(response: PlayResponse, currentTime: number) {
 }
 
 test('a direct resume seeks the file, and a restart resumes at the absolute position', async () => {
-  const direct: PlayResponse = { sessionId: 's1', mode: 'direct', url: '/api/sessions/s1/cid/direct', durationSec: 3000, startAtSec: 600 };
+  const direct: PlayResponse = { sessionId: 's1', mode: 'direct', url: '/api/sessions/s1/cid/direct', durationSec: 3000, startAtSec: 600, tracks: null };
   await resumeThenRestart(direct, 610); // the file was seeked to 600, so currentTime is already absolute
   expect(attachStream.mock.calls[0]).toEqual([expect.any(HTMLVideoElement), direct.url, expect.objectContaining({ startAtSec: 600 })]);
   expect(playCalls().map(startAtOf)).toEqual([600, 610]);
 });
 
 test('an HLS resume asks for no seek, and a restart resumes at the absolute position', async () => {
-  const hls: PlayResponse = { sessionId: 's1', mode: 'hls', url: '/api/sessions/s1/cid/index.m3u8', durationSec: 3000, startAtSec: 600 };
+  const hls: PlayResponse = { sessionId: 's1', mode: 'hls', url: '/api/sessions/s1/cid/index.m3u8', durationSec: 3000, startAtSec: 600, tracks: null };
   await resumeThenRestart(hls, 10); // the session starts at 600, so currentTime counts from there
   expect(attachStream.mock.calls[0]![2]).not.toHaveProperty('startAtSec');
   expect(playCalls().map(startAtOf)).toEqual([600, 610]);
 });
 
-const catchupRes: PlayResponse = { sessionId: 'c1', mode: 'hls', url: '/api/sessions/c1/cid/index.m3u8', durationSec: 3600, startAtSec: 0 };
-const liveRes: PlayResponse = { sessionId: 'l1', mode: 'hls', url: '/api/sessions/l1/cid/index.m3u8', durationSec: null, startAtSec: 0 };
+const catchupRes: PlayResponse = { sessionId: 'c1', mode: 'hls', url: '/api/sessions/c1/cid/index.m3u8', durationSec: 3600, startAtSec: 0, tracks: null };
+const liveRes: PlayResponse = { sessionId: 'l1', mode: 'hls', url: '/api/sessions/l1/cid/index.m3u8', durationSec: null, startAtSec: 0, tracks: null };
 const bodyOf = (call: unknown[]) => JSON.parse((call[1] as RequestInit).body as string);
 const liveItem = (over: Partial<CatalogItem> = {}) =>
   ({ id: 7, kind: 'live', catchupDays: 3, now: { title: 'News at Ten', startSec: 79200, stopSec: 82800 }, ...over }) as CatalogItem;

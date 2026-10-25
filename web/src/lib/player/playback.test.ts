@@ -8,6 +8,7 @@ const res = (id: string, durationSec: number | null = null): PlayResponse => ({
   url: `/api/sessions/${id}/cid/index.m3u8`,
   durationSec,
   startAtSec: 0,
+  tracks: null,
 });
 
 function setup() {
@@ -160,6 +161,7 @@ const direct = (id: string, startAtSec: number): PlayResponse => ({
   url: `/api/sessions/${id}/cid/direct`,
   durationSec: 3000,
   startAtSec,
+  tracks: null,
 });
 
 test('a direct resume seeks the file itself, and its currentTime is already absolute', async () => {

@@ -115,6 +115,12 @@ export type PlayRequest = {
   clientId: string;
   /** Plays a past (or airing) programme on a live channel instead; UTC epoch seconds. */
   catchup?: { startSec: number; stopSec: number };
+  /** Movies and episodes: the audio stream to play (a `MediaTrack.index`); English, else the default, if left out. */
+  audioIndex?: number;
+  /** Movies and episodes: the text subtitle stream to show; null for none. */
+  subtitleIndex?: number | null;
+  /** Movies and episodes: when `subtitleIndex` is left out, show a text subtitle track in this language (`en`, `nld`, …). */
+  subtitleLanguage?: string | null;
 };
 /**
  * An audio or subtitle stream of a movie or episode. `index` is its stream index in the source; `language` is
@@ -125,7 +131,8 @@ export type MediaTrack = { index: number; label: string; language: string | null
 /** A movie or episode's tracks, and the ones its session plays (null: none). */
 export type SessionTracks = { audio: MediaTrack[]; subtitles: MediaTrack[]; audioIndex: number | null; subtitleIndex: number | null };
 /**
- * `url` is server-relative and names the viewer: `/api/sessions/<sessionId>/<clientId>/index.m3u8` (HLS)
+ * `url` is server-relative and names the viewer: `/api/sessions/<sessionId>/<clientId>/index.m3u8` (HLS),
+ * `/api/sessions/<sessionId>/<clientId>/master.m3u8` (HLS with a subtitle rendition)
  * or `/api/sessions/<sessionId>/<clientId>/direct`.
  */
 export type PlayResponse = {
@@ -134,6 +141,8 @@ export type PlayResponse = {
   url: string;
   durationSec: number | null;
   startAtSec: number;
+  /** Movie and episode HLS sessions only: null for live, catch-up and direct play (whose tracks are the player's own). */
+  tracks: SessionTracks | null;
 };
 export type PositionReport = { itemId: number; episodeRemoteId?: string; positionSec: number; durationSec: number | null };
 export type SavedPosition = {
