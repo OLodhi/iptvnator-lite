@@ -25,16 +25,19 @@
   <div class="backdrop" role="presentation" onclick={backdropClick}></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-label={title}>
     <p class="sheet-title">{title}</p>
-    {#each actions as a, i (a.key ?? `${i}:${a.label}`)}
-      <button
-        type="button"
-        class="sheet-action"
-        class:danger={a.danger}
-        disabled={a.disabled}
-        aria-pressed={a.selected}
-        onclick={() => choose(a)}
-      >{#if a.selected}<span class="tick" aria-hidden="true">✓</span>{/if}{a.label}</button>
-    {/each}
+    <!-- A long list (a file's 40 subtitle tracks, a long series' seasons) scrolls; Cancel stays below it. -->
+    <div class="sheet-list">
+      {#each actions as a, i (a.key ?? `${i}:${a.label}`)}
+        <button
+          type="button"
+          class="sheet-action"
+          class:danger={a.danger}
+          disabled={a.disabled}
+          aria-pressed={a.selected}
+          onclick={() => choose(a)}
+        >{#if a.selected}<span class="tick" aria-hidden="true">✓</span>{/if}{a.label}</button>
+      {/each}
+    </div>
     <button type="button" class="sheet-action cancel" onclick={onClose}>Cancel</button>
   </div>
 {/if}
@@ -53,13 +56,27 @@
     bottom: 0;
     z-index: 21;
     max-width: 720px;
+    /* Clear of the top safe area: vh where dvh isn't known, else the viewport as it is now (Safari's bars come and go). */
+    max-height: calc(100vh - env(safe-area-inset-top) - 16px);
+    max-height: calc(100dvh - env(safe-area-inset-top) - 16px);
     margin: 0 auto;
-    display: grid;
-    gap: 1px;
+    display: flex;
+    flex-direction: column;
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
     background: var(--surface);
     border-radius: 16px 16px 0 0;
     border-top: 1px solid var(--border);
+  }
+  .sheet > :not(.sheet-list) {
+    flex: none;
+  }
+  .sheet-list {
+    min-height: 0;
+    display: grid;
+    gap: 1px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
   .sheet-title {
     margin: 0;

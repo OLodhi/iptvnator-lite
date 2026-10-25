@@ -30,6 +30,17 @@ test('track sheet lists Off and marks picture subtitles unavailable', () => {
   expect(onPick).toHaveBeenCalledWith(null);
 });
 
+test('a file with 40 subtitle tracks lists every one in the scrolling list, Off first', () => {
+  const tracks = Array.from({ length: 40 }, (_, i) => t(i + 2, `Track ${i + 1}`));
+  app = mount(TrackSheet, { target: document.body, props: { open: true, kind: 'subtitles', tracks, selected: 20, onPick: vi.fn(), onClose: vi.fn() } });
+  flushSync();
+  const listed = [...document.querySelectorAll('.sheet-list .sheet-action')].map((b) => b.textContent?.replace('✓', '').trim());
+  expect(listed).toHaveLength(41);
+  expect(listed[0]).toBe('Off');
+  expect(listed.slice(1)).toEqual(tracks.map((tr) => tr.label));
+  expect(document.querySelector('.sheet-list .cancel')).toBeNull();
+});
+
 test('audio has no Off entry and marks the selected track', () => {
   app = mount(TrackSheet, {
     target: document.body,
