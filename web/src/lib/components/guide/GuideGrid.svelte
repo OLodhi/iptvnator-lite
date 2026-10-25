@@ -278,8 +278,10 @@
                     style:width="{Math.max(2, b.width - GAP_PX)}px"
                   >
                     {#if b.width >= TEXT_MIN_PX}
-                      <span class="title">{#if catchup}<span class="cu">↺</span> {/if}{b.programme.title}</span>
-                      <small>{formatClock(b.programme.startSec, tz)}</small>
+                      <span class="label">
+                        <span class="title">{#if catchup}<span class="cu">↺</span> {/if}{b.programme.title}</span>
+                        <small>{formatClock(b.programme.startSec, tz)}</small>
+                      </span>
                     {/if}
                   </svelte:element>
                 {/each}
@@ -441,6 +443,7 @@
     bottom: 4px;
     padding: 5px 6px;
     overflow: hidden;
+    overflow: clip; /* clip, not hidden, so the block isn't a scroll container and .label can stick */
     border-radius: 4px;
     background: var(--surface);
     color: var(--text);
@@ -463,6 +466,14 @@
   }
   a.block:active {
     filter: brightness(1.3);
+  }
+  /* A programme that started before the visible window keeps its title in view, beside the channel column. */
+  .label {
+    position: sticky;
+    left: calc(var(--channel-col) + 6px);
+    display: block;
+    width: fit-content;
+    max-width: 100%;
   }
   .title,
   .block small {
