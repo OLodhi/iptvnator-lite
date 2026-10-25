@@ -225,6 +225,29 @@ describe('watched marks', () => {
     ]);
   });
 
+  test('a mark with no existing row is manual', () => {
+    const s = addItem('series', '10');
+    personal.markWatched(USER, s, [eps[0]], true);
+    expect(row('episode:101')).toMatchObject({ finished: 1, manual: 1, positionSec: 1200, at: 1000 });
+    // Marking it again: still a mark, made now.
+    personal.markWatched(USER, s, [eps[0]], true);
+    expect(row('episode:101')).toMatchObject({ finished: 1, manual: 1, positionSec: 1200, at: 1001 });
+  });
+
+  test('marking a real in-progress row watched finishes it in place (manual stays 0, updated_at unchanged)', () => {
+    const s = addItem('series', '10');
+    personal.savePosition(USER, { itemId: s, episodeRemoteId: '101', positionSec: 600, durationSec: 1180 }, 'S1 E1');
+    personal.savePosition(USER, { itemId: s, episodeRemoteId: '102', positionSec: 300, durationSec: null }, 'S1 E2');
+    personal.markWatched(USER, s, eps, true);
+    // At the episode's known length; with none, where it was.
+    expect(row('episode:101')).toMatchObject({ finished: 1, manual: 0, positionSec: 1200, durationSec: 1180, label: 'S1 E1', at: 1000 });
+    expect(row('episode:102')).toMatchObject({ finished: 1, manual: 0, positionSec: 300, durationSec: null, label: 'S1 E2', at: 1001 });
+    expect(personal.positions(USER, s).map((p) => [p.episodeRemoteId, p.finished, p.manual]).sort()).toEqual([
+      ['101', true, false],
+      ['102', true, false],
+    ]);
+  });
+
   test('unwatching deletes the rows', () => {
     const s = addItem('series', '10');
     personal.markWatched(USER, s, eps, true);

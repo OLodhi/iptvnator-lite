@@ -38,8 +38,9 @@ export interface PersonalService {
   savePosition(userId: number, report: PositionReport, episodeLabel?: string): boolean;
   positions(userId: number, itemId: number): SavedPosition[];
   /**
-   * Marks episodes of a series watched (a finished, manual row) or unwatched (the rows are deleted), in one
-   * transaction. Manual rows are finished, so they never become a Continue entry. An unknown item changes nothing.
+   * Marks episodes of a series watched or unwatched (the rows are deleted), in one transaction. Watched finishes a row
+   * really played in place (still real, its time kept, so it stays where you are); any other becomes a finished,
+   * manual row, which never becomes a Continue entry. An unknown item changes nothing.
    */
   markWatched(userId: number, itemId: number, episodes: { remoteId: string; label: string; durationSec: number | null }[], watched: boolean): void;
   continueWatching(userId: number, providerId: number, kind: 'movie' | 'series', limit: number): ContinueEntry[];
@@ -141,6 +142,9 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
        series_remote_id = excluded.series_remote_id, episode_label = excluded.episode_label, position_sec = excluded.position_sec,
        duration_sec = excluded.duration_sec, finished = 1, manual = 1, updated_at = excluded.updated_at`,
   );
+  const finishPlayed = db.prepare(
+    'UPDATE positions SET finished = 1, position_sec = COALESCE(?, position_sec) WHERE user_id = ? AND provider_id = ? AND content_key = ? AND manual = 0',
+  );
   const deletePosition = db.prepare('DELETE FROM positions WHERE user_id = ? AND provider_id = ? AND content_key = ?');
   const continueMovies = db.prepare(CONTINUE_MOVIES_SQL);
   const continueSeries = db.prepare(
@@ -232,8 +236,10 @@ export function createPersonalService(deps: { db: Db; now: () => number }): Pers
       db.transaction(() => {
         for (const e of episodes) {
           const key = `${EPISODE_PREFIX}${e.remoteId}`;
-          if (watched) upsertWatched.run(userId, i.providerId, key, i.remoteId, e.label, e.durationSec ?? 0, e.durationSec, deps.now());
-          else deletePosition.run(userId, i.providerId, key);
+          if (!watched) deletePosition.run(userId, i.providerId, key);
+          else if (finishPlayed.run(e.durationSec, userId, i.providerId, key).changes === 0) {
+            upsertWatched.run(userId, i.providerId, key, i.remoteId, e.label, e.durationSec ?? 0, e.durationSec, deps.now());
+          }
         }
       })();
     },
