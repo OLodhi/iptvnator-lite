@@ -53,8 +53,9 @@
   const guidedIds = (list: GridRow[]) => list.filter((r) => r.hasGuide).map((r) => r.item.id);
 
   // One request at a time, in order: a row page and a sideways extension both read and grow the loaded data.
+  // The ops handle their own errors; the catch keeps one unexpected rejection from stopping all later paging.
   function enqueue(mine: number, op: () => Promise<void>) {
-    queue = queue.then(() => (mine === seq ? op() : undefined));
+    queue = queue.then(() => (mine === seq ? op() : undefined)).catch(() => {});
   }
 
   /** Programmes for `ids` over `spans`, in requests the server accepts: at most 200 items and 24 h each. */
@@ -89,7 +90,7 @@
     try {
       const signal = controller!.signal;
       const page = await grid({ filter, from: core.from, to: core.to, cursor }, signal);
-      // The window may have grown sideways since the opening: fill in the new rows' outer spans.
+      // The loaded window reaches beyond the opening one (the page before it, and any sideways pages): fill those spans in.
       const extra = await fetchProgrammes(guidedIds(page.items), [[windowFrom, core.from], [core.to, windowTo]], signal);
       if (mine !== seq) return;
       const fresh = page.items.map((r) => merged(r, extra.get(r.item.id)));
@@ -164,7 +165,10 @@
     queue = Promise.resolve();
     pending = new Set();
     core = initialWindow(Math.floor(clock.nowMs / 1000));
-    windowFrom = core.from;
+    // The page before the opening window comes with page 1, so the grid opens on its final layout: extending left
+    // and compensating the scroll straight after the first paint would stop a fling on iOS, or jump the view.
+    const range = meta.range;
+    windowFrom = range ? Math.min(core.from, Math.max(range.fromSec, core.from - PAGE_SEC)) : core.from;
     windowTo = core.to;
     rows = [];
     nextCursor = null;
@@ -182,6 +186,18 @@
       seq++;
       controller?.abort();
     };
+  });
+
+  // Back in the foreground: start again at now once now has left the loaded window or is within a screen of its end.
+  $effect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const now = Math.floor(clock.nowMs / 1000);
+      const toEnd = width - (CHANNEL_COL + offsetPx(now, windowFrom));
+      if (now < windowFrom || now >= windowTo || toEnd < (scroller?.clientWidth ?? 0)) reload();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   });
 
   // Once the first rows are in, open with now − 30 min at the left edge, just right of the channel column.
@@ -236,14 +252,15 @@
                 {#each layoutProgrammes(r.programmes, windowFrom, windowTo, nowSec) as b (b.programme.id)}
                   {@const href = hrefFor(r.item, b, nowSec)}
                   {@const catchup = href !== null && b.state === 'past'}
+                  {@const name = `${b.programme.title}, ${formatClock(b.programme.startSec, tz)}–${formatClock(b.programme.stopSec, tz)}`}
                   <svelte:element
                     this={href ? 'a' : 'div'}
                     class="block {b.state}"
+                    class:narrow={b.width < TEXT_MIN_PX}
                     {href}
+                    role={href ? undefined : 'img'}
                     draggable="false"
-                    aria-label={href
-                      ? `${catchup ? 'Catch up' : 'Watch live'}: ${b.programme.title}, ${formatClock(b.programme.startSec, tz)}–${formatClock(b.programme.stopSec, tz)}`
-                      : undefined}
+                    aria-label={href ? `${catchup ? 'Catch up' : 'Watch live'}: ${name}` : name}
                     style:left="{b.left}px"
                     style:width="{Math.max(2, b.width - GAP_PX)}px"
                   >
@@ -423,9 +440,13 @@
     background: color-mix(in srgb, var(--surface) 55%, var(--bg));
     color: var(--muted);
   }
+  /* No padding and no border on a narrow block, so it renders exactly as wide as computed. */
+  .block.narrow {
+    padding: 0;
+  }
   .block.now {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    border-left: 2px solid var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   a.block:active {
     filter: brightness(1.3);

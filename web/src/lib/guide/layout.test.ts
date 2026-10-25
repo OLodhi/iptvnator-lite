@@ -14,6 +14,7 @@ test('blocks clip to the window and keep a minimum width', () => {
   const blocks = layoutProgrammes(
     [
       prog(5, at(-120), at(-60)), // ends before the window
+      prog(7, at(-30), at(0)), // ends exactly at the window start
       prog(1, at(-30), at(30)), // starts before the window
       prog(2, at(30), at(90)),
       prog(3, at(100), at(100) + 20), // 20 seconds: 1 px, widened to 2
