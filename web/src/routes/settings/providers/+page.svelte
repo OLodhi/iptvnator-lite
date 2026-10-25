@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import type { AddProviderRequest, ImportResult, ProviderSummary, SyncStatus } from '@tv/shared';
+  import type { AddProviderRequest, GuideStatus, ImportResult, ProviderSummary, SyncStatus } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { importIptvnator, refresh } from '$lib/me';
+  import { guideStatus, refreshGuide } from '$lib/guide';
   import { firstProvider } from '$lib/provider';
 
   let provider = $state<ProviderSummary | null>(null);
@@ -11,6 +12,10 @@
   let imported = $state<ImportResult | null>(null);
   let importing = $state(false);
   let refreshing = $state(false);
+  let guide = $state<GuideStatus | null>(null);
+  let guideRequesting = $state(false);
+  let guideTimer: ReturnType<typeof setInterval> | undefined;
+  let gone = false;
 
   onMount(async () => {
     try {
@@ -19,9 +24,56 @@
       // fall back to the add form
     }
     loaded = true;
+    if (provider) void readGuide(provider.id);
   });
 
   const fail = (err: unknown) => (err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.');
+
+  const guideLine = $derived(
+    !guide
+      ? ''
+      : guide.state === 'running'
+        ? 'Updating…'
+        : guide.fetchedAt
+          ? `Updated ${new Date(guide.fetchedAt).toLocaleString()} · ${guide.programmes.toLocaleString()} programmes`
+          : 'Not loaded yet',
+  );
+
+  function stopGuidePolling() {
+    clearInterval(guideTimer);
+    guideTimer = undefined;
+  }
+  onDestroy(() => {
+    gone = true;
+    stopGuidePolling();
+  });
+
+  /** Reads the guide's status and, like the sync poll, reads it again every second while a refresh runs. */
+  async function readGuide(id: number) {
+    try {
+      const s = await guideStatus(id);
+      if (gone) return;
+      guide = s;
+      if (s.state !== 'running') stopGuidePolling();
+      else guideTimer ??= setInterval(() => void readGuide(id), 1000);
+    } catch {
+      // keep trying while polling; the server may be busy
+    }
+  }
+
+  async function refreshGuideNow() {
+    if (!provider) return;
+    guideRequesting = true;
+    error = '';
+    try {
+      await refreshGuide(provider.id);
+      await readGuide(provider.id);
+    } catch (err) {
+      error = fail(err);
+    } finally {
+      guideRequesting = false;
+    }
+  }
 
   async function refreshNow() {
     if (!provider) return;
@@ -117,6 +169,19 @@
       {refreshing || sync?.state === 'running' ? 'Refreshing…' : 'Refresh now'}
     </button>
     <p class="muted"><a href="/settings/categories">Choose categories</a></p>
+  </div>
+
+  <h2>TV guide</h2>
+  <div class="card guide">
+    {#if guide}
+      <p class="muted">{guideLine}</p>
+      {#if guide.state === 'failed'}
+        <p class="error" role="alert">{guide.error ? `The last refresh failed: ${guide.error}` : 'The last refresh failed.'}</p>
+      {/if}
+    {/if}
+    <button type="button" class="primary" disabled={guideRequesting || guide?.state === 'running'} onclick={refreshGuideNow}>
+      Refresh guide
+    </button>
   </div>
 
   <h2>Import from IPTVnator</h2>
