@@ -2,6 +2,10 @@ import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { CatalogItem, SearchResults } from '@tv/shared';
 import { startBrowseApp } from '../testing/browseApp.ts';
 import { browseCatalogue } from '../testing/browseCatalogue.ts';
+import Fastify from 'fastify';
+import type { CatalogueRepo } from '../catalogue/repo.ts';
+import { LogoBusyError, type LogoCache } from '../logos/cache.ts';
+import { logoRoutes } from './logos.ts';
 import { PNG, startImageServer } from '../testing/imageServer.ts';
 
 let h: Awaited<ReturnType<typeof startBrowseApp>>;
@@ -60,4 +64,18 @@ test('item responses never contain provider logo URLs', async () => {
   expect(sky?.logoUrl).toBe(`/api/logos/${withLogo}`);
   const bare = (await h.app.inject('/api/search?q=espn')).json() as SearchResults;
   expect(bare.live[0]?.logoUrl).toBeNull();
+});
+
+test('503 with retry-after when the logo cache is busy', async () => {
+  const busy = Fastify();
+  await busy.register(
+    logoRoutes({
+      catalogue: { getItem: () => ({ logoUrl: 'http://x/y.png' }) } as unknown as CatalogueRepo,
+      logos: { get: () => Promise.reject(new LogoBusyError()) } as unknown as LogoCache,
+    }),
+  );
+  const res = await busy.inject('/logos/1');
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['retry-after']).toBe('5');
+  await busy.close();
 });

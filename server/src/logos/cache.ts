@@ -7,13 +7,21 @@ export interface CachedLogo {
   contentType: string;
 }
 
+/** Thrown by `get` when every fetch slot is busy and the waiting queue is full; nothing was fetched. */
+export class LogoBusyError extends Error {
+  constructor() {
+    super('Too many logo fetches in progress');
+  }
+}
+
 export interface LogoCache {
   /**
    * The cached image for `url` (fetched if missing or older than the TTL), or null if it is not a usable image. A
-   * fetch that failed is remembered for an hour, and null comes back at once until then.
+   * fetch that failed is remembered for an hour, and null comes back at once until then. Only a fetch waits for a
+   * slot; rejects with LogoBusyError when the queue is full.
    */
   get(url: string): Promise<CachedLogo | null>;
-  /** Deletes leftovers (.tmp), files older than twice the TTL, then the oldest files while the total is over the cap. */
+  /** Deletes leftovers (.tmp, once ten minutes old), files older than twice the TTL, then the oldest files while the total is over the cap. */
   sweep(): Promise<{ deleted: number; bytes: number }>;
   /** Sweeps now and then daily, on a timer that does not keep the process alive. */
   start(): void;
@@ -26,6 +34,10 @@ const SWEEP_INTERVAL_MS = 86_400_000;
 const DAY_MS = 86_400_000;
 const FAILURE_TTL_MS = 3_600_000;
 const MAX_FAILURES = 5_000;
+export const MAX_CONCURRENT_FETCHES = 8;
+export const MAX_QUEUED_FETCHES = 200;
+/** A temp file this young may still be mid-write. */
+const TMP_MIN_AGE_MS = 600_000;
 
 const EXTENSIONS: Record<string, string> = {
   'image/png': 'png',
@@ -60,6 +72,9 @@ export function createLogoCache(deps: {
   timeoutMs?: number;
   /** How many failed URLs are remembered; past it, the oldest is forgotten. */
   maxFailures?: number;
+  /** Outbound fetches at once (this cache's, shared by all requests) and how many more may wait for a slot. */
+  maxConcurrent?: number;
+  maxQueued?: number;
 }): LogoCache {
   const { dir, now, userAgent } = deps;
   const fetchFn = deps.fetchFn ?? fetch;
@@ -68,6 +83,10 @@ export function createLogoCache(deps: {
   const maxCacheBytes = deps.maxCacheBytes ?? DEFAULT_MAX_CACHE_BYTES;
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const maxFailures = deps.maxFailures ?? MAX_FAILURES;
+  const maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT_FETCHES;
+  const maxQueued = deps.maxQueued ?? MAX_QUEUED_FETCHES;
+  let active = 0;
+  const waiting: (() => void)[] = [];
   const inFlight = new Map<string, Promise<CachedLogo | null>>();
   const failedAt = new Map<string, number>(); // url -> when its fetch failed, oldest first
 
@@ -83,6 +102,31 @@ export function createLogoCache(deps: {
     failedAt.delete(url); // so it goes back in as the newest
     failedAt.set(url, now());
     if (failedAt.size > maxFailures) failedAt.delete(failedAt.keys().next().value!);
+  }
+
+  async function acquire(): Promise<void> {
+    if (active < maxConcurrent) {
+      active++;
+      return;
+    }
+    if (waiting.length >= maxQueued) throw new LogoBusyError();
+    await new Promise<void>((resolve) => waiting.push(resolve)); // the releaser hands its slot over
+  }
+
+  function release(): void {
+    const next = waiting.shift();
+    if (next) next();
+    else active--;
+  }
+
+  /** A fetch always ends (the timeout bounds it), so a slot is never held for long. */
+  async function fetchLimited(url: string, key: string): Promise<CachedLogo | null> {
+    await acquire();
+    try {
+      return await fetchAndStore(url, key);
+    } finally {
+      release();
+    }
   }
 
   async function cached(key: string): Promise<CachedLogo | null> {
@@ -196,7 +240,9 @@ export function createLogoCache(deps: {
         continue;
       }
       if (!stat.isFile()) continue;
-      if ((name.endsWith('.tmp') || now() - stat.mtimeMs > 2 * ttlMs) && (await remove(file, stat.size))) continue;
+      const age = now() - stat.mtimeMs;
+      const expired = name.endsWith('.tmp') ? age > TMP_MIN_AGE_MS : age > 2 * ttlMs;
+      if (expired && (await remove(file, stat.size))) continue;
       kept.push({ file, size: stat.size, mtimeMs: stat.mtimeMs });
     }
     let total = kept.reduce((sum, f) => sum + f.size, 0);
@@ -228,7 +274,7 @@ export function createLogoCache(deps: {
       const key = createHash('sha256').update(url).digest('hex');
       const pending = inFlight.get(key);
       if (pending) return pending;
-      const job = (async () => (await cached(key)) ?? (await fetchAndStore(url, key)))().finally(() => inFlight.delete(key));
+      const job = (async () => (await cached(key)) ?? (await fetchLimited(url, key)))().finally(() => inFlight.delete(key));
       inFlight.set(key, job);
       return job;
     },

@@ -1,6 +1,6 @@
 import type { CurationCategory, CurationGroup, CurationUpdate, CurationView, Kind, TagStyle } from '@tv/shared';
 import type { Db } from '../db/db.ts';
-import { friendlyName, stripTag } from './tags.ts';
+import { friendlyName, stripTag, tagOf } from './tags.ts';
 import type { TagPattern } from './tags.ts';
 
 /** Sync's catch-all for items whose category the provider does not list; recreated as orphans come and go. */
@@ -13,6 +13,8 @@ export type Resolution = {
   /** The kind has categories and every one of them is visible. */
   allVisible: boolean;
   displayName: (name: string) => string;
+  /** For item names: as `displayName`, but also strips the visible tag when the item spells it in another pattern. */
+  itemName: (name: string) => string;
   newCount: number;
 };
 
@@ -59,6 +61,24 @@ function nameFn(pattern: TagPattern | null, resolved: Resolved<CategoryRow>[]): 
   if (tags.length !== 1 || pattern === null) return (name) => name;
   const tag = tags[0]!;
   return (name) => strip(name, tag, pattern);
+}
+
+const ALL_PATTERNS: TagPattern[] = ['pipe', 'pipe-wrapped', 'bracket', 'dash', 'colon'];
+
+/** Item names may spell the tag differently from their categories (`|EN| Action` holds `EN - Title`); only that one tag is stripped. */
+function itemNameFn(pattern: TagPattern | null, resolved: Resolved<CategoryRow>[]): (name: string) => string {
+  const own = nameFn(pattern, resolved);
+  const tags = [...new Set(resolved.filter((c) => c.visible && c.tag !== null).map((c) => c.tag!))];
+  if (tags.length !== 1 || pattern === null) return own;
+  const tag = tags[0]!;
+  return (name) => {
+    const stripped = own(name);
+    if (stripped !== name) return stripped;
+    for (const other of ALL_PATTERNS) {
+      if (other !== pattern && tagOf(name.trim(), other) === tag.toUpperCase()) return strip(name, tag, other);
+    }
+    return name;
+  };
 }
 
 const COLUMNS = `c.id AS id, c.remote_id AS remoteId, c.name AS name, c.tag AS tag, c.first_seen_at AS firstSeenAt,
@@ -141,6 +161,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
       visibleIds: new Set(resolved.filter((c) => c.visible).map((c) => c.id)),
       allVisible: resolved.length > 0 && resolved.every((c) => c.visible),
       displayName: nameFn(rows[0]?.pattern ?? null, resolved),
+      itemName: itemNameFn(rows[0]?.pattern ?? null, resolved),
       newCount: resolved.filter((c) => c.isNew).length,
     };
   }

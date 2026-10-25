@@ -12,7 +12,7 @@ export interface Presenter {
   /** Resolves each kind once and adds `displayName` and `favourite` for the user; internal fields are dropped. */
   items(stored: StoredItem[], userId: number): CatalogItem[];
   /** The same for a caller that has already resolved the kind (and loaded the user's favourites for it). */
-  itemsWith(resolution: Pick<Resolution, 'displayName'>, favourites: Set<number>, stored: StoredItem[]): CatalogItem[];
+  itemsWith(resolution: Pick<Resolution, 'itemName'>, favourites: Set<number>, stored: StoredItem[]): CatalogItem[];
   browse(userId: number, providerId: number, kind: Kind): Promise<BrowseView>;
 }
 
@@ -58,7 +58,7 @@ export function createPresenter(deps: {
     });
 
   const itemsWith: Presenter['itemsWith'] = (resolution, favourites, stored) =>
-    withNow(stored.map(present(resolution.displayName, favourites)));
+    withNow(stored.map(present(resolution.itemName, favourites)));
 
   function items(stored: StoredItem[], userId: number): CatalogItem[] {
     const fns = new Map<string, (i: StoredItem) => CatalogItem>();
@@ -66,8 +66,8 @@ export function createPresenter(deps: {
       const key = `${i.providerId}:${i.kind}`;
       let fn = fns.get(key);
       if (!fn) {
-        const { displayName } = curation.resolution(i.providerId, i.kind, userId);
-        fns.set(key, (fn = present(displayName, new Set(personal.favouriteItemIds(userId, i.providerId, i.kind)))));
+        const { itemName } = curation.resolution(i.providerId, i.kind, userId);
+        fns.set(key, (fn = present(itemName, new Set(personal.favouriteItemIds(userId, i.providerId, i.kind)))));
       }
       return fn(i);
     }));
@@ -81,7 +81,7 @@ export function createPresenter(deps: {
     itemsWith,
     async browse(userId, providerId, kind) {
       const resolution = curation.resolution(providerId, kind, userId);
-      const { visibleIds, displayName, newCount } = resolution;
+      const { visibleIds, displayName, itemName, newCount } = resolution;
       const pinnedIds = personal.pinnedCategoryIds(userId, providerId, kind);
       const pinnedSet = new Set(pinnedIds);
       const categories: BrowseCategory[] = catalogue
@@ -90,7 +90,7 @@ export function createPresenter(deps: {
         .map((c) => ({ id: c.id, displayName: displayName(c.name), itemCount: c.itemCount, pinned: pinnedSet.has(c.id) }));
       const byId = new Map(categories.map((c) => [c.id, c]));
       const favouriteIds = personal.favouriteItemIds(userId, providerId, kind);
-      const show = present(displayName, new Set(favouriteIds));
+      const show = present(itemName, new Set(favouriteIds));
       const showAll = (stored: ItemDetail[]): CatalogItem[] => withNow(stored.map((i) => show(i)));
 
       const continuing = kind === 'live' ? [] : personal.continueWatching(userId, providerId, kind, CONTINUE_LIMIT);

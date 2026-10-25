@@ -305,6 +305,48 @@ test('display names strip the single visible tag', () => {
   expect(view().groups[0]!.categories[0]!.displayName).toBe('UK| SPORTS');
 });
 
+test('strips the single visible tag from items under any pattern', async () => {
+  fake.setCatalogue({
+    live: { categories: [], items: [] },
+    movie: {
+      categories: [
+        { id: 'm1', name: '|EN| Action' },
+        { id: 'm3', name: '|EN| Comedy' },
+        { id: 'm2', name: '|FR| Drame' },
+        { id: 'm4', name: '|FR| Policier' },
+      ],
+      items: [
+        { id: 1, name: 'EN - Title', categoryId: 'm1' },
+        { id: 2, name: 'FR - Autre', categoryId: 'm2' },
+      ],
+    },
+    series: { categories: [], items: [] },
+    episodes: {},
+  });
+  clock += 60_000;
+  await syncCatalogue({ db, client: providers.clientFor(providerId), providerId, kinds: ['movie'], now: () => clock });
+  const set = (tags: Record<string, boolean>) => {
+    clock += 60_000;
+    curation.save(providerId, 'movie', { tags, categories: {} }, null);
+    return curation.resolution(providerId, 'movie', OWNER);
+  };
+  const en = set({ EN: true, FR: false });
+  expect(en.itemName('EN - Title')).toBe('Title');
+  expect(en.itemName(' en - Title')).toBe('Title');
+  expect(en.itemName('EN| Title')).toBe('Title');
+  expect(en.itemName('|EN| Title')).toBe('Title');
+  expect(en.itemName('[EN] Title')).toBe('Title');
+  expect(en.itemName('EN: Title')).toBe('Title');
+  expect(en.itemName('FR - Autre')).toBe('FR - Autre'); // never some other tag
+  expect(en.itemName('Sky: Sports')).toBe('Sky: Sports');
+  expect(en.itemName('EN - ')).toBe('EN - ');
+  expect(en.displayName('|EN| Action')).toBe('Action');
+  expect(en.displayName('EN - Title')).toBe('EN - Title'); // category names keep the kind's pattern only
+  const both = set({ EN: true, FR: true });
+  expect(both.itemName('EN - Title')).toBe('EN - Title');
+  expect(both.displayName('|EN| Action')).toBe('|EN| Action');
+});
+
 test('resolution agrees with visibleCategoryIds, displayNameFn and newCount', async () => {
   save({ ...UK_ONLY, categories: { '13': false } });
   await sync([...BASE, ['42', 'MISC NEW']]);

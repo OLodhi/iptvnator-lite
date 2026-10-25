@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import type { FastifyPluginAsync } from 'fastify';
 import type { ApiError } from '@tv/shared';
 import type { CatalogueRepo } from '../catalogue/repo.ts';
-import type { LogoCache } from '../logos/cache.ts';
+import { LogoBusyError, type LogoCache } from '../logos/cache.ts';
 
 export const LOGO_MAX_AGE_SECONDS = 604800;
 /** As long as the logo cache remembers a failed fetch. */
@@ -21,7 +21,16 @@ export const logoRoutes = (deps: { catalogue: CatalogueRepo; logos: LogoCache })
             .send({ code: 'NOT_FOUND', message: 'No logo for this item' } satisfies ApiError);
         const url = deps.catalogue.getItem(req.params.itemId)?.logoUrl;
         if (!url) return notFound();
-        const image = await deps.logos.get(url);
+        let image;
+        try {
+          image = await deps.logos.get(url);
+        } catch (err) {
+          if (!(err instanceof LogoBusyError)) throw err;
+          return reply
+            .code(503)
+            .header('retry-after', '5')
+            .send({ code: 'BUSY', message: 'Too many logo fetches in progress' } satisfies ApiError);
+        }
         if (!image) return notFound();
         return reply
           .header('cache-control', `public, max-age=${LOGO_MAX_AGE_SECONDS}`)
