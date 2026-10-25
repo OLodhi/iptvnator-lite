@@ -99,7 +99,7 @@ export function createGuideRunner(deps: {
     },
     running: (providerId) => active.has(providerId),
     async relink(providerId) {
-      await relinkGuideInSteps(deps.db, providerId);
+      await relinkGuideInSteps(deps.db, providerId, Math.floor(now() / 1000));
     },
     status(providerId) {
       const state = deps.store.state(providerId);

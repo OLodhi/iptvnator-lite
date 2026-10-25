@@ -304,3 +304,22 @@ test('nothing is queued after stop', async () => {
   expect(r.running(providerId)).toBe(false);
   expect(xmltvCalls).toBe(1);
 });
+
+/**
+ * A stored guide whose own-id channel for item 1 has nothing left at PINNED, while a name match is still listed at
+ * PINNED (but long past at the real clock). Listings are judged at the injected clock, so the name match wins.
+ */
+test('the after-sync relink judges listings at the injected clock', async () => {
+  const PINNED = Date.UTC(2020, 5, 1, 12, 0, 0) / 1000;
+  const itemOne = db.prepare("SELECT id, name FROM items WHERE kind = 'live' AND remote_id = '1'").get() as { id: number; name: string };
+  db.prepare("INSERT INTO guide_state (provider_id, generation, fetched_at, source) VALUES (?, 1, ?, 'xmltv')").run(providerId, PINNED);
+  const channel = db.prepare('INSERT INTO guide_channels (provider_id, generation, key, name, names) VALUES (?, 1, ?, ?, ?)');
+  channel.run(providerId, 'hls.uk', 'hls.uk', JSON.stringify(['hls.uk']));
+  channel.run(providerId, 'alt.uk', 'alt.uk', JSON.stringify([itemOne.name]));
+  const programme = db.prepare('INSERT INTO programmes (provider_id, generation, channel_key, start, stop, title) VALUES (?, 1, ?, ?, ?, ?)');
+  programme.run(providerId, 'hls.uk', PINNED - 7200, PINNED - 3600, 'over');
+  programme.run(providerId, 'alt.uk', PINNED + 3600, PINNED + 7200, 'upcoming');
+  const r = makeRunner({ now: () => PINNED * 1000 });
+  await r.relink(providerId);
+  expect(db.prepare('SELECT channel_key, method FROM guide_links WHERE item_id = ?').get(itemOne.id)).toEqual({ channel_key: 'alt.uk', method: 'normalised' });
+});

@@ -340,7 +340,7 @@ export const guideRoutes = (deps: {
         db.transaction(() => {
           if (key === null) clearMap.run(item.providerId, item.remoteId);
           else setMap.run(item.providerId, item.remoteId, key);
-          relinkGuide(db, item.providerId);
+          relinkGuide(db, item.providerId, nowSec());
         })();
         // Programmes are stored only for wanted channels, so the new channel's arrive with a refresh.
         guide.start(item.providerId);

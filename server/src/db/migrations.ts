@@ -124,6 +124,7 @@ export const migrations: string[] = [
   CREATE TABLE programmes (id INTEGER PRIMARY KEY, provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL, channel_key TEXT NOT NULL, start INTEGER NOT NULL, stop INTEGER NOT NULL,
     title TEXT NOT NULL, subtitle TEXT, description TEXT, category TEXT);
+  -- (match.ts pins programmes_slot by name with INDEXED BY: renaming it breaks matching)
   CREATE UNIQUE INDEX programmes_slot ON programmes (provider_id, generation, channel_key, start);
   CREATE INDEX programmes_time ON programmes (provider_id, generation, start);
   CREATE INDEX programmes_stop ON programmes (provider_id, generation, stop);
