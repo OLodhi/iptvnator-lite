@@ -35,6 +35,14 @@ function setup() {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const params = { itemId: 1, startAtSec: 0 };
 
+test('start forwards catchup into the play request', async () => {
+  const { pb, deps, pending, video } = setup();
+  const p = pb.start({ itemId: 1, startAtSec: 0, catchup: { startSec: 1000, stopSec: 4600 } }, video);
+  expect(deps.play.mock.calls[0]![0]).toEqual({ itemId: 1, startAtSec: 0, clientId: 'cid', catchup: { startSec: 1000, stopSec: 4600 } });
+  pending[0]!.resolve(res('s1', 3600));
+  await p;
+});
+
 test('normal path attaches, heartbeats, and releases once on teardown', async () => {
   const { pb, deps, pending, video, stopHb, destroy } = setup();
   const p = pb.start(params, video);

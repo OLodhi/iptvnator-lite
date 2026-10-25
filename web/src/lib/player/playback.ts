@@ -19,7 +19,7 @@ export type PlaybackDeps = {
   onError: (err: unknown) => void;
 };
 
-export type StartParams = { itemId: number; episodeRemoteId?: string; startAtSec: number };
+export type StartParams = { itemId: number; episodeRemoteId?: string; startAtSec: number; catchup?: { startSec: number; stopSec: number } };
 
 /**
  * Owns the play -> attach -> heartbeat -> release lifecycle. Only the latest start() may attach;
@@ -54,6 +54,7 @@ export function createPlayback(deps: PlaybackDeps) {
     const ctl = (controller = new AbortController());
     const req: PlayRequest = { itemId: params.itemId, startAtSec: params.startAtSec, clientId };
     if (params.episodeRemoteId) req.episodeRemoteId = params.episodeRemoteId;
+    if (params.catchup) req.catchup = params.catchup;
     let res: PlayResponse;
     try {
       res = await deps.play(req, ctl.signal);

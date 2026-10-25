@@ -1,15 +1,26 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
-import type { PlayResponse } from '@tv/shared';
+import type { CatalogItem, PlayResponse } from '@tv/shared';
 
 const route = vi.hoisted(() => ({ url: new URL('http://localhost/watch?item=7&t=600') }));
 const api = vi.hoisted(() => vi.fn());
 const attachStream = vi.hoisted(() => vi.fn((_v: HTMLVideoElement, _url: string, _opts: object) => ({ destroy: () => {} })));
 const heartbeats = vi.hoisted(() => [] as { onGone: () => void }[]);
-vi.mock('$app/state', () => ({ page: route }));
+const nav = vi.hoisted(() => ({ goto: vi.fn(async (_u: string) => {}) }));
+const tick = $state({ n: 0 }); // bumped to make the mocked page.url reactive, as the real one is
+vi.mock('$app/state', () => ({
+  page: {
+    get url() {
+      void tick.n;
+      return route.url;
+    },
+  },
+}));
+vi.mock('$app/navigation', () => ({ goto: nav.goto, beforeNavigate: () => {} }));
 vi.mock('hls.js', () => ({ default: {} }));
 vi.mock('$lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api')>()), api }));
-vi.mock('$lib/me', () => ({ positions: vi.fn(async () => []), reportPosition: vi.fn(async () => {}) }));
+const me = vi.hoisted(() => ({ positions: vi.fn(async () => []), reportPosition: vi.fn(async () => {}) }));
+vi.mock('$lib/me', () => me);
 vi.mock('$lib/session', () => ({
   releaseSession: vi.fn(async () => {}),
   startHeartbeat: vi.fn((_s: string, _c: string, opts: { onGone: () => void }) => {
@@ -20,6 +31,7 @@ vi.mock('$lib/session', () => ({
 vi.mock('$lib/clientId', () => ({ getClientId: () => 'cid' }));
 vi.mock('$lib/player/attach', () => ({ attachStream }));
 
+import { ApiClientError } from '$lib/api';
 import Watch from './+page.svelte';
 
 let app: ReturnType<typeof mount> | undefined;
@@ -28,6 +40,10 @@ beforeEach(() => {
   api.mockReset();
   attachStream.mockClear();
   heartbeats.length = 0;
+  nav.goto.mockClear();
+  me.positions.mockClear();
+  me.reportPosition.mockClear();
+  route.url = new URL('http://localhost/watch?item=7&t=600');
 });
 afterEach(() => {
   if (app) unmount(app);
@@ -63,4 +79,134 @@ test('an HLS resume asks for no seek, and a restart resumes at the absolute posi
   await resumeThenRestart(hls, 10); // the session starts at 600, so currentTime counts from there
   expect(attachStream.mock.calls[0]![2]).not.toHaveProperty('startAtSec');
   expect(playCalls().map(startAtOf)).toEqual([600, 610]);
+});
+
+const catchupRes: PlayResponse = { sessionId: 'c1', mode: 'hls', url: '/api/sessions/c1/cid/index.m3u8', durationSec: 3600, startAtSec: 0 };
+const liveRes: PlayResponse = { sessionId: 'l1', mode: 'hls', url: '/api/sessions/l1/cid/index.m3u8', durationSec: null, startAtSec: 0 };
+const bodyOf = (call: unknown[]) => JSON.parse((call[1] as RequestInit).body as string);
+const liveItem = (over: Partial<CatalogItem> = {}) =>
+  ({ id: 7, kind: 'live', catchupDays: 3, now: { title: 'News at Ten', startSec: 79200, stopSec: 82800 }, ...over }) as CatalogItem;
+const buttonWith = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes(text));
+
+function serve(play: PlayResponse, item: CatalogItem | Error) {
+  api.mockImplementation(async (path: string) => {
+    if (path === '/api/play') return play;
+    if (item instanceof Error) throw item;
+    return item;
+  });
+}
+
+test('catch-up params play catch-up without resume or progress', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(bodyOf(playCalls()[0]!)).toMatchObject({ itemId: 7, catchup: { startSec: 3600, stopSec: 7200 }, startAtSec: 0 });
+  expect(me.positions).not.toHaveBeenCalled();
+  const video = document.querySelector('video')!;
+  video.currentTime = 30;
+  video.dispatchEvent(new Event('pause'));
+  video.dispatchEvent(new Event('timeupdate'));
+  unmount(app);
+  app = undefined;
+  expect(me.reportPosition).not.toHaveBeenCalled();
+});
+
+test('catch-up shows its label, and not the on-now line', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(document.body.textContent).toContain('↺ Catch-up · News · 01:00–02:00');
+  expect(document.body.textContent).not.toContain('On now');
+  expect(buttonWith('From start')).toBeUndefined();
+});
+
+test('invalid from/to play normally', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=7200&to=3600&t=600');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(bodyOf(playCalls()[0]!).catchup).toBeUndefined();
+  expect(startAtOf(playCalls()[0]!)).toBe(600);
+});
+
+test('a catch-up validation error shows the server message', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
+  api.mockImplementation(async (path: string) => {
+    if (path === '/api/play') throw new ApiClientError(400, 'VALIDATION', "This channel doesn't support catch-up");
+    return liveItem();
+  });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel doesn't support catch-up"));
+});
+
+test('catch-up restart after Playback stopped replays the same window', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  heartbeats[0]!.onGone();
+  flushSync();
+  buttonWith('Tap to restart')!.click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(bodyOf(playCalls()[1]!)).toMatchObject({ catchup: { startSec: 3600, stopSec: 7200 }, startAtSec: 0 });
+});
+
+test('live shows on-now and From start only with archive', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten · until 23:00'));
+  expect(buttonWith('From start')).toBeDefined();
+  unmount(app);
+  document.body.innerHTML = '';
+
+  serve(liveRes, liveItem({ catchupDays: 0 }));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
+  expect(buttonWith('From start')).toBeUndefined();
+  unmount(app);
+  document.body.innerHTML = '';
+
+  serve(liveRes, liveItem({ now: null }));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalled());
+  expect(document.body.textContent).not.toContain('On now');
+  expect(buttonWith('From start')).toBeUndefined();
+});
+
+test('a failed item fetch omits the line and does not block playback', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, new Error('offline'));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(document.body.textContent).not.toContain('On now');
+});
+
+test('From start navigates to the catch-up URL', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, { ...liveItem(), now: { title: 'News & Co', startSec: 79200, stopSec: 82800 } });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
+  buttonWith('From start')!.click();
+  expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=79200&to=82800&title=News%20%26%20Co');
+});
+
+test('a query change while mounted starts a new session and tears down the old one', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  const destroy = vi.fn();
+  attachStream.mockImplementationOnce(() => ({ destroy }));
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  serve(catchupRes, liveItem());
+  route.url = new URL('http://localhost/watch?item=7&from=79200&to=82800&title=News');
+  tick.n++;
+  flushSync();
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(destroy).toHaveBeenCalledTimes(1);
+  expect(bodyOf(playCalls()[1]!)).toMatchObject({ catchup: { startSec: 79200, stopSec: 82800 } });
+  expect(me.positions).toHaveBeenCalledTimes(1); // the first, normal session only
+  expect(document.body.textContent).toContain('↺ Catch-up · News');
 });
