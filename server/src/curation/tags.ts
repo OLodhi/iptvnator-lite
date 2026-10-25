@@ -17,7 +17,7 @@ const PATTERNS: Record<TagPattern, RegExp> = {
 
 export const TAG_PATTERNS: readonly TagPattern[] = Object.keys(PATTERNS) as TagPattern[];
 
-const FRIENDLY:Record<string, string> = {
+const FRIENDLY: Record<string, string> = {
   UK: 'United Kingdom', US: 'United States', CA: 'Canada', FR: 'France', DE: 'Germany', ES: 'Spain',
   IT: 'Italy', NL: 'Netherlands', BE: 'Belgium', PT: 'Portugal', PL: 'Poland', TR: 'Turkey',
   GR: 'Greece', AU: 'Australia', NZ: 'New Zealand', EN: 'English',

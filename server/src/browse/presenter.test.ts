@@ -64,6 +64,17 @@ test('live items carry now; movies don\'t', async () => {
   }
 });
 
+test('item names under another tag pattern than their categories lose the single visible tag', () => {
+  const presenter = createPresenter(h);
+  const id = itemId('|EN| Bukowski Days');
+  h.db.prepare('UPDATE items SET name = ? WHERE id = ?').run('EN - Title', id);
+  try {
+    expect(presenter.items([h.catalogue.getItem(id)!], 1)[0]!.displayName).toBe('Title');
+  } finally {
+    h.db.prepare('UPDATE items SET name = ? WHERE id = ?').run('|EN| Bukowski Days', id);
+  }
+});
+
 test('a presented batch makes one nowFor call', () => {
   const calls: number[][] = [];
   const guide = { nowFor: (_p: number, ids: number[]) => (calls.push(ids), new Map()) } as unknown as GuideQueries;

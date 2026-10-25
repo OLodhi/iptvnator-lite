@@ -245,11 +245,12 @@ export function createLogoCache(deps: {
       if (expired && (await remove(file, stat.size))) continue;
       kept.push({ file, size: stat.size, mtimeMs: stat.mtimeMs });
     }
-    let total = kept.reduce((sum, f) => sum + f.size, 0);
-    kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const f of kept) {
+    // Young temp files may be mid-write: they neither count towards the cap nor get evicted.
+    const logos = kept.filter((f) => !f.file.endsWith('.tmp'));
+    let total = logos.reduce((sum, f) => sum + f.size, 0);
+    logos.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const f of logos) {
       if (total <= maxCacheBytes) break;
-      if (f.file.endsWith('.tmp')) continue; // young ones may be mid-write
       if (await remove(f.file, f.size)) total -= f.size;
     }
     return { deleted, bytes };

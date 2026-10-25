@@ -223,7 +223,7 @@ function watchLookups() {
       done++;
     }
   });
-  return (gets: number) => vi.waitFor(() => expect(done).toBeGreaterThanOrEqual(gets * EXTENSIONS_TRIED), { timeout: 10_000 });
+  return (gets: number) => vi.waitFor(() => expect(done).toBeGreaterThanOrEqual(gets * EXTENSIONS_TRIED));
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -237,17 +237,18 @@ test('answers busy beyond the queue, and never queues cached or failed logos', a
   const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, maxQueued: 1 });
   const lookedUp = watchLookups();
   const running = cache.get('http://a/1.png');
+  await vi.waitFor(() => expect(gates).toHaveLength(1)); // 1 holds the slot
   const queued = cache.get('http://a/2.png');
-  await lookedUp(2); // one holds the slot, the other waits for it
+  await lookedUp(2); // 2 has finished its disk lookup and waits for the slot
   await expect(cache.get('http://a/3.png')).rejects.toBeInstanceOf(LogoBusyError);
   expect(await cache.get('ftp://a/4.png')).toBeNull(); // rejected before the queue
   gates.shift()!();
   expect(await running).not.toBeNull();
-  await vi.waitFor(() => expect(gates).toHaveLength(1), { timeout: 10_000 }); // the queued one took the slot
+  await vi.waitFor(() => expect(gates).toHaveLength(1)); // the queued one took the slot
   expect((await cache.get('http://a/1.png'))?.contentType).toBe('image/png'); // on disk: no wait
   gates.shift()!();
   expect(await queued).not.toBeNull();
-}, 20_000);
+});
 
 test.each([
   ['times out', () => new Promise<Response>(() => undefined)],
@@ -267,7 +268,7 @@ test.each([
   const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, timeoutMs: 50 });
   const lookedUp = watchLookups();
   const results = [cache.get('http://a/1.png')];
-  await vi.waitFor(() => expect(started).toEqual(['http://a/1.png']), { timeout: 10_000 });
+  await vi.waitFor(() => expect(started).toEqual(['http://a/1.png']));
   results.push(cache.get('http://a/2.png'));
   await lookedUp(2); // 2 is queued before 3 arrives
   results.push(cache.get('http://a/3.png'));
@@ -277,7 +278,7 @@ test.each([
   expect(two).not.toBeNull();
   expect(three).not.toBeNull();
   expect(started).toEqual(['http://a/1.png', 'http://a/2.png', 'http://a/3.png']);
-}, 20_000);
+});
 
 test('the size cap leaves young temp files alone', async () => {
   const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 50 });
@@ -286,4 +287,12 @@ test('the size cap leaves young temp files alone', async () => {
   put('b.png', 100, 200);
   expect(await cache.sweep()).toEqual({ deleted: 2, bytes: 200 });
   expect(files()).toEqual(['writing.png.1.2.tmp']);
+});
+
+test('a large young temp file does not push logos over the cap', async () => {
+  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 150 });
+  put('writing.png.1.2.tmp', 1000, 1000);
+  put('a.png', 100, 300);
+  expect(await cache.sweep()).toEqual({ deleted: 0, bytes: 0 });
+  expect(files().sort()).toEqual(['a.png', 'writing.png.1.2.tmp']);
 });
