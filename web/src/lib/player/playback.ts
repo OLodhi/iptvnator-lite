@@ -174,13 +174,18 @@ export function createPlayback(deps: PlaybackDeps) {
    * Seeks to an absolute position, kept 5 s short of the end, and for a programme still airing 30 s short of now.
    * What has been remuxed so far is seeked within; anything else restarts a movie, episode or catch-up programme there.
    */
-  async function seekTo(video: HTMLVideoElement, absSec: number): Promise<void> {
-    if (!latest) return;
-    const { params, durationSec } = latest;
+  /** Where a seek or restart to `absSec` may go: from 0 to 5 s short of the end, and for a programme still airing 30 s short of now. */
+  function clamp(absSec: number, { params, durationSec }: NonNullable<typeof latest>): number {
     let latestSec = durationSec === null ? Infinity : durationSec - END_MARGIN_SEC;
     // The server refuses a window that starts after now, and the playing session would already be gone.
     if (params.catchup) latestSec = Math.min(latestSec, (deps.now ?? Date.now)() / 1000 - params.catchup.startSec - NOW_MARGIN_SEC);
-    const target = Math.max(0, Math.min(absSec, latestSec));
+    return Math.max(0, Math.min(absSec, latestSec));
+  }
+
+  async function seekTo(video: HTMLVideoElement, absSec: number): Promise<void> {
+    if (!latest) return;
+    const { params, durationSec } = latest;
+    const target = clamp(absSec, latest);
     if (active) {
       const ranges = video.seekable;
       const loadedEndSec = active.offsetSec + (ranges.length > 0 ? ranges.end(ranges.length - 1) : 0);
@@ -194,14 +199,14 @@ export function createPlayback(deps: PlaybackDeps) {
     return begin({ ...params, startAtSec: target }, video, durationSec);
   }
 
-  /** Restarts at the current position with other tracks. */
+  /** Restarts at the current position with other tracks, kept short of the end as a seek is. */
   function restartWith(
     video: HTMLVideoElement,
     patch: Partial<Pick<StartParams, 'audioIndex' | 'subtitleIndex' | 'subtitleLanguage'>>,
   ): Promise<void> {
     if (!latest) return Promise.resolve();
     deps.onRestarting?.();
-    return begin({ ...latest.params, ...patch, startAtSec: absoluteSec(video) }, video, latest.durationSec);
+    return begin({ ...latest.params, ...patch, startAtSec: clamp(absoluteSec(video), latest) }, video, latest.durationSec);
   }
 
   function current(): CurrentPlayback | null {

@@ -462,6 +462,17 @@ test('restartWith keeps the position and changes the tracks', async () => {
   expect(pb.current()?.params).toMatchObject({ audioIndex: 2, subtitleIndex: null, startAtSec: 130 });
 });
 
+test('a track change after the end restarts 5 s before it, as a seek there would', async () => {
+  const { pb, deps, pending, video, open } = setup();
+  const p = pb.start({ kind: 'episode', itemId: 11, episodeRemoteId: '111', startAtSec: 0 }, video);
+  pending[0]!.resolve({ ...res('s1', 3000), tracks });
+  await p;
+  open(3000);
+  video.currentTime = 3000; // played to the end
+  void pb.restartWith(video, { subtitleIndex: 3 });
+  expect(playBody(deps, 1)).toMatchObject({ startAtSec: 2995, subtitleIndex: 3 });
+});
+
 test('a superseded restart is released, not attached', async () => {
   const { pb, deps, pending, video, open } = setup();
   const p = pb.start({ kind: 'episode', itemId: 11, episodeRemoteId: '111', startAtSec: 0 }, video);
