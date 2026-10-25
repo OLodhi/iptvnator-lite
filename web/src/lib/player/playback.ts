@@ -170,10 +170,6 @@ export function createPlayback(deps: PlaybackDeps) {
     return Math.floor(active?.startSec ?? latest?.params.startAtSec ?? 0);
   }
 
-  /**
-   * Seeks to an absolute position, kept 5 s short of the end, and for a programme still airing 30 s short of now.
-   * What has been remuxed so far is seeked within; anything else restarts a movie, episode or catch-up programme there.
-   */
   /** Where a seek or restart to `absSec` may go: from 0 to 5 s short of the end, and for a programme still airing 30 s short of now. */
   function clamp(absSec: number, { params, durationSec }: NonNullable<typeof latest>): number {
     let latestSec = durationSec === null ? Infinity : durationSec - END_MARGIN_SEC;
@@ -182,6 +178,10 @@ export function createPlayback(deps: PlaybackDeps) {
     return Math.max(0, Math.min(absSec, latestSec));
   }
 
+  /**
+   * Seeks to an absolute position, kept 5 s short of the end, and for a programme still airing 30 s short of now.
+   * What has been remuxed so far is seeked within; anything else restarts a movie, episode or catch-up programme there.
+   */
   async function seekTo(video: HTMLVideoElement, absSec: number): Promise<void> {
     if (!latest) return;
     const { params, durationSec } = latest;
