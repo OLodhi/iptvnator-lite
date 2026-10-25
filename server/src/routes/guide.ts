@@ -71,7 +71,7 @@ export const guideRoutes = (deps: {
 
     function prefsFor(userId: number, providerId: number, chips: GuideChip[]): GuidePrefs {
       const fallback: GuidePrefs = {
-        view: 'whatson',
+        view: 'grid',
         filter: deps.personal.favouriteItemIds(userId, providerId, 'live').length > 0 ? 'favourites' : 'all',
       };
       const stored = deps.prefs.get<Partial<GuidePrefs> | null>(userId, PREFS_KEY, null);
@@ -130,7 +130,7 @@ export const guideRoutes = (deps: {
     app.get('/guide', async (req): Promise<GuideMeta> => {
       const provider = firstProvider();
       if (!provider) {
-        return { providerId: null, chips: [], prefs: { view: 'whatson', filter: 'all' }, range: null, status: null };
+        return { providerId: null, chips: [], prefs: { view: 'grid', filter: 'all' }, range: null, status: null };
       }
       const userId = currentUserId(req);
       const chips = chipsFor(userId, provider.id);

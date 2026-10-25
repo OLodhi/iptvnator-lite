@@ -23,6 +23,7 @@ import { createPersonalService } from '../personal/service.ts';
 import type { PersonalService } from '../personal/service.ts';
 import { createPrefsService } from '../prefs/service.ts';
 import { createProviderService } from '../providers/service.ts';
+import { startBrowseApp } from '../testing/browseApp.ts';
 import { testConfig } from '../testing/config.ts';
 import { stubSessions } from '../testing/sessions.ts';
 
@@ -136,6 +137,23 @@ test('unknown provider is 404', async () => {
   expect((await app.inject('/api/providers/999/guide')).statusCode).toBe(404);
 });
 
+test('with no provider the meta is empty and opens on the grid', async () => {
+  const empty = await startBrowseApp({
+    live: { categories: [], items: [] },
+    movie: { categories: [], items: [] },
+    series: { categories: [], items: [] },
+    episodes: {},
+  });
+  try {
+    empty.db.exec('DELETE FROM providers');
+    expect((await empty.app.inject('/api/guide')).json()).toEqual({
+      providerId: null, chips: [], prefs: { view: 'grid', filter: 'all' }, range: null, status: null,
+    });
+  } finally {
+    await empty.close();
+  }
+});
+
 describe('guide API', () => {
   const put = (url: string, payload: unknown) => app.inject({ method: 'PUT', url, payload: payload as object });
   const meta = async () => (await app.inject('/api/guide')).json() as GuideMeta;
@@ -144,7 +162,7 @@ describe('guide API', () => {
     let m = await meta();
     expect(m.providerId).toBe(providerId);
     expect(m.chips).toEqual([{ filter: 'all', label: 'All channels' }, { filter: 'favourites', label: 'Favourites' }]);
-    expect(m.prefs).toEqual({ view: 'whatson', filter: 'all' });
+    expect(m.prefs).toEqual({ view: 'grid', filter: 'all' });
     expect(m.range?.toSec).toBe(NOW + 2 * DAY);
     expect(m.range?.fromSec).toBeLessThan(NOW);
     expect(m.status).toMatchObject({ state: 'idle', source: 'xmltv' });
@@ -154,7 +172,7 @@ describe('guide API', () => {
     personal.addFavourite(USER, itemId('2'));
     m = await meta();
     expect(m.chips[2]).toEqual({ filter: `category:${general}`, label: 'UK| General' });
-    expect(m.prefs).toEqual({ view: 'whatson', filter: 'favourites' });
+    expect(m.prefs).toEqual({ view: 'grid', filter: 'favourites' });
   });
 
   test('prefs round-trip and an invalid stored filter falls back', async () => {
