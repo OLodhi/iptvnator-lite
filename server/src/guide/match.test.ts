@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
 import { createGuideStore } from './store.ts';
 import {
-  applyLinks, computeLinks, isSeparatorName, loadMatchItems, normaliseChannelName, planLinks, prepareNames, relinkGuide,
-  relinkGuideInSteps,
+  applyLinks, computeLinks, isSeparatorName, linkCandidates, loadMatchItems, normaliseChannelName, planLinks, prepareNames,
+  relinkGuide, relinkGuideInSteps,
 } from './match.ts';
 import type { MatchItem } from './match.ts';
 
@@ -126,6 +126,122 @@ describe('computeLinks', () => {
   test('separator rows are never linked', () => {
     const links = run([item(1, '##### GENERAL FHD #####')], [ch('g', 'General')], new Map([['r1', 'g']]));
     expect(links.size).toBe(0);
+  });
+});
+
+describe('computeLinks past a channel without listings', () => {
+  // Listed keys have a programme airing now or upcoming; stale ones only programmes that have ended.
+  const guide = (listed: string[], stale: string[] = []) => ({
+    keysWithListings: new Set(listed),
+    keysWithProgrammes: new Set([...listed, ...stale]),
+  });
+
+  test('an id match to a channel with no programmes falls through to a later step that has listings, with its method', () => {
+    const channels = [
+      ch('Alpha'), ch('a2', 'Alpha'),
+      ch('empty2', 'Old'), ch('bravo.uk', 'UK| Bravo'),
+      ch('empty3', 'Old C'), ch('charlie.uk', 'C1'),
+    ];
+    const items = [
+      item(1, 'X', { epgChannelId: 'Alpha' }), // its guide id is also a2's display-name
+      item(2, 'UK| Bravo HD', { epgChannelId: 'empty2', tag: 'UK' }),
+      item(3, 'UK| Charlie HD', { epgChannelId: 'empty3', tag: 'UK' }),
+      item(4, 'UK| Charlie HD ◉', { epgChannelId: 'charlie.uk', tag: 'UK' }),
+    ];
+    const links = run(items, channels, new Map(), guide(['a2', 'bravo.uk', 'charlie.uk']));
+    expect(links.get(1)).toEqual({ key: 'a2', method: 'name' });
+    expect(links.get(2)).toEqual({ key: 'bravo.uk', method: 'normalised' });
+    expect(links.get(3)).toEqual({ key: 'charlie.uk', method: 'sibling' });
+    expect(links.get(4)).toEqual({ key: 'charlie.uk', method: 'id' });
+  });
+
+  test('an id match to a stale stub falls through the same way', () => {
+    const channels = [ch('TNT.Sports.1.HD.uk', 'UK| TNT SPORTS 1 HD'), ch('TNTSports1.uk', 'UK| TNT Sports 1')];
+    const items = [item(1, 'UK| TNT SPORTS 1 HD', { epgChannelId: 'TNT.Sports.1.HD.uk', tag: 'UK' })];
+    const links = run(items, channels, new Map(), guide(['TNTSports1.uk'], ['TNT.Sports.1.HD.uk']));
+    expect(links.get(1)).toEqual({ key: 'TNTSports1.uk', method: 'normalised' });
+  });
+
+  test('an id match with listings stays, whatever later steps would find', () => {
+    const channels = [ch('bbc1.uk', 'BBC1.uk'), ch('bbc.alt', 'BBC One'), ch('BBC1.UK')];
+    const items = [item(1, 'UK| BBC 1', { epgChannelId: 'bbc1.uk', tag: 'UK' })];
+    const links = run(items, channels, new Map(), guide(['bbc1.uk', 'bbc.alt', 'BBC1.UK']));
+    expect(links.get(1)).toEqual({ key: 'bbc1.uk', method: 'id' });
+  });
+
+  test('with no later key that has listings, the first match stays as it was', () => {
+    const channels = [ch('empty', 'Nope'), ch('stale.uk', 'UK| Delta'), ch('also.empty', 'Delta'), ch('n', 'Echo')];
+    const items = [
+      item(1, 'UK| Delta HD', { epgChannelId: 'empty', tag: 'UK' }),
+      item(2, 'Echo HD'),
+      item(3, 'UK| Delta FHD', { tag: 'UK' }),
+    ];
+    const withGuide = run(items, channels, new Map(), guide([], ['stale.uk']));
+    expect(withGuide.get(1)).toEqual({ key: 'empty', method: 'id' });
+    expect(withGuide.get(2)).toEqual({ key: 'n', method: 'normalised' });
+    expect(withGuide.get(3)).toEqual({ key: 'stale.uk', method: 'normalised' });
+    expect(withGuide).toEqual(run(items, channels, new Map(), { keysWithProgrammes: new Set(['stale.uk']) }));
+  });
+
+  test('an id match to a case variant with listings is still an id match', () => {
+    const links = run([item(1, 'X', { epgChannelId: 'bbc1.uk' })], [ch('bbc1.uk'), ch('BBC1.UK')], new Map(), guide(['BBC1.UK']));
+    expect(links.get(1)).toEqual({ key: 'BBC1.UK', method: 'id' });
+  });
+
+  test('a manual map to an empty channel is never overridden', () => {
+    const channels = [ch('empty', 'Nothing'), ch('full.uk', 'UK| Foxtrot')];
+    const items = [item(1, 'UK| Foxtrot', { epgChannelId: 'full.uk', tag: 'UK' }), item(2, 'UK| Foxtrot HD', { tag: 'UK' })];
+    const links = run(items, channels, new Map([['r1', 'empty']]), guide(['full.uk']));
+    expect(links.get(1)).toEqual({ key: 'empty', method: 'manual' });
+    expect(links.get(2)).toEqual({ key: 'full.uk', method: 'normalised' });
+  });
+
+  test('ambiguous candidates prefer keys with listings, then keys with programmes', () => {
+    const channels = [ch('a.uk', 'Golf'), ch('b.uk', 'Golf'), ch('c.uk', 'Golf')];
+    const items = [item(1, 'UK| Golf', { tag: 'UK' })];
+    expect(run(items, channels, new Map(), guide(['c.uk'], ['a.uk', 'b.uk'])).get(1)?.key).toBe('c.uk');
+    expect(run(items, channels, new Map(), guide([], ['b.uk'])).get(1)?.key).toBe('b.uk');
+  });
+
+  test('sibling inheritance gives X HD the key of X HD ◉ when its own id key is empty', () => {
+    const channels = [ch('TNT.Sports.1.HD.uk', 'Old TNT'), ch('TNTSports1.uk', 'TNT S1'), ch('other', 'Other')];
+    const items = [
+      item(1, 'UK| TNT SPORTS 1 HD', { epgChannelId: 'TNT.Sports.1.HD.uk', tag: 'UK' }),
+      item(2, 'UK| TNT SPORTS 1 HD ◉', { epgChannelId: 'TNTSports1.uk', tag: 'UK' }),
+      item(3, 'UK| TNT SPORTS 1 FHD', { tag: 'UK' }), // no match of its own: inherits, preferring listings
+      item(4, 'UK| Other HD', { epgChannelId: 'other', tag: 'UK' }), // no sibling has listings: stays
+    ];
+    const links = run(items, channels, new Map(), guide(['TNTSports1.uk']));
+    expect(links.get(1)).toEqual({ key: 'TNTSports1.uk', method: 'sibling' });
+    expect(links.get(2)).toEqual({ key: 'TNTSports1.uk', method: 'id' });
+    expect(links.get(3)).toEqual({ key: 'TNTSports1.uk', method: 'sibling' });
+    expect(links.get(4)).toEqual({ key: 'other', method: 'id' });
+    // Without listings, siblings inherit as before: the smallest key.
+    expect(run(items, channels).get(3)).toEqual({ key: 'TNT.Sports.1.HD.uk', method: 'sibling' });
+  });
+});
+
+describe('linkCandidates', () => {
+  test("lists each item's candidates at every step, shares them among siblings, and only the map for a mapped item", () => {
+    const channels = [
+      ch('Alpha', 'Zed'), ch('ALPHA', 'Yak'), ch('b', 'Alpha'), ch('c', 'alpha'), ch('d', 'UK| Alpha HD'),
+      ch('e', 'Other'), ch('f', 'Elsewhere'),
+    ];
+    const items = [
+      item(1, 'UK| Alpha', { epgChannelId: 'Alpha', tag: 'UK' }),
+      item(2, 'UK| Alpha FHD', { tag: 'UK' }),
+      item(3, 'UK| Alpha HEVC', { tag: 'UK' }),
+      item(4, '##### X #####'),
+      item(5, 'Nothing'),
+      item(6, 'Lone', { epgChannelId: 'f' }),
+    ];
+    const c = linkCandidates({ items, channels, manual: new Map([['r3', 'e']]) });
+    expect([...c.get(1)!].sort()).toEqual(['ALPHA', 'Alpha', 'b', 'c', 'd', 'e']);
+    expect(c.get(2)).toBe(c.get(1));
+    expect([...c.get(3)!]).toEqual(['e']);
+    expect(c.has(4)).toBe(false);
+    expect([...(c.get(5) ?? [])]).toEqual([]);
+    expect([...c.get(6)!]).toEqual(['f']);
   });
 });
 
@@ -259,11 +375,90 @@ describe('relinkGuide', () => {
 
   const generation = () => db.prepare('SELECT generation FROM guide_state WHERE provider_id = ?').pluck().get(P) as number;
   const channels = [{ key: 'BBC1.uk', name: 'x', names: [] }, { key: 'o', name: 'o', names: [] }];
+  // A fixed "now", long ago, so the real clock never decides which channels have listings.
+  const T = 1_000_000;
+  // BBC1.uk (item 1's guide id) has one programme, which ended an hour before T; bbc.live's is on at T.
+  const stubAndLive = () => {
+    const store = createGuideStore(db);
+    const g = store.beginGeneration(P, 1);
+    store.insertChannels(P, g, [{ key: 'BBC1.uk', name: 'x', names: ['x'] }, { key: 'bbc.live', name: 'BBC One', names: ['BBC One'] }]);
+    const row = (channelKey: string, start: number, stop: number) => ({
+      channelKey, start, stop, title: 'T', subtitle: null, description: null, category: null,
+    });
+    store.insertProgrammes(P, g, [row('BBC1.uk', T - 7200, T - 3600), row('bbc.live', T - 600, T + 3000)]);
+    store.commitGeneration(P, g, { fetchedAt: 1, source: 'xmltv' });
+  };
+  const toLive = [{ id: 1, key: 'bbc.live', method: 'normalised' }, { id: 2, key: 'bbc.live', method: 'normalised' }];
+
+  test('an id match whose only programme has stopped falls through to a key with listings at that time', () => {
+    stubAndLive();
+    relinkGuide(db, P, T);
+    expect(links()).toEqual(toLive);
+    // Until it stops, the stub's programme is on: the id match stands.
+    relinkGuide(db, P, T - 3601);
+    expect(links()[0]).toEqual({ id: 1, key: 'BBC1.uk', method: 'id' });
+    relinkGuide(db, P, T - 3600);
+    expect(links()[0]).toEqual({ id: 1, key: 'bbc.live', method: 'normalised' });
+  });
+
+  test("listings are found from each channel's own programmes, never by reading the whole guide's", () => {
+    // 50 channels of 200 programmes from T, and 2,000 channels with none: read through the guide's stop index, each
+    // empty channel costs a pass over all 10,000 programmes (seconds in all), against a probe of its own.
+    const store = createGuideStore(db);
+    const g = store.beginGeneration(P, 1);
+    const full = Array.from({ length: 50 }, (_, c) => `full${c}`);
+    const empty = Array.from({ length: 2000 }, (_, c) => `empty${c}`);
+    store.insertChannels(P, g, [...full, ...empty].map((key) => ({ key, name: key, names: [key] })));
+    store.insertProgrammes(P, g, full.flatMap((channelKey) => Array.from({ length: 200 }, (_, i) => ({
+      channelKey, start: T + i * 60, stop: T + i * 60 + 60, title: 'T', subtitle: null, description: null, category: null,
+    }))));
+    store.commitGeneration(P, g, { fetchedAt: 1, source: 'xmltv' });
+    db.prepare("UPDATE items SET epg_channel_id = 'full0' WHERE id = 1").run();
+    const t0 = performance.now();
+    relinkGuide(db, P, T);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(links()[0]).toEqual({ id: 1, key: 'full0', method: 'id' });
+  });
+
+  test('given no time, the relinks read the clock', async () => {
+    stubAndLive();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(T * 1000);
+      relinkGuide(db, P);
+      expect(links()).toEqual(toLive);
+      db.prepare('DELETE FROM guide_links').run();
+      await relinkGuideInSteps(db, P);
+      expect(links()).toEqual(toLive);
+      vi.setSystemTime((T - 3601) * 1000);
+      relinkGuide(db, P);
+      expect(links()[0]).toEqual({ id: 1, key: 'BBC1.uk', method: 'id' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a plan that must match again judges listings at its own time', async () => {
+    stubAndLive();
+    const plan = await planLinks(db, P, generation(), 'xmltv', new Map(), T);
+    expect(plan.links.get(1)).toEqual({ key: 'bbc.live', method: 'normalised' });
+    db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'b', 'BBC1.uk')").run();
+    applyLinks(db, P, plan, new Map());
+    expect(links()).toEqual([{ id: 1, key: 'bbc.live', method: 'normalised' }, { id: 2, key: 'BBC1.uk', method: 'manual' }]);
+  });
+
+  test('relinkGuideInSteps judges a generation committed while it matched at its own time', async () => {
+    commit('xmltv', channels, 'BBC1.uk');
+    const pending = relinkGuideInSteps(db, P, T);
+    stubAndLive();
+    await pending;
+    expect(links()).toEqual(toLive);
+  });
 
   test('a plan matches as relinkGuide does, and is written as planned when nothing was written since', async () => {
     commit('xmltv', channels, 'BBC1.uk');
     const relinked = relinkGuide(db, P);
-    const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+    const plan = await planLinks(db, P, generation(), 'xmltv', new Map(), T);
     expect([...plan.links]).toEqual([[1, { key: 'BBC1.uk', method: 'id' }], [2, { key: 'BBC1.uk', method: 'sibling' }]]);
     // Not matched again: a planned link that matching would never make is written as it is.
     plan.links.set(2, { key: 'o', method: 'manual' });
@@ -273,7 +468,7 @@ describe('relinkGuide', () => {
 
   test('a write since the plan read its inputs makes it match again', async () => {
     commit('xmltv', channels, 'BBC1.uk');
-    const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+    const plan = await planLinks(db, P, generation(), 'xmltv', new Map(), T);
     expect(plan.links.get(1)).toEqual({ key: 'BBC1.uk', method: 'id' });
     db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'o')").run();
     applyLinks(db, P, plan, new Map());
@@ -310,7 +505,7 @@ describe('relinkGuide', () => {
     const other = openDb(file);
     try {
       commit('xmltv', channels, 'BBC1.uk');
-      const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+      const plan = await planLinks(db, P, generation(), 'xmltv', new Map(), T);
       other.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'o')").run();
       applyLinks(db, P, plan, new Map());
       expect(links()[0]).toEqual({ id: 1, key: 'o', method: 'manual' });

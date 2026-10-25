@@ -109,7 +109,7 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
   // matching runs before it, so it only writes.
   let linked: number;
   try {
-    const plan = await planLinks(db, providerId, generation, source, names);
+    const plan = await planLinks(db, providerId, generation, source, names, nowSec);
     ({ linked } = db.transaction(() => {
       // The links first: checking that the plan is fresh must not see the commit's own write.
       const result = applyLinks(db, providerId, plan, names);

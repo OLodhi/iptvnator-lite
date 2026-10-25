@@ -103,35 +103,37 @@ export async function prepareNames(items: MatchItem[], channels: { names: string
   }
 }
 
-/** `manual` is keyed by item remote id; the result is keyed by item id. `names` serves and keeps normalised names. */
-export function computeLinks(input: {
-  items: MatchItem[];
-  channels: { key: string; names: string[] }[];
-  manual: Map<string, string>;
-  keysWithProgrammes?: Set<string>;
-  names?: NameCache;
-}): Map<number, GuideLink> {
-  const { items, channels, manual } = input;
-  const norm = normaliserFor(input.names);
-  const withProgrammes = input.keysWithProgrammes ?? new Set<string>();
-  const keys = new Set(channels.map((c) => c.key));
-  const sortedKeys = [...keys].sort();
+type Channels = { key: string; names: string[] }[];
 
-  const byKey = new Map<string, string>();
-  const byKeyLower = new Map<string, string>();
-  for (const k of sortedKeys) {
-    byKey.set(k, k);
-    if (!byKeyLower.has(k.toLowerCase())) byKeyLower.set(k.toLowerCase(), k);
+/** What the ladder looks a guide's channels up by. */
+type ChannelIndex = {
+  keys: Set<string>;
+  /** Keys by lower case, each list sorted. */
+  byKeyLower: Map<string, string[]>;
+  byName: Map<string, Set<string>>;
+  byNameLower: Map<string, Set<string>>;
+  byNorm: Map<string, Set<string>>;
+};
+
+const add = (m: Map<string, Set<string>>, k: string, key: string) => {
+  if (k === '') return;
+  let set = m.get(k);
+  if (!set) m.set(k, (set = new Set()));
+  set.add(key);
+};
+
+function indexChannels(channels: Channels, norm: Normalise): ChannelIndex {
+  const keys = new Set(channels.map((c) => c.key));
+  const byKeyLower = new Map<string, string[]>();
+  for (const k of [...keys].sort()) {
+    const lower = k.toLowerCase();
+    const list = byKeyLower.get(lower);
+    if (list) list.push(k);
+    else byKeyLower.set(lower, [k]);
   }
   const byName = new Map<string, Set<string>>();
   const byNameLower = new Map<string, Set<string>>();
   const byNorm = new Map<string, Set<string>>();
-  const add = (m: Map<string, Set<string>>, k: string, key: string) => {
-    if (k === '') return;
-    let set = m.get(k);
-    if (!set) m.set(k, (set = new Set()));
-    set.add(key);
-  };
   for (const c of channels) {
     for (const n of c.names) {
       add(byName, n, c.key);
@@ -139,13 +141,58 @@ export function computeLinks(input: {
       for (const form of nameForms(n, norm)) add(byNorm, form, c.key);
     }
   }
+  return { keys, byKeyLower, byName, byNameLower, byNorm };
+}
 
-  // Several candidates: a key with programmes, then the `.<tag>` suffix, then the smallest key.
+/**
+ * An item's candidates at the ladder's id step (the exact key first, then the others equal ignoring case, smallest
+ * first), its display-name step (exact, then ignoring case) and its normalised step. Siblings come after these.
+ */
+type Candidates = {
+  ids: string[];
+  names: Set<string> | undefined;
+  namesLower: Set<string> | undefined;
+  normalised: Set<string>;
+};
+
+function candidatesOf(item: MatchItem, norms: Set<string>, index: ChannelIndex): Candidates {
+  const key = item.epgChannelId ?? item.name;
+  const lower = key.toLowerCase();
+  const variants = index.byKeyLower.get(lower) ?? [];
+  const ids = index.keys.has(key) ? [key, ...variants.filter((k) => k !== key)] : variants;
+  const normalised = new Set<string>();
+  for (const n of norms) for (const k of index.byNorm.get(n) ?? []) normalised.add(k);
+  return { ids, names: index.byName.get(key), namesLower: index.byNameLower.get(lower), normalised };
+}
+
+/**
+ * `manual` is keyed by item remote id; the result is keyed by item id. `names` serves and keeps normalised names.
+ * A channel with listings has a programme on now or upcoming (`keysWithListings`). A match to one without them (empty,
+ * or a stale stub) holds only until a later step finds one with them, which then links with that step's method. A
+ * manual map always holds.
+ */
+export function computeLinks(input: {
+  items: MatchItem[];
+  channels: Channels;
+  manual: Map<string, string>;
+  keysWithProgrammes?: Set<string>;
+  keysWithListings?: Set<string>;
+  names?: NameCache;
+}): Map<number, GuideLink> {
+  const { items, manual } = input;
+  const norm = normaliserFor(input.names);
+  const withProgrammes = input.keysWithProgrammes ?? new Set<string>();
+  const listed = input.keysWithListings ?? new Set<string>();
+  const index = indexChannels(input.channels, norm);
+
+  // Several candidates: a key with listings, then one with programmes, then the `.<tag>` suffix, then the smallest key.
   const pick = (candidates: Iterable<string>, tag: string | null): string | null => {
     let list = [...candidates];
     if (list.length === 0) return null;
-    const live = list.filter((k) => withProgrammes.has(k));
-    if (live.length > 0) list = live;
+    for (const preferred of [listed, withProgrammes]) {
+      const kept = list.filter((k) => preferred.has(k));
+      if (kept.length > 0) list = kept;
+    }
     if (tag) {
       const suffix = `.${tag.toLowerCase()}`;
       const tagged = list.filter((k) => k.toLowerCase().endsWith(suffix));
@@ -158,29 +205,32 @@ export function computeLinks(input: {
   const normOf = new Map<number, string>();
   for (const item of items) {
     if (isSeparatorName(item.name)) continue;
-    const key = item.epgChannelId ?? item.name;
     const { own, all: norms } = itemForms(item, norm);
     if (own) normOf.set(item.id, own);
 
     const manualKey = manual.get(item.remoteId);
-    if (manualKey !== undefined && keys.has(manualKey)) {
+    if (manualKey !== undefined && index.keys.has(manualKey)) {
       links.set(item.id, { key: manualKey, method: 'manual' });
       continue;
     }
-    const idHit = byKey.get(key) ?? byKeyLower.get(key.toLowerCase());
-    if (idHit !== undefined) {
-      links.set(item.id, { key: idHit, method: 'id' });
-      continue;
-    }
-    const nameHit = pick(byName.get(key) ?? byNameLower.get(key.toLowerCase()) ?? [], item.tag);
-    if (nameHit !== null) {
-      links.set(item.id, { key: nameHit, method: 'name' });
-      continue;
-    }
-    const candidates = new Set<string>();
-    for (const n of norms) for (const k of byNorm.get(n) ?? []) candidates.add(k);
-    const normHit = pick(candidates, item.tag);
-    if (normHit !== null) links.set(item.id, { key: normHit, method: 'normalised' });
+    // Down the ladder to the first key with listings; failing that, the first key found.
+    let first: GuideLink | undefined;
+    const settles = (key: string | null | undefined, method: LinkMethod): boolean => {
+      if (key == null) return false;
+      if (listed.has(key)) {
+        links.set(item.id, { key, method });
+        return true;
+      }
+      first ??= { key, method };
+      return false;
+    };
+    const c = candidatesOf(item, norms, index);
+    const settled =
+      settles(c.ids.find((k) => listed.has(k)) ?? c.ids[0], 'id') ||
+      settles(pick(c.names ?? [], item.tag), 'name') ||
+      settles(pick(c.namesLower ?? [], item.tag), 'name') ||
+      settles(pick(c.normalised, item.tag), 'normalised');
+    if (!settled && first) links.set(item.id, first);
   }
 
   const linkedByNorm = new Map<string, Set<string>>();
@@ -190,12 +240,50 @@ export function computeLinks(input: {
     if (link && norm) add(linkedByNorm, norm, link.key);
   }
   for (const item of items) {
-    if (links.has(item.id) || isSeparatorName(item.name)) continue;
-    const norm = normOf.get(item.id);
-    const hit = norm ? pick(linkedByNorm.get(norm) ?? [], item.tag) : null;
+    const norm = normOf.get(item.id); // never set for a separator
+    if (!norm) continue;
+    const link = links.get(item.id);
+    if (link && (link.method === 'manual' || listed.has(link.key))) continue;
+    // Over a match of its own, only a sibling's key with listings.
+    const siblings = [...(linkedByNorm.get(norm) ?? [])].filter((k) => !link || listed.has(k));
+    const hit = pick(siblings, item.tag);
     if (hit !== null) links.set(item.id, { key: hit, method: 'sibling' });
   }
   return links;
+}
+
+/**
+ * Every key the ladder could link each item to, whichever channels turn out to have listings: its manual map, or
+ * else its candidates at every step plus its siblings' (sibling inheritance can give it any key they link to), so
+ * siblings share one set. Ingest stores programmes for these, so that matching can then see which have listings.
+ */
+export function linkCandidates(input: {
+  items: MatchItem[];
+  channels: Channels;
+  manual: Map<string, string>;
+  names?: NameCache;
+}): Map<number, Set<string>> {
+  const norm = normaliserFor(input.names);
+  const index = indexChannels(input.channels, norm);
+  const result = new Map<number, Set<string>>();
+  const bySiblings = new Map<string, Set<string>>();
+  for (const item of input.items) {
+    if (isSeparatorName(item.name)) continue;
+    const { own, all: norms } = itemForms(item, norm);
+    let shared = own ? bySiblings.get(own) : undefined;
+    if (own && !shared) bySiblings.set(own, (shared = new Set()));
+    const manualKey = input.manual.get(item.remoteId);
+    if (manualKey !== undefined && index.keys.has(manualKey)) {
+      shared?.add(manualKey);
+      result.set(item.id, new Set([manualKey]));
+      continue;
+    }
+    const keys = shared ?? new Set<string>();
+    const c = candidatesOf(item, norms, index);
+    for (const step of [c.ids, c.names ?? [], c.namesLower ?? [], c.normalised]) for (const k of step) keys.add(k);
+    result.set(item.id, keys);
+  }
+  return result;
 }
 
 /** Live items with the tag of their first category (by category position). */
@@ -230,13 +318,17 @@ type RelinkResult = { linked: number; byMethod: Record<LinkMethod, number> };
 type LinkInputs = {
   source: GuideSource;
   items: MatchItem[];
-  channels: { key: string; names: string[] }[];
+  channels: Channels;
   manual: Map<string, string>;
   keysWithProgrammes: Set<string>;
+  keysWithListings: Set<string>;
 };
 
-/** What matching reads for `generation`, as if it were the current guide with this source. */
-function readLinkInputs(db: Db, providerId: number, generation: number, source: GuideSource): LinkInputs {
+/**
+ * What matching reads for `generation`, as if it were the current guide with this source. A channel has listings
+ * when a programme of it stops after `nowSec`.
+ */
+function readLinkInputs(db: Db, providerId: number, generation: number, source: GuideSource, nowSec: number): LinkInputs {
   const channels = (
     db.prepare('SELECT key, names FROM guide_channels WHERE provider_id = ? AND generation = ?').all(providerId, generation) as {
       key: string;
@@ -244,7 +336,9 @@ function readLinkInputs(db: Db, providerId: number, generation: number, source: 
     }[]
   ).map((r) => ({ key: r.key, names: JSON.parse(r.names) as string[] }));
   const items = loadMatchItems(db, providerId);
-  if (source === 'provider') return { source, items, channels, manual: new Map(), keysWithProgrammes: new Set() };
+  if (source === 'provider') {
+    return { source, items, channels, manual: new Map(), keysWithProgrammes: new Set(), keysWithListings: new Set() };
+  }
   // Only declared channels can be picked, so only they are checked: a probe each rather than a scan of the guide.
   const keysWithProgrammes = new Set(
     db
@@ -255,12 +349,28 @@ function readLinkInputs(db: Db, providerId: number, generation: number, source: 
       .pluck()
       .all({ p: providerId, g: generation }) as string[],
   );
-  return { source, items, channels, manual: loadManualMaps(db, providerId), keysWithProgrammes };
+  // A programme that starts later (it stops later too: none is stored with stop <= start) answers for nearly every
+  // channel from the index alone. Only without one are the channel's programmes read for one still on, and then it
+  // has few. INDEXED BY: left to itself the planner reads that through programmes_stop, every programme of the guide
+  // still to stop, once for each channel without listings (minutes for 7,000 of them against 720,000 programmes).
+  const keysWithListings = new Set(
+    db
+      .prepare(
+        `SELECT key FROM guide_channels gc WHERE provider_id = @p AND generation = @g
+            AND (EXISTS (SELECT 1 FROM programmes p INDEXED BY programmes_slot
+                          WHERE p.provider_id = @p AND p.generation = @g AND p.channel_key = gc.key AND p.start > @now)
+              OR EXISTS (SELECT 1 FROM programmes p INDEXED BY programmes_slot
+                          WHERE p.provider_id = @p AND p.generation = @g AND p.channel_key = gc.key AND p.stop > @now))`,
+      )
+      .pluck()
+      .all({ p: providerId, g: generation, now: nowSec }) as string[],
+  );
+  return { source, items, channels, manual: loadManualMaps(db, providerId), keysWithProgrammes, keysWithListings };
 }
 
 function matchLinks(inputs: LinkInputs, names: NameCache | undefined): Map<number, GuideLink> {
-  const { items, channels, manual, keysWithProgrammes } = inputs;
-  if (inputs.source !== 'provider') return computeLinks({ items, channels, manual, keysWithProgrammes, names });
+  const { items, channels, manual, keysWithProgrammes, keysWithListings } = inputs;
+  if (inputs.source !== 'provider') return computeLinks({ items, channels, manual, keysWithProgrammes, keysWithListings, names });
   const keys = new Set(channels.map((c) => c.key));
   const links = new Map<number, GuideLink>();
   for (const item of items) {
@@ -290,10 +400,15 @@ function currentGuide(db: Db, providerId: number): { generation: number; source:
   return { generation: state?.generation ?? 0, source: state?.source ?? null };
 }
 
-/** Re-matches the current guide's channels to live items and replaces the provider's links. */
-export function relinkGuide(db: Db, providerId: number): RelinkResult {
+const clockSec = (): number => Math.floor(Date.now() / 1000);
+
+/**
+ * Re-matches the current guide's channels to live items and replaces the provider's links. Which channels have
+ * listings is judged at `nowSec` (epoch seconds), by default the current time.
+ */
+export function relinkGuide(db: Db, providerId: number, nowSec = clockSec()): RelinkResult {
   const { generation, source } = currentGuide(db, providerId);
-  return writeLinks(db, providerId, matchLinks(readLinkInputs(db, providerId, generation, source), undefined));
+  return writeLinks(db, providerId, matchLinks(readLinkInputs(db, providerId, generation, source, nowSec), undefined));
 }
 
 /**
@@ -301,20 +416,24 @@ export function relinkGuide(db: Db, providerId: number): RelinkResult {
  * transaction that writes the links (applyLinks). If the guide moved to another generation meanwhile, that one is
  * matched in the transaction instead.
  */
-export async function relinkGuideInSteps(db: Db, providerId: number): Promise<RelinkResult> {
+export async function relinkGuideInSteps(db: Db, providerId: number, nowSec = clockSec()): Promise<RelinkResult> {
   const names: NameCache = new Map();
   const { generation, source } = currentGuide(db, providerId);
-  const plan = await planLinks(db, providerId, generation, source, names);
+  const plan = await planLinks(db, providerId, generation, source, names, nowSec);
   return db.transaction(() => {
-    const now = currentGuide(db, providerId);
-    if (now.generation === plan.generation && now.source === plan.source) return applyLinks(db, providerId, plan, names);
+    const current = currentGuide(db, providerId);
+    if (current.generation === plan.generation && current.source === plan.source) return applyLinks(db, providerId, plan, names);
     // A commit is a write too, but applyLinks would match the plan's own generation again.
-    return writeLinks(db, providerId, matchLinks(readLinkInputs(db, providerId, now.generation, now.source), names));
+    const inputs = readLinkInputs(db, providerId, current.generation, current.source, nowSec);
+    return writeLinks(db, providerId, matchLinks(inputs, names));
   })();
 }
 
-/** Links matched ahead of writing them, with the database's write mark from when their inputs were read. */
-export type LinkPlan = { generation: number; source: GuideSource; mark: string; links: Map<number, GuideLink> };
+/**
+ * Links matched ahead of writing them, with the database's write mark from when their inputs were read and the
+ * time their listings were judged at.
+ */
+export type LinkPlan = { generation: number; source: GuideSource; nowSec: number; mark: string; links: Map<number, GuideLink> };
 
 /** Moves on any write to the database: by this connection (total_changes) or by another one (data_version). */
 const writeMark = (db: Db): string =>
@@ -323,7 +442,7 @@ const writeMark = (db: Db): string =>
 /**
  * Matches for a generation ahead of writing its links. Reading, normalising names (prepareNames, in slices) and
  * matching each take their own turns of the event loop: together, for 50,000 live items, they would block it for
- * 300 ms or more.
+ * 300 ms or more. Listings are judged at `nowSec`.
  */
 export async function planLinks(
   db: Db,
@@ -331,15 +450,16 @@ export async function planLinks(
   generation: number,
   source: GuideSource,
   names: NameCache,
+  nowSec: number,
 ): Promise<LinkPlan> {
   await yieldToEventLoop();
   const mark = writeMark(db);
-  const inputs = readLinkInputs(db, providerId, generation, source);
+  const inputs = readLinkInputs(db, providerId, generation, source, nowSec);
   await yieldToEventLoop();
   if (source !== 'provider') await prepareNames(inputs.items, inputs.channels, names);
   const links = matchLinks(inputs, names);
   await yieldToEventLoop();
-  return { generation, source, mark, links };
+  return { generation, source, nowSec, mark, links };
 }
 
 /**
@@ -349,6 +469,6 @@ export async function planLinks(
  */
 export function applyLinks(db: Db, providerId: number, plan: LinkPlan, names: NameCache): RelinkResult {
   const fresh = writeMark(db) === plan.mark;
-  const links = fresh ? plan.links : matchLinks(readLinkInputs(db, providerId, plan.generation, plan.source), names);
+  const links = fresh ? plan.links : matchLinks(readLinkInputs(db, providerId, plan.generation, plan.source, plan.nowSec), names);
   return writeLinks(db, providerId, links);
 }
