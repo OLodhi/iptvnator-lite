@@ -129,8 +129,12 @@
     onError: (err) => {
       let message = 'Something went wrong. Please try again.';
       // The server says why a catch-up window was refused: no catch-up on this channel, too old, and so on.
-      if (err instanceof ApiClientError) message = err.code === 'VALIDATION' && params.catchup ? err.message : messageFor(err);
-      view = { kind: 'failed', message };
+      if (err instanceof ApiClientError) {
+        message = err.code === 'VALIDATION' && params.catchup ? err.message : messageFor(err, { kind: kind ?? undefined });
+      }
+      // Trying again here can't free the stream another device is using.
+      const retry = !(err instanceof ApiClientError && err.code === 'PROVIDER_CONNECTION_LIMIT');
+      view = { kind: 'failed', message, retry };
     },
   });
 
@@ -285,7 +289,10 @@
     void onNow.load(p.itemId).then((it) => play(it?.kind === 'live' ? 'live' : 'movie'));
   }
 
-  /** Tap to restart: a movie, episode or catch-up programme carries on from where it was. */
+  /**
+   * Tap to restart and Try again: a movie, episode or catch-up programme carries on from where it was, or from where a
+   * start that failed was headed.
+   */
   function restart() {
     start(playback.isVod() && video ? playback.absoluteSec(video) : 0);
   }

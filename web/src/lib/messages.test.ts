@@ -13,6 +13,19 @@ test('messageFor gives plain-English copy per code', () => {
   expect(messageFor(err('SOMETHING_ELSE'))).toBe('Something went wrong. Please try again.');
 });
 
+test('a stream that will not start is a channel on live, and a video on a movie, an episode or catch-up', () => {
+  for (const code of ['STREAM_START_TIMEOUT', 'UPSTREAM_ERROR']) {
+    expect(messageFor(err(code), { kind: 'live' })).toBe("This channel isn't responding right now.");
+    for (const kind of ['movie', 'episode', 'catchup'] as const) {
+      expect(messageFor(err(code), { kind })).toBe("This video isn't responding right now.");
+    }
+  }
+  // Other copy is the same whatever is playing.
+  expect(messageFor(err('PROVIDER_CONNECTION_LIMIT', { limit: 1 }), { kind: 'movie' })).toBe(
+    'Your provider allows 1 stream at a time. Something is already playing on another device.',
+  );
+});
+
 test('messageFor explains import failures', () => {
   expect(messageFor(err('NOT_IPTVNATOR'))).toBe("That file isn't an IPTVnator database.");
   expect(messageFor(err('NO_MATCHING_PLAYLIST'))).toBe("That IPTVnator file doesn't contain this provider.");

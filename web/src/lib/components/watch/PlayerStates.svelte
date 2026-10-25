@@ -4,7 +4,7 @@
     | { kind: 'starting' }
     | { kind: 'resume'; atSec: number }
     /** The server refused or failed the start: the one-stream limit, a catch-up window, a timeout. */
-    | { kind: 'failed'; message: string }
+    | { kind: 'failed'; message: string; retry: boolean }
     /** The <video> itself failed. */
     | { kind: 'error' }
     | { kind: 'stopped' }
@@ -53,7 +53,10 @@
       <button type="button" class="btn ghost" onclick={onStartOver}>Start over</button>
     </div>
   {:else if view.kind === 'failed'}
-    <p class="card" role="alert">{view.message}</p>
+    <div class="card">
+      <p role="alert">{view.message}</p>
+      {#if view.retry}<button type="button" class="btn" onclick={onRestart}>Try again</button>{/if}
+    </div>
   {:else if view.kind === 'error'}
     <div class="card">
       <p role="alert">This video can't be played right now.</p>

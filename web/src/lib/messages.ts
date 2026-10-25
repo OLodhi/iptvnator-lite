@@ -1,6 +1,9 @@
 import type { ApiClientError } from './api.ts';
 
-export function messageFor(err: Pick<ApiClientError, 'code' | 'details'>): string {
+/** What the message is about, when the copy depends on it: what was playing. A channel when left out. */
+export type MessageContext = { kind?: 'live' | 'catchup' | 'movie' | 'episode' };
+
+export function messageFor(err: Pick<ApiClientError, 'code' | 'details'>, context: MessageContext = {}): string {
   switch (err.code) {
     case 'PROVIDER_AUTH_FAILED':
       return "Your provider didn't accept that username and password.";
@@ -15,7 +18,9 @@ export function messageFor(err: Pick<ApiClientError, 'code' | 'details'>): strin
     }
     case 'STREAM_START_TIMEOUT':
     case 'UPSTREAM_ERROR':
-      return "This channel isn't responding right now.";
+      return context.kind === undefined || context.kind === 'live'
+        ? "This channel isn't responding right now."
+        : "This video isn't responding right now.";
     case 'NOT_IPTVNATOR':
       return "That file isn't an IPTVnator database.";
     case 'NO_MATCHING_PLAYLIST':

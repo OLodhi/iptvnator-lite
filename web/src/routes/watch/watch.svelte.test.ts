@@ -540,7 +540,7 @@ async function failedMovie() {
     return movieItem();
   });
   app = mount(Watch, { target: document.body });
-  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel isn't responding right now."));
+  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This video isn't responding right now."));
 }
 
 test('a double-tap on a side third during failed sends no /api/play', async () => {
@@ -554,8 +554,51 @@ test('a double-tap on a side third during failed sends no /api/play', async () =
   await Promise.resolve();
   expect(playCalls()).toHaveLength(1);
   expect(mediaPlay()).not.toHaveBeenCalled();
-  expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel isn't responding right now.");
+  expect(document.querySelector('[role=alert]')?.textContent).toBe("This video isn't responding right now.");
   expect(document.querySelector('.controls')!.classList.contains('covered')).toBe(true);
+});
+
+test('a failed start offers Try again, which starts again from the same place', async () => {
+  await failedMovie();
+  serve(movieRes, movieItem());
+  buttonWith('Try again')!.click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(startAtOf(playCalls()[1]!)).toBe(600);
+  expect(states()?.textContent).toContain('Starting');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  expect(states()).toBeNull();
+});
+
+test('a failed seek restart tries again at the place sought to', async () => {
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(movieRes, movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  api.mockImplementation(async (path: string) => {
+    if (path === '/api/play') throw new ApiClientError(502, 'UPSTREAM_ERROR', 'upstream');
+    return movieItem();
+  });
+  (document.querySelector('.controls [aria-label="Forward 10 seconds"]') as HTMLElement).click();
+  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This video isn't responding right now."));
+  buttonWith('Try again')!.click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(3));
+  expect(playCalls().map(startAtOf)).toEqual([600, 610, 610]);
+});
+
+test('a failed live start says the channel is not responding, with Try again', async () => {
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  api.mockImplementation(async (path: string) => {
+    if (path === '/api/play') throw new ApiClientError(504, 'STREAM_START_TIMEOUT', 'timeout');
+    return liveItem();
+  });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel isn't responding right now."));
+  serve(liveRes, liveItem());
+  buttonWith('Try again')!.click();
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(startAtOf(playCalls()[1]!)).toBe(0);
 });
 
 test('playing after a failed start clears the failed card', async () => {
