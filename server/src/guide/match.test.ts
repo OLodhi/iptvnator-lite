@@ -1,8 +1,13 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { openDb } from '../db/db.ts';
 import type { Db } from '../db/db.ts';
 import { createGuideStore } from './store.ts';
-import { computeLinks, isSeparatorName, normaliseChannelName, relinkGuide } from './match.ts';
+import {
+  applyLinks, computeLinks, isSeparatorName, loadMatchItems, normaliseChannelName, planLinks, prepareNames, relinkGuide,
+} from './match.ts';
 import type { MatchItem } from './match.ts';
 
 const item = (id: number, name: string, extra: Partial<MatchItem> = {}): MatchItem => ({
@@ -120,6 +125,69 @@ describe('computeLinks', () => {
   });
 });
 
+describe('prepareNames', () => {
+  const items = [
+    item(1, 'UK| BBC 1 HD', { tag: 'UK', epgChannelId: 'BBC1.uk' }),
+    item(2, 'UK| BBC 1 HEVC', { tag: 'UK' }),
+    item(3, 'Sky: Sports'),
+    item(4, 'US| Fox News', { tag: 'UK' }),
+    item(5, '##### GENERAL #####'),
+  ];
+  const channels = [ch('BBC1.uk', 'UK| BBC One'), ch('sky', 'Sky Sports'), ch('fox', 'Fox News'), ch('g', 'General')];
+
+  test('normalises every name matching looks up, which then links as it would without them', async () => {
+    const names = new Map<string, string>();
+    await prepareNames(items, channels, names);
+    expect(names.get('UK| BBC One')).toBe(normaliseChannelName('UK| BBC One'));
+    const prepared = new Map(names);
+    const links = run(items, channels, new Map(), { names });
+    expect(names).toEqual(prepared); // nothing left to normalise
+    expect(links).toEqual(run(items, channels));
+  });
+
+  test('yields to the event loop between slices', async () => {
+    const many = Array.from({ length: 5000 }, (_, i) => item(i + 1, `Channel ${i + 1}`));
+    const names = new Map<string, string>();
+    let sizeAtTick = -1;
+    setImmediate(() => {
+      sizeAtTick = names.size;
+    });
+    await prepareNames(many, [], names);
+    expect(sizeAtTick).toBeGreaterThan(0);
+    expect(sizeAtTick).toBeLessThan(names.size);
+  });
+});
+
+describe('loadMatchItems', () => {
+  test('lists each live item once, by id, with the tag of its first category by position', () => {
+    const db = openDb(':memory:');
+    db.prepare("INSERT INTO providers (id, kind, name, config, created_at) VALUES (1, 'xtream', 'P', '{}', 0)").run();
+    const category = db.prepare(
+      "INSERT INTO categories (id, provider_id, kind, remote_id, name, position, seen_at, tag) VALUES (?, 1, 'live', ?, ?, ?, 0, ?)",
+    );
+    category.run(1, 'c1', 'UK| News', 2, 'UK');
+    category.run(2, 'c2', 'US| News', 1, 'US');
+    category.run(3, 'c3', 'AR| News', 1, 'AR');
+    const seed = (id: number, kind: string, epg: string | null, cats: number[]) => {
+      db.prepare('INSERT INTO items (id, provider_id, kind, remote_id, name, epg_channel_id, position, seen_at) VALUES (?, 1, ?, ?, ?, ?, ?, 0)')
+        .run(id, kind, `r${id}`, `N${id}`, epg, id);
+      for (const c of cats) db.prepare('INSERT INTO item_categories (category_id, item_id, position) VALUES (?, ?, 0)').run(c, id);
+    };
+    seed(4, 'live', 'e4', [1, 2]); // position 1 beats position 2
+    seed(2, 'live', null, [1]);
+    seed(3, 'live', null, []);
+    seed(1, 'live', null, [3, 2]); // equal positions: the smaller category id
+    seed(5, 'movie', null, [1]);
+    expect(loadMatchItems(db, 1)).toEqual([
+      { id: 1, remoteId: 'r1', name: 'N1', epgChannelId: null, tag: 'US' },
+      { id: 2, remoteId: 'r2', name: 'N2', epgChannelId: null, tag: 'UK' },
+      { id: 3, remoteId: 'r3', name: 'N3', epgChannelId: null, tag: null },
+      { id: 4, remoteId: 'r4', name: 'N4', epgChannelId: 'e4', tag: 'US' },
+    ]);
+    db.close();
+  });
+});
+
 describe('relinkGuide', () => {
   let db: Db;
   const P = 1;
@@ -136,14 +204,16 @@ describe('relinkGuide', () => {
   };
   const links = () => db.prepare('SELECT item_id AS id, channel_key AS key, method FROM guide_links ORDER BY item_id').all();
 
-  beforeEach(() => {
-    db = openDb(':memory:');
+  const open = (file = ':memory:') => {
+    db = openDb(file);
     db.prepare("INSERT INTO providers (id, kind, name, config, created_at) VALUES (1, 'xtream', 'P', '{}', 0)").run();
     db.prepare("INSERT INTO categories (id, provider_id, kind, remote_id, name, position, seen_at, tag) VALUES (1, 1, 'live', 'c1', 'UK| News', 0, 0, 'UK')").run();
     seedItem(1, 'a', 'UK| BBC 1 HD', 'BBC1.uk', 1);
     seedItem(2, 'b', 'UK| BBC 1 HEVC', null, 1);
     seedItem(3, 'c', '##### X #####', null, 1);
-  });
+  };
+
+  beforeEach(() => open());
 
   test('writes links and counts methods, idempotently, and cascades deletes', () => {
     commit('xmltv', [{ key: 'BBC1.uk', name: 'x', names: ['Something else'] }], 'BBC1.uk');
@@ -181,5 +251,47 @@ describe('relinkGuide', () => {
     db.prepare("UPDATE items SET name = 'Nothing' WHERE id = 2").run();
     relinkGuide(db, P);
     expect(links()).toEqual([{ id: 9, key: 'zz', method: 'id' }]);
+  });
+
+  const generation = () => db.prepare('SELECT generation FROM guide_state WHERE provider_id = ?').pluck().get(P) as number;
+  const channels = [{ key: 'BBC1.uk', name: 'x', names: [] }, { key: 'o', name: 'o', names: [] }];
+
+  test('a plan matches as relinkGuide does, and is written as planned when nothing was written since', async () => {
+    commit('xmltv', channels, 'BBC1.uk');
+    const relinked = relinkGuide(db, P);
+    const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+    expect([...plan.links]).toEqual([[1, { key: 'BBC1.uk', method: 'id' }], [2, { key: 'BBC1.uk', method: 'sibling' }]]);
+    // Not matched again: a planned link that matching would never make is written as it is.
+    plan.links.set(2, { key: 'o', method: 'manual' });
+    expect(applyLinks(db, P, plan, new Map())).toEqual({ ...relinked, byMethod: { ...relinked.byMethod, sibling: 0, manual: 1 } });
+    expect(links()).toEqual([{ id: 1, key: 'BBC1.uk', method: 'id' }, { id: 2, key: 'o', method: 'manual' }]);
+  });
+
+  test('a write since the plan read its inputs makes it match again', async () => {
+    commit('xmltv', channels, 'BBC1.uk');
+    const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+    expect(plan.links.get(1)).toEqual({ key: 'BBC1.uk', method: 'id' });
+    db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'o')").run();
+    applyLinks(db, P, plan, new Map());
+    expect(links()[0]).toEqual({ id: 1, key: 'o', method: 'manual' });
+  });
+
+  test("another connection's write makes it match again too", async () => {
+    db.close();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-match-'));
+    const file = path.join(dir, 'guide.sqlite');
+    open(file);
+    const other = openDb(file);
+    try {
+      commit('xmltv', channels, 'BBC1.uk');
+      const plan = await planLinks(db, P, generation(), 'xmltv', new Map());
+      other.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'o')").run();
+      applyLinks(db, P, plan, new Map());
+      expect(links()[0]).toEqual({ id: 1, key: 'o', method: 'manual' });
+    } finally {
+      other.close();
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -113,10 +113,12 @@ export function createGuideQueries(db: Db): GuideQueries {
       ORDER BY p.start, chan.pos, p.id LIMIT @limit`,
   );
   // Catch-up is the channel's archive window: the programme has ended and started within `catchup_days`.
+  // CROSS JOIN keeps the channels outer: given the choice, the planner scans every ended programme by programmes_stop
+  // (100 ms on a 377k-programme guide, against 17).
   const past = db.prepare(
     `WITH ${channels_(true)}
      SELECT ${COLUMNS} FROM chan
-       JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = chan.ck
+       CROSS JOIN programmes p ON p.provider_id = @providerId AND p.generation = @generation AND p.channel_key = chan.ck
                         AND p.start >= @from AND p.start >= @now - chan.days * ${DAY} AND p.stop <= @now
       WHERE ${KEYSET.desc}
       ORDER BY p.start DESC, chan.pos, p.id LIMIT @limit`,

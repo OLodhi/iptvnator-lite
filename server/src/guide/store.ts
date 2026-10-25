@@ -117,21 +117,36 @@ export function createGuideStore(db: Db): GuideStore {
   });
 
   /**
-   * Chunked so a large generation never blocks the event loop; `where` is a fixed fragment, never user input.
+   * Chunked so a large generation never blocks the event loop, and yielding before each chunk so the first never
+   * extends the caller's own synchronous work. `where` and `order` are fixed fragments, never user input. `order` is
+   * the table's key index, so each chunk removes rows that were written together: in the planner's own pick (the stop
+   * index) a chunk touches scattered pages, and on 377k programmes the prune took 31 s instead of 7 s.
    * `proceed` is re-checked before every chunk because the world can change while the loop yields.
    */
-  async function deleteInChunks(table: string, where: string, args: number[], proceed: () => boolean = () => true): Promise<number> {
-    const stmt = db.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} LIMIT ${DELETE_CHUNK})`);
+  async function deleteInChunks(
+    table: string,
+    where: string,
+    order: string,
+    args: number[],
+    proceed: () => boolean = () => true,
+  ): Promise<number> {
+    const stmt = db.prepare(
+      `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} ORDER BY ${order} LIMIT ${DELETE_CHUNK})`,
+    );
     const once = db.transaction(() => stmt.run(...args).changes);
     let total = 0;
-    while (proceed()) {
+    for (;;) {
+      await yieldToEventLoop();
+      if (!proceed()) break;
       const n = once();
       total += n;
       if (n < DELETE_CHUNK) break;
-      await yieldToEventLoop();
     }
     return total;
   }
+
+  const PROGRAMMES_ORDER = 'generation, channel_key, start'; // programmes_slot
+  const CHANNELS_ORDER = 'generation, key'; // the primary key
 
   return {
     state: (providerId) => (selectState.get(providerId) as GuideStateRow | undefined) ?? null,
@@ -153,14 +168,15 @@ export function createGuideStore(db: Db): GuideStore {
     },
     async abandonGeneration(providerId, generation) {
       const proceed = () => generation > currentGeneration(providerId);
-      await deleteInChunks('programmes', 'provider_id = ? AND generation = ?', [providerId, generation], proceed);
-      await deleteInChunks('guide_channels', 'provider_id = ? AND generation = ?', [providerId, generation], proceed);
+      const args = [providerId, generation];
+      await deleteInChunks('programmes', 'provider_id = ? AND generation = ?', PROGRAMMES_ORDER, args, proceed);
+      await deleteInChunks('guide_channels', 'provider_id = ? AND generation = ?', CHANNELS_ORDER, args, proceed);
     },
     async pruneGenerations(providerId) {
       // Strictly older than current: a commit landing mid-prune, or an in-flight newer generation, is never touched.
-      const current = currentGeneration(providerId);
-      let removed = await deleteInChunks('programmes', 'provider_id = ? AND generation < ?', [providerId, current]);
-      removed += await deleteInChunks('guide_channels', 'provider_id = ? AND generation < ?', [providerId, current]);
+      const args = [providerId, currentGeneration(providerId)];
+      let removed = await deleteInChunks('programmes', 'provider_id = ? AND generation < ?', PROGRAMMES_ORDER, args);
+      removed += await deleteInChunks('guide_channels', 'provider_id = ? AND generation < ?', CHANNELS_ORDER, args);
       return removed;
     },
   };

@@ -6,10 +6,11 @@ import type { Listing } from '../providers/xtream/normalise.ts';
 import { silentLog } from '../util/log.ts';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
-import { computeLinks, loadManualMaps, loadMatchItems, relinkGuide } from './match.ts';
-import type { MatchItem } from './match.ts';
+import { applyLinks, computeLinks, loadManualMaps, loadMatchItems, planLinks, prepareNames } from './match.ts';
+import type { MatchItem, NameCache } from './match.ts';
 import type { GuideChannelRow, GuideStore, ProgrammeRow } from './store.ts';
 import { maybeGunzip, parseXmltv } from './xmltv.ts';
+import type { XmltvProgramme } from './xmltv.ts';
 
 export type GuideRefreshResult = {
   source: 'xmltv' | 'provider';
@@ -32,7 +33,8 @@ export const GUIDE_FUTURE_SEC = 8 * 86_400;
 
 const DAY_SEC = 86_400;
 const CHANNEL_BATCH = 500;
-const PROGRAMME_BATCH = 2000;
+/** Rows per write. A yield from I/O resumes before timers and requests, so two batches can run back to back. */
+const PROGRAMME_BATCH = 1000;
 /** The fallback gives up after this many failed channels in a row while none has answered yet. */
 const FALLBACK_BREAKER = 10;
 
@@ -76,8 +78,10 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
   let source: GuideRefreshResult['source'] = 'xmltv';
   let generation = store.beginGeneration(providerId, nowSec);
   let counts: Counts;
+  // Filled while the XMLTV is read, so matching for the links before the commit normalises nothing.
+  const names: NameCache = new Map();
   try {
-    counts = await ingestXmltv(deps, generation, nowSec);
+    counts = await ingestXmltv(deps, generation, nowSec, names);
     if (counts.programmes === 0) throw new GuideError('The XMLTV guide had no programmes for these channels');
   } catch (xmltvError) {
     await store.abandonGeneration(providerId, generation);
@@ -101,15 +105,19 @@ export async function refreshGuide(deps: Deps): Promise<GuideRefreshResult> {
     }
   }
 
-  // One transaction (relink's own nests as a savepoint): readers never see the new guide with the old links.
+  // One transaction (the links' own nests as a savepoint): readers never see the new guide with the old links. The
+  // matching runs before it, so it only writes.
   let linked: number;
   try {
+    const plan = await planLinks(db, providerId, generation, source, names);
     ({ linked } = db.transaction(() => {
+      // The links first: checking that the plan is fresh must not see the commit's own write.
+      const result = applyLinks(db, providerId, plan, names);
       store.commitGeneration(providerId, generation, { fetchedAt: nowSec, source });
-      return relinkGuide(db, providerId);
+      return result;
     })());
   } catch (e) {
-    // Rolled back, so the generation is still above the current one and abandoning it proceeds.
+    // Nothing was committed, so the generation is still above the current one and abandoning it proceeds.
     await store.abandonGeneration(providerId, generation);
     store.recordFailure(providerId, errorText(e), nowSec);
     throw e;
@@ -180,10 +188,11 @@ function wantedKeys(
   channels: { key: string; names: string[] }[],
   manual: Map<string, string>,
   catchup: Map<number, number>,
+  names: NameCache,
 ): Wanted {
   const days = new Map<string, number>();
   const want = (key: string, itemId: number) => days.set(key, Math.max(days.get(key) ?? 1, catchup.get(itemId) ?? 0));
-  for (const [itemId, link] of computeLinks({ items, channels, manual })) want(link.key, itemId);
+  for (const [itemId, link] of computeLinks({ items, channels, manual, names })) want(link.key, itemId);
   for (const item of items) if (item.epgChannelId) want(item.epgChannelId, item.id);
 
   const exact = new Map<string, number>();
@@ -199,8 +208,9 @@ function wantedKeys(
 /**
  * Streams xmltv.php. Every channel is stored; programmes only for wanted channels and inside the window. The wanted
  * keys are fixed at the first programme: XMLTV lists its channels first, so a channel seen later adds nothing.
+ * Matching for them first normalises every name into `names`, in slices that yield to the event loop.
  */
-async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Promise<Counts> {
+async function ingestXmltv(deps: Deps, generation: number, nowSec: number, names: NameCache): Promise<Counts> {
   const { db, providerId, signal } = deps;
   const items = loadMatchItems(db, providerId);
   const manual = loadManualMaps(db, providerId);
@@ -214,6 +224,20 @@ async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Prom
   const declared = new Set<string>();
   const declaredByLower = new Map<string, string>();
   let dropped = 0;
+
+  const take = (p: XmltvProgramme): Promise<void> | undefined => {
+    const lower = p.channel.toLowerCase();
+    const pastSec = wanted.exact.get(p.channel) ?? wanted.lower.get(lower);
+    if (pastSec === undefined || !inWindow(p.start, p.stop, pastSec, nowSec)) {
+      dropped++;
+      return;
+    }
+    const channelKey = declared.has(p.channel) ? p.channel : (declaredByLower.get(lower) ?? p.channel);
+    return writer.programme({
+      channelKey, start: p.start, stop: p.stop, title: p.title,
+      subtitle: p.subtitle, description: p.description, category: p.category,
+    });
+  };
 
   const source = maybeGunzip(await deps.client.xmltv({ signal, idleTimeoutMs: deps.xmltvIdleTimeoutMs }));
   const parsed = await parseXmltv(source, {
@@ -229,20 +253,12 @@ async function ingestXmltv(deps: Deps, generation: number, nowSec: number): Prom
     },
     programme(p) {
       signal?.throwIfAborted();
-      if (seen) {
-        wanted = wantedKeys(items, seen, manual, catchup);
-        seen = null;
-      }
-      const lower = p.channel.toLowerCase();
-      const pastSec = wanted.exact.get(p.channel) ?? wanted.lower.get(lower);
-      if (pastSec === undefined || !inWindow(p.start, p.stop, pastSec, nowSec)) {
-        dropped++;
-        return;
-      }
-      const channelKey = declared.has(p.channel) ? p.channel : (declaredByLower.get(lower) ?? p.channel);
-      return writer.programme({
-        channelKey, start: p.start, stop: p.stop, title: p.title,
-        subtitle: p.subtitle, description: p.description, category: p.category,
+      if (!seen) return take(p);
+      const channels = seen;
+      seen = null;
+      return prepareNames(items, channels, names).then(() => {
+        wanted = wantedKeys(items, channels, manual, catchup, names);
+        return take(p);
       });
     },
   });
