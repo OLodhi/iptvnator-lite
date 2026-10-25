@@ -41,6 +41,11 @@ test('positions and reportPosition', async () => {
   expect(last()).toMatchObject({ url: '/api/me/positions', method: 'PUT', body: JSON.stringify(r) });
 });
 
+test('itemDetails', async () => {
+  await me.itemDetails(5);
+  expect(last()).toMatchObject({ url: '/api/items/5/details', method: 'GET' });
+});
+
 test('search encodes the query and passes the limit', async () => {
   await me.search('a b&c');
   expect(last().url).toBe('/api/search?q=a%20b%26c');

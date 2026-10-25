@@ -3,35 +3,48 @@
   import Hls from 'hls.js';
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
-  import type { PlayResponse } from '@tv/shared';
+  import type { EpisodeDetail, ItemDetails, PlayResponse, SavedPosition, SessionTracks } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { getClientId } from '$lib/clientId';
   import NowList from '$lib/components/guide/NowList.svelte';
   import PlayerControls from '$lib/components/player/PlayerControls.svelte';
+  import TrackSheet from '$lib/components/player/TrackSheet.svelte';
+  import EpisodeRow from '$lib/components/series/EpisodeRow.svelte';
   import PlayerStates, { type PlayerView } from '$lib/components/watch/PlayerStates.svelte';
+  import UpNext from '$lib/components/watch/UpNext.svelte';
   import WatchActions, { type WatchAction } from '$lib/components/watch/WatchActions.svelte';
   import WatchInfo from '$lib/components/watch/WatchInfo.svelte';
   import { sharedClock } from '$lib/guide/time';
-  import { favourite, positions, reportPosition, unfavourite } from '$lib/me';
+  import { favourite, itemDetails, positions, reportPosition, unfavourite } from '$lib/me';
   import { messageFor } from '$lib/messages';
   import { attachStream } from '$lib/player/attach';
+  import { applyNativeDefaults, enableAudio, nativeTracks, showSubtitle } from '$lib/player/nativeTracks';
   import { createOrientation } from '$lib/player/orientation.svelte.ts';
   import { createPlayback, type StartParams } from '$lib/player/playback';
   import { createProgressReporter } from '$lib/player/progress';
   import { createPlayerState, type PlayerState } from '$lib/player/state.svelte.ts';
   import { canAirPlay, canPip, setNowPlaying, showAirPlay, togglePip } from '$lib/player/system';
+  import { rememberSubtitleLanguage, subtitleLanguage } from '$lib/player/trackPrefs';
   import { pickResume } from '$lib/resume';
   import { releaseSession, startHeartbeat } from '$lib/session';
   import { createChannelList } from '$lib/watch/channelList.svelte.ts';
   import { neighbour } from '$lib/watch/channels';
+  import { nextEpisode, seasonOf } from '$lib/watch/episodes';
   import { watchHref } from '$lib/watch/links';
   import { createOnNow } from '$lib/watch/onNow.svelte.ts';
   import { parseWatchParams, type WatchParams } from '$lib/watch/params';
 
   type Kind = StartParams['kind'];
 
-  /** Moving on within the page (another channel, From start, Watch live) replaces its history entry, so Back still leaves it. */
+  /**
+   * Moving on within the page (another channel or episode, From start, Watch live) replaces its history entry, so Back
+   * still leaves it.
+   */
   const REPLACE = { replaceState: true };
+  /** The lock screen's skips, as the controls'. */
+  const SKIP_SEC = 10;
+  /** A subtitle language /api/play takes. */
+  const LANGUAGE = /^[a-z]{2,3}$/;
 
   let video = $state<HTMLVideoElement>();
   let player = $state<PlayerState>();
@@ -41,6 +54,15 @@
   let durationSec = $state<number | null>(null);
   let manualFullscreen = $state(false);
   let moreOpen = $state(false);
+  /** A movie's or episode's tracks on offer and in use: an HLS session's from the server, a direct file's from the element. */
+  let tracks = $state.raw<SessionTracks | null>(null);
+  /** How the latest start streams: an HLS session switches tracks by restarting, a direct file in the element. */
+  let streamMode: PlayResponse['mode'] | null = null;
+  let trackSheetOpen = $state(false);
+  // Kept once the sheet closes: ActionSheet closes it before running the pick.
+  let trackSheetKind = $state<'audio' | 'subtitles'>('subtitles');
+  /** The episode the Up next card counts down to, from the end of this one until it plays or is cancelled. */
+  let upNext = $state.raw<EpisodeDetail | null>(null);
   let begun = 0; // bumped on every begin(), so a late answer for an old URL is ignored
   let inAppHistory = false; // whether this page was reached from another page of the app, which Back can return to
 
@@ -63,6 +85,7 @@
   }
   const kind = $derived(kindNow(params));
   const channel = $derived(kind === 'live' || kind === 'catchup');
+  const vod = $derived(kind === 'movie' || kind === 'episode');
   const itemId = $derived(params.itemId);
   const askedCategory = $derived(params.category);
   const name = $derived(onNow.item?.displayName ?? '');
@@ -75,10 +98,15 @@
     startHeartbeat: (sessionId, clientId, opts) => startHeartbeat(sessionId, clientId, opts),
     attachStream: (v, url, opts) => attachStream(v, url, { Hls, ...opts }),
     clientId: getClientId,
-    onStarted: ({ offsetSec, durationSec: total }) => {
+    onStarted: ({ offsetSec, durationSec: total, mode, tracks: offered, handle }) => {
       durationSec = total;
       const started = playback.current();
       if (!video || !started) return;
+      // A direct file's tracks are read from the element once it is open (onMetadata).
+      streamMode = mode;
+      tracks = offered;
+      // The session's subtitle rendition carries no language for the player to pick it by: show it outright.
+      if (offered && offered.subtitleIndex !== null) handle.showSubtitles(true);
       autoplay(video);
       // Live has nothing to resume; catch-up has a duration but is never progress-tracked.
       if (total === null || started.params.catchup) return;
@@ -137,8 +165,48 @@
       return onNow.item;
     },
   });
-  /** Back says where it goes: a channel's category, or Favourites, once known. */
-  const backLabel = $derived(channel && list.label ? list.label : null);
+  /** Back says where it goes: a channel's category or Favourites once known, an episode's series, or Movies. */
+  const backLabel = $derived(channel ? list.label || null : kind === 'episode' ? name || null : kind === 'movie' ? 'Movies' : null);
+
+  /** A movie's or series' details: its plot and genre, and a series' seasons and episodes. */
+  let loaded = $state.raw<{ itemId: number; details: ItemDetails } | null>(null);
+  $effect(() => {
+    if (!vod) return;
+    const id = itemId;
+    let cancelled = false;
+    itemDetails(id).then(
+      (d) => {
+        if (!cancelled) loaded = { itemId: id, details: d };
+      },
+      () => {}, // without them: the title alone, and no episode list
+    );
+    return () => {
+      cancelled = true;
+    };
+  });
+  const details = $derived(loaded?.itemId === itemId ? loaded.details : null);
+  const seasons = $derived(details?.kind === 'series' ? details.seasons : []);
+  const season = $derived(kind === 'episode' && params.episode ? seasonOf(seasons, params.episode) : null);
+  const episode = $derived(season?.episodes.find((e) => e.remoteId === params.episode) ?? null);
+  const nextEp = $derived(kind === 'episode' && params.episode ? nextEpisode(seasons, params.episode) : null);
+  /** "S1 E2 · Title": the episode on the lock screen and in the sideways title. */
+  const episodeLabel = $derived(season && episode ? `S${season.season} E${episode.episodeNum} · ${episode.title}` : null);
+  const poster = $derived(details?.posterUrl ?? onNow.item?.logoUrl ?? null);
+
+  /** The movie's or series' saved positions, for the episode rows. */
+  let saved = $state.raw<{ itemId: number; list: SavedPosition[] } | null>(null);
+  const savedByEpisode = $derived(new Map((saved?.itemId === itemId ? saved.list : []).map((p) => [p.episodeRemoteId, p])));
+
+  const trackLabels = $derived.by(() => {
+    const t = tracks;
+    if (!t) return { audio: null, subtitles: null };
+    return {
+      audio: t.audio.find((a) => a.index === t.audioIndex)?.label ?? null,
+      subtitles: t.subtitles.find((s) => s.index === t.subtitleIndex)?.label ?? 'Off',
+    };
+  });
+  /** Choosing audio needs more than one track. */
+  const audioChoice = $derived(vod && (tracks?.audio.length ?? 0) > 1);
 
   // The live bar is the programme on the clock. The stream counts its own time; its live edge is now.
   const liveShiftSec = $derived(kind === 'live' && player?.window ? Date.now() / 1000 - player.window.endSec : 0);
@@ -168,6 +236,17 @@
     setNowPlaying({ title: it.displayName, artist, artworkUrl: it.logoUrl ?? undefined }, actions);
   });
 
+  // A movie or episode: its title, the movie or series, and the poster, with skips back and forward.
+  $effect(() => {
+    const it = onNow.item;
+    if (!vod || !it || it.id !== itemId) return;
+    const title = kind === 'episode' ? (episodeLabel ?? it.displayName) : it.displayName;
+    setNowPlaying(
+      { title, artist: it.displayName, artworkUrl: poster ?? undefined },
+      { play: resumePlayback, pause: pausePlayback, seekbackward: () => skip(-SKIP_SEC), seekforward: () => skip(SKIP_SEC) },
+    );
+  });
+
   /** Plays the new stream. A browser that won't start it without a tap gets Tap to play. */
   function autoplay(v: HTMLVideoElement) {
     v.play().catch((err: unknown) => {
@@ -184,7 +263,10 @@
     const play = (k: Kind) => {
       if (mine !== begun || !video) return;
       const catchup = p.catchup ? { startSec: p.catchup.startSec, stopSec: p.catchup.stopSec } : undefined;
-      void playback.start({ kind: k, itemId: p.itemId, episodeRemoteId: p.episode ?? undefined, startAtSec, catchup }, video);
+      const req: StartParams = { kind: k, itemId: p.itemId, episodeRemoteId: p.episode ?? undefined, startAtSec, catchup };
+      // A movie or episode starts with subtitles in the remembered language, when it has a text track in it.
+      if (k === 'movie' || k === 'episode') req.subtitleLanguage = rememberedLanguage();
+      void playback.start(req, video);
     };
     const known = kindNow(p);
     if (known) return play(known);
@@ -203,15 +285,19 @@
     if (!video) return;
     const p = params;
     durationSec = null;
+    tracks = null;
+    trackSheetOpen = false;
+    upNext = null;
     void onNow.load(p.itemId);
     if (p.catchup) return start(0);
     if (p.t) return start(p.t);
     if (kindNow(p) === 'live') return start(0); // nothing to resume
     view = { kind: 'starting' };
     positions(p.itemId).then(
-      (saved) => {
+      (list) => {
         if (mine !== begun) return;
-        const best = pickResume(saved, p.episode);
+        saved = { itemId: p.itemId, list };
+        const best = pickResume(list, p.episode);
         if (best) view = { kind: 'resume', atSec: best.positionSec };
         else start(0);
       },
@@ -250,6 +336,62 @@
 
   function openGuide() {
     void goto(list.guideHref);
+  }
+
+  /** Another episode of the series, as the rows below play it. The playing session is released as the next one starts. */
+  function playEpisode(ep: EpisodeDetail) {
+    void goto(watchHref(itemId, { episode: ep.remoteId }), REPLACE);
+  }
+
+  /** The remembered subtitle language, when it is one /api/play takes. */
+  function rememberedLanguage(): string | null {
+    const lang = subtitleLanguage();
+    return lang !== null && LANGUAGE.test(lang) ? lang : null;
+  }
+
+  function openTracks(k: 'audio' | 'subtitles') {
+    trackSheetKind = k;
+    trackSheetOpen = true;
+  }
+
+  /** A pick from the Audio or Subtitles sheet: index null is subtitles Off. */
+  function pickTrack(k: 'audio' | 'subtitles', index: number | null) {
+    const v = video;
+    const now = tracks;
+    if (!v || !now) return;
+    if (k === 'subtitles') {
+      // The next title starts the same way: with this language's subtitles, or with none after Off (even when this one
+      // found none to show).
+      const language = now.subtitles.find((t) => t.index === index)?.language ?? null;
+      if (index === null) rememberSubtitleLanguage(null);
+      else if (language !== null && LANGUAGE.test(language)) rememberSubtitleLanguage(language);
+    }
+    if ((k === 'audio' ? now.audioIndex : now.subtitleIndex) === index) return; // already playing
+    if (streamMode === 'direct') {
+      // The whole file is here: the element switches its own tracks.
+      if (k === 'subtitles') showSubtitle(v, index);
+      else if (index !== null) enableAudio(v, index);
+      tracks = nativeTracks(v);
+      return;
+    }
+    // An HLS session carries one audio track and one subtitle rendition: another is a new session from here. A second
+    // pick before it starts supersedes it, and playback releases the one it replaces.
+    tracks = k === 'audio' ? { ...now, audioIndex: index } : { ...now, subtitleIndex: index };
+    if (k === 'subtitles') void playback.restartWith(v, { subtitleIndex: index });
+    else if (index !== null) void playback.restartWith(v, { audioIndex: index });
+  }
+
+  /** A direct file is open: English audio, the remembered language's subtitles, and its tracks for the sheets. */
+  function onMetadata() {
+    if (!video || !vod || streamMode !== 'direct') return;
+    applyNativeDefaults(video, rememberedLanguage());
+    tracks = nativeTracks(video);
+  }
+
+  /** The end of an episode: Up next counts down to the next one, if there is one. */
+  function onEnded() {
+    void reporter.flush(); // the episode is left at its end, so its row says watched once Up next moves on
+    if (kind === 'episode' && nextEp) upNext = nextEp;
   }
 
   async function toggleFavourite() {
@@ -342,19 +484,27 @@
     if (view === null || view.kind === 'starting' || view.kind === 'tapToPlay') view = { kind: 'error' };
   }
 
+  // Live: ★ From start, Guide. Catch-up: ★ Watch live, Guide. Episode: ★ (the series), Next episode, Subtitles.
+  // Movie: ★ PiP, AirPlay. The rest goes in More.
   const actions = $derived.by(() => {
-    const list: WatchAction[] = [];
-    if (channel) list.push({ key: 'favourite', icon: '★', label: 'Favourite', pressed: isFavourite, run: toggleFavourite });
+    const row: WatchAction[] = [];
+    const subtitles: WatchAction = { key: 'subtitles', icon: '💬', label: 'Subtitles', run: () => openTracks('subtitles') };
+    if (kind) row.push({ key: 'favourite', icon: '★', label: 'Favourite', pressed: isFavourite, run: toggleFavourite });
     if (kind === 'live' && onNow.onNow && (onNow.item?.catchupDays ?? 0) > 0) {
-      list.push({ key: 'from-start', icon: '↺', label: 'From start', run: fromStart });
+      row.push({ key: 'from-start', icon: '↺', label: 'From start', run: fromStart });
     }
-    if (kind === 'catchup') list.push({ key: 'watch-live', icon: '●', label: 'Watch live', run: watchLive });
-    if (channel) list.push({ key: 'guide', icon: '▦', label: 'Guide', run: openGuide });
-    if (caps.pip) list.push({ key: 'pip', icon: '⧉', label: 'Picture in picture', run: pip });
-    if (caps.airplay) list.push({ key: 'airplay', icon: '⎚', label: 'AirPlay', run: airplay });
+    if (kind === 'catchup') row.push({ key: 'watch-live', icon: '●', label: 'Watch live', run: watchLive });
+    if (channel) row.push({ key: 'guide', icon: '▦', label: 'Guide', run: openGuide });
+    const next = nextEp;
+    if (next) row.push({ key: 'next-episode', icon: '⏭', label: 'Next episode', run: () => playEpisode(next) });
+    if (kind === 'episode') row.push(subtitles);
+    if (caps.pip) row.push({ key: 'pip', icon: '⧉', label: 'Picture in picture', run: pip });
+    if (caps.airplay) row.push({ key: 'airplay', icon: '⎚', label: 'AirPlay', run: airplay });
+    if (kind === 'movie') row.push(subtitles);
+    if (audioChoice) row.push({ key: 'audio', icon: '♪', label: 'Audio', run: () => openTracks('audio') });
     // Sideways already fills the screen.
-    if (!orientation.landscape) list.push({ key: 'fullscreen', icon: '⤢', label: 'Full screen', run: toggleFullscreen });
-    return list;
+    if (!orientation.landscape) row.push({ key: 'fullscreen', icon: '⤢', label: 'Full screen', run: toggleFullscreen });
+    return row;
   });
 
   beforeNavigate((nav) => {
@@ -378,23 +528,37 @@
   </header>
 
   <div class="player">
-    <video bind:this={video} playsinline autoplay onplay={onPlay} onplaying={onPlaying} onerror={onVideoError}></video>
+    <video
+      bind:this={video}
+      playsinline
+      autoplay
+      onplay={onPlay}
+      onplaying={onPlaying}
+      onerror={onVideoError}
+      onloadedmetadata={onMetadata}
+      onended={onEnded}
+    ></video>
     {#if player}
       <!-- Catch-up positions count from the programme's start, so its bar is the VOD one. -->
       <PlayerControls
         state={player}
         mode={kind === 'live' ? 'live' : 'vod'}
         title={name}
-        subtitle={kind === 'catchup' ? params.catchup?.title || undefined : kind === 'live' ? onNow.onNow?.title : undefined}
+        subtitle={kind === 'catchup'
+          ? params.catchup?.title || undefined
+          : kind === 'live'
+            ? onNow.onNow?.title
+            : (episodeLabel ?? undefined)}
         nextLabel={kind === 'live' ? list.nextLabel : undefined}
         {fullscreen}
         programme={kind === 'live' ? onNow.onNow : null}
         {liveShiftSec}
         {caps}
-        tracks={{ audio: false, subtitles: false }}
+        tracks={{ audio: audioChoice, subtitles: vod }}
+        {trackLabels}
         durationSec={barSec}
-        holding={moreOpen}
-        covered={view !== null}
+        holding={moreOpen || trackSheetOpen}
+        covered={view !== null || upNext !== null}
         onTogglePlay={togglePlay}
         onSkip={skip}
         onSeek={seek}
@@ -405,7 +569,7 @@
         onAirPlay={airplay}
         onToggleMute={toggleMute}
         onFullscreen={orientation.landscape ? undefined : toggleFullscreen}
-        onTracks={() => {}}
+        onTracks={openTracks}
         onBack={back}
       />
     {/if}
@@ -413,18 +577,64 @@
       <PlayerStates
         {view}
         {name}
-        artwork={onNow.item?.logoUrl ?? null}
-        poster={kind === 'movie' || kind === 'episode'}
+        artwork={poster}
+        poster={vod}
         onResume={resume}
         onStartOver={() => start(0)}
         onRestart={restart}
         onPlay={tapToPlay}
       />
+    {:else if upNext}
+      <UpNext
+        next={upNext}
+        season={seasonOf(seasons, upNext.remoteId)?.season}
+        onPlay={() => upNext && playEpisode(upNext)}
+        onCancel={() => (upNext = null)}
+      />
     {/if}
   </div>
 
-  <WatchInfo {kind} item={onNow.item} onNow={onNow.onNow} catchup={params.catchup} where={list.where} next={list.nextLabel} />
+  <WatchInfo
+    {kind}
+    item={onNow.item}
+    onNow={onNow.onNow}
+    catchup={params.catchup}
+    where={list.where}
+    next={list.nextLabel}
+    {details}
+    episode={season && episode ? { season: season.season, episode } : null}
+  />
   <WatchActions {actions} bind:moreOpen />
+  <TrackSheet
+    open={trackSheetOpen}
+    kind={trackSheetKind}
+    tracks={(trackSheetKind === 'audio' ? tracks?.audio : tracks?.subtitles) ?? []}
+    selected={(trackSheetKind === 'audio' ? tracks?.audioIndex : tracks?.subtitleIndex) ?? null}
+    onPick={(index) => pickTrack(trackSheetKind, index)}
+    onClose={() => (trackSheetOpen = false)}
+  />
+
+  {#if season}
+    <!-- The season's episodes, the playing one highlighted. A row plays it in place of this history entry, so Back
+         still returns to the series. -->
+    <section class="switch" aria-label="Episodes" data-sveltekit-replacestate>
+      <div class="lhead">
+        <strong>{season.name}</strong>
+        <span>{season.episodes.length} {season.episodes.length === 1 ? 'episode' : 'episodes'}</span>
+      </div>
+      <div class="episodes">
+        {#each season.episodes as ep}
+          <EpisodeRow
+            episode={ep}
+            {itemId}
+            saved={savedByEpisode.get(ep.remoteId) ?? null}
+            current={ep.remoteId === params.episode}
+            href={watchHref(itemId, { episode: ep.remoteId })}
+          />
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if list.filter}
     <!-- Something to switch to: the category's channels, the playing one highlighted. A row plays it live, in place of
@@ -483,6 +693,11 @@
     font-size: 13px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+  .episodes {
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
   }
   /* Sideways: video only. Sheets sit above it, so one left open stays usable. */
   .watch.fullscreen {

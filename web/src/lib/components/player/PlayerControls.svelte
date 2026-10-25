@@ -28,6 +28,8 @@
     covered?: boolean;
     caps: { pip: boolean; airplay: boolean };
     tracks: { audio: boolean; subtitles: boolean };
+    /** What each chip has chosen: "English", "Off". */
+    trackLabels?: { audio: string | null; subtitles: string | null };
     onTogglePlay: () => void;
     onSkip: (delta: number) => void;
     onSeek: (sec: number) => void;
@@ -46,7 +48,7 @@
 
   let {
     state: player, mode, title, subtitle, nextLabel, fullscreen, programme = null, liveShiftSec = 0, durationSec = null, holding = false,
-    covered = false, caps, tracks, onTogglePlay, onSkip, onSeek, onGoLive, onWatchLive, onChannel, onPip, onAirPlay, onToggleMute,
+    covered = false, caps, tracks, trackLabels, onTogglePlay, onSkip, onSeek, onGoLive, onWatchLive, onChannel, onPip, onAirPlay, onToggleMute,
     onFullscreen, onTracks, onBack,
   }: Props = $props();
 
@@ -104,6 +106,8 @@
   const shift = $derived(mode === 'live' ? liveShiftSec : 0);
   const scrubWindow = $derived(player.window && { startSec: player.window.startSec + shift, endSec: player.window.endSec + shift });
   const vodTotal = $derived(durationSec ?? player.durationSec);
+
+  const chip = (name: string, chosen: string | null | undefined) => (chosen ? `${name}: ${chosen}` : name);
 </script>
 
 <div class="controls" class:hidden={!shown} class:covered onpointerdowncapture={() => activity++} role="presentation">
@@ -165,8 +169,10 @@
       <div class="extras">
         <span class="next">{nextLabel ?? ''}</span>
         <span class="chips">
-          {#if tracks.subtitles}<button type="button" class="chip" onclick={() => onTracks('subtitles')}>💬 Subtitles</button>{/if}
-          {#if tracks.audio}<button type="button" class="chip" onclick={() => onTracks('audio')}>♪ Audio</button>{/if}
+          {#if tracks.subtitles}
+            <button type="button" class="chip" onclick={() => onTracks('subtitles')}>{chip('💬 Subtitles', trackLabels?.subtitles)}</button>
+          {/if}
+          {#if tracks.audio}<button type="button" class="chip" onclick={() => onTracks('audio')}>{chip('♪ Audio', trackLabels?.audio)}</button>{/if}
         </span>
       </div>
     {/if}

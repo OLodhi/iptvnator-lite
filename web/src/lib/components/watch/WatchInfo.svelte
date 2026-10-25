@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CatalogItem, NowProgramme } from '@tv/shared';
+  import type { CatalogItem, EpisodeDetail, ItemDetails, NowProgramme } from '@tv/shared';
   import { formatClock, progress, sharedClock } from '$lib/guide/time';
   import type { CatchupWindow } from '$lib/watch/params';
   import Artwork from '../Artwork.svelte';
@@ -14,9 +14,13 @@
     where?: string | null;
     /** Live: "Next · 21:00 Title". */
     next?: string | null;
+    /** A movie's or series' details, once fetched. */
+    details?: ItemDetails | null;
+    /** The episode playing and its season, once the series' details are known. */
+    episode?: { season: number; episode: EpisodeDetail } | null;
   };
 
-  let { kind, item, onNow, catchup, where = null, next = null }: Props = $props();
+  let { kind, item, onNow, catchup, where = null, next = null, details = null, episode = null }: Props = $props();
 
   const clock = sharedClock();
   const fraction = $derived(onNow ? progress(onNow.startSec, onNow.stopSec, clock.nowMs) : 0);
@@ -28,6 +32,19 @@
           .join('')
       : '',
   );
+  /** A movie: "1995 · Crime · ★ 8.3", with whatever the provider has. An episode: "Season 3 · Episode 2 · Title · 33 min". */
+  const meta = $derived.by(() => {
+    if (kind === 'movie') {
+      const rating = details?.rating ?? item?.rating;
+      return [details?.year ?? item?.year, details?.genre, rating ? `★ ${rating}` : null].filter(Boolean).join(' · ');
+    }
+    if (kind === 'episode' && episode) {
+      const { season, episode: ep } = episode;
+      const length = ep.durationSec ? `${Math.round(ep.durationSec / 60)} min` : null;
+      return [season === 0 ? 'Specials' : `Season ${season}`, `Episode ${ep.episodeNum}`, ep.title, length].filter(Boolean).join(' · ');
+    }
+    return '';
+  });
 </script>
 
 <section class="info">
@@ -57,7 +74,10 @@
     {/if}
     {#if kind === 'live' && next}<p class="next">{next}</p>{/if}
   {:else if item}
+    <!-- A movie's title, or an episode's series. -->
     <p class="prog title">{item.displayName}</p>
+    {#if meta}<p class="meta">{meta}</p>{/if}
+    {#if kind === 'movie' && details?.plot}<p class="plot">{details.plot}</p>{/if}
   {/if}
 </section>
 
@@ -152,5 +172,20 @@
     margin-top: 12px;
     color: var(--muted);
     font-size: 13px;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  .plot {
+    display: -webkit-box;
+    margin-top: 8px;
+    overflow: hidden;
+    color: #cfd5df;
+    font-size: 13px;
+    line-clamp: 3;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
   }
 </style>

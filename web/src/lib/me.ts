@@ -3,6 +3,7 @@ import type {
   CurationUpdate,
   CurationView,
   ImportResult,
+  ItemDetails,
   Kind,
   PositionReport,
   SavedPosition,
@@ -19,6 +20,9 @@ export const unpin = (categoryId: number) => api<void>(`/api/me/pins/${categoryI
 
 export const favourite = (itemId: number) => api<void>('/api/me/favourites', json('POST', { itemId }));
 export const unfavourite = (itemId: number) => api<void>(`/api/me/favourites/${itemId}`, { method: 'DELETE' });
+
+/** A movie's or series' plot, genre, artwork and (for a series) seasons and episodes. */
+export const itemDetails = (itemId: number) => api<ItemDetails>(`/api/items/${itemId}/details`);
 
 export const positions = (itemId: number) => api<SavedPosition[]>(`/api/me/positions/${itemId}`);
 export const reportPosition = (report: PositionReport) => api<void>('/api/me/positions', ({ ...json('PUT', report), keepalive: true }));

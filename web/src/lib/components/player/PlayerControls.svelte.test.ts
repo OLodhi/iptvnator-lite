@@ -138,6 +138,15 @@ test('fullscreen shows the title, channel buttons and track chips', () => {
   expect(onTracks).toHaveBeenCalledWith('subtitles');
 });
 
+test('track chips say what is chosen', () => {
+  setup({ fullscreen: true, tracks: { audio: true, subtitles: true }, trackLabels: { audio: 'English', subtitles: 'Off' } });
+  const chips = () => [...document.querySelectorAll('.chip')].map((c) => c.textContent);
+  expect(chips()).toEqual(['💬 Subtitles: Off', '♪ Audio: English']);
+  props.trackLabels = { audio: 'Dutch', subtitles: 'English (SDH)' };
+  flushSync();
+  expect(chips()).toEqual(['💬 Subtitles: English (SDH)', '♪ Audio: Dutch']);
+});
+
 test('unsupported PiP and AirPlay render nothing', () => {
   setup();
   expect(document.querySelector('[aria-label="Picture in picture"]')).toBeNull();

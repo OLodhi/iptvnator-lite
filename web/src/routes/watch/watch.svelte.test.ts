@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
-import type { CatalogItem, GridRow, PlayResponse, Programme, SavedPosition, WatchContext } from '@tv/shared';
+import type {
+  CatalogItem,
+  EpisodeDetail,
+  GridRow,
+  ItemDetails,
+  PlayResponse,
+  Programme,
+  SavedPosition,
+  SessionTracks,
+  WatchContext,
+} from '@tv/shared';
 
 const route = vi.hoisted(() => ({ url: new URL('http://localhost/watch?item=7&t=600') }));
 const api = vi.hoisted(() => vi.fn());
@@ -39,6 +49,9 @@ const me = vi.hoisted(() => ({
   reportPosition: vi.fn(async () => {}),
   favourite: vi.fn(async (_id: number) => {}),
   unfavourite: vi.fn(async (_id: number) => {}),
+  itemDetails: vi.fn(async (_id: number): Promise<ItemDetails> => {
+    throw new Error('no details'); // the provider has none, unless a test says otherwise
+  }),
 }));
 vi.mock('$lib/me', () => me);
 const released = vi.hoisted(() => vi.fn(async (_s: string, _c: string) => {}));
@@ -102,6 +115,8 @@ beforeEach(() => {
   me.reportPosition.mockClear();
   me.favourite.mockReset();
   me.unfavourite.mockReset();
+  me.itemDetails.mockReset();
+  localStorage.clear();
   sys.pip = false;
   sys.airplay = false;
   sys.setNowPlaying.mockClear();
@@ -206,6 +221,8 @@ const liveItem = (over: Partial<CatalogItem> = {}) =>
   }) as CatalogItem;
 const movieItem = (over: Partial<CatalogItem> = {}) =>
   ({ id: 5, kind: 'movie', displayName: 'Heat', logoUrl: '/api/logos/5', catchupDays: null, ...over }) as CatalogItem;
+const kitchen = (over: Partial<CatalogItem> = {}) =>
+  ({ id: 11, kind: 'series', displayName: 'The Kitchen', logoUrl: '/api/logos/11', catchupDays: null, favourite: false, ...over }) as CatalogItem;
 const buttonWith = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes(text));
 function enterFullscreen() {
   (document.querySelector('.controls [aria-label="Fullscreen"]') as HTMLElement).click();
@@ -530,20 +547,21 @@ test('Back without history goes to the category guide for live', async () => {
 
 test('Back without history goes to Movies for a movie and to the series for an episode', async () => {
   const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  const topBack = () => document.querySelector('.topbar .back') as HTMLElement;
   route.url = new URL('http://localhost/watch?item=5&t=600');
   serve(movieRes, movieItem());
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
-  buttonWith('‹ Back')!.click();
+  topBack().click();
   expect(nav.goto).toHaveBeenLastCalledWith('/browse/movie', { replaceState: true });
   unmount(app);
   document.body.innerHTML = '';
 
   route.url = new URL('http://localhost/watch?item=11&episode=111&t=60');
-  serve(movieRes, movieItem({ id: 11, kind: 'series', displayName: 'The Kitchen' }));
+  serve(movieRes, kitchen());
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
-  buttonWith('‹ Back')!.click();
+  topBack().click();
   expect(nav.goto).toHaveBeenLastCalledWith('/series/11', { replaceState: true });
   expect(back).not.toHaveBeenCalled();
 });
@@ -1202,20 +1220,389 @@ test('Back is labelled with the category name on live', async () => {
   unmount(app);
   document.body.innerHTML = '';
 
-  // A movie, and a channel whose category isn't known, keep the plain label.
+  // A movie says Movies, and an episode its series.
   route.url = new URL('http://localhost/watch?item=5&t=600');
   serve(movieRes, movieItem());
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(4));
-  expect(topBack().textContent).toBe('‹ Back');
-  expect(topBack().hasAttribute('aria-label')).toBe(false);
+  expect(topBack().textContent).toBe('‹ Movies');
+  expect(topBack().getAttribute('aria-label')).toBe('Back to Movies');
   unmount(app);
   document.body.innerHTML = '';
 
+  route.url = new URL('http://localhost/watch?item=11&episode=112&t=60');
+  serve(movieRes, kitchen());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(topBack().textContent).toBe('‹ The Kitchen'));
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // A channel whose category isn't known keeps the plain label.
   guide.context = { categoryId: null, label: null };
   route.url = new URL('http://localhost/watch?item=7');
   serve(liveRes, liveItem());
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
   expect(topBack().textContent).toBe('‹ Back');
+});
+
+// Movies and episodes: details, audio and subtitle tracks, the season's episodes and Up next.
+
+const track = (index: number, label: string, language: string | null, available = true) => ({
+  index, label, language, isDefault: false, forced: false, available,
+});
+const tracksOf = (over: Partial<SessionTracks> = {}): SessionTracks => ({
+  audio: [track(1, 'English', 'en'), track(2, 'Dutch', 'nl')],
+  subtitles: [track(3, 'English', 'en'), track(4, 'Dutch', 'nl'), track(5, 'Dutch (PGS)', 'nl', false)],
+  audioIndex: 1,
+  subtitleIndex: null,
+  ...over,
+});
+/** A movie or episode HLS session that started at 10:00, with tracks. */
+const vodRes = (sessionId: string, over: Partial<PlayResponse> = {}): PlayResponse => ({
+  sessionId, mode: 'hls', url: `/api/sessions/${sessionId}/cid/master.m3u8`, durationSec: 3000, startAtSec: 600, tracks: tracksOf(), ...over,
+});
+const episode = (remoteId: string, episodeNum: number, title: string): EpisodeDetail => ({
+  remoteId, title, episodeNum, durationSec: 1980, imageUrl: `/api/art/11/episode-${remoteId}`, airDate: null, quality: 'HD',
+});
+const details = {
+  plot: null, genre: null, cast: null, director: null, year: null, rating: null, posterUrl: null, backdropUrl: null,
+};
+const heatDetails: ItemDetails = {
+  ...details, kind: 'movie', durationSec: 6000, plot: 'A thief plans one last job.', genre: 'Crime, Thriller', year: 1995, rating: '8.3',
+  posterUrl: '/api/art/5/poster',
+};
+const kitchenDetails: ItemDetails = {
+  ...details, kind: 'series', plot: 'A chef comes home.', posterUrl: '/api/art/11/poster',
+  seasons: [
+    { season: 1, name: 'Season 1', coverUrl: null, episodes: [episode('111', 1, 'Pilot'), episode('112', 2, 'Next')] },
+    { season: 2, name: 'Season 2', coverUrl: null, episodes: [episode('121', 1, 'Doors')] },
+  ],
+};
+const text = (el: Element | null | undefined) => el?.textContent?.replace(/\s+/g, ' ').trim();
+const sheet = (title: string) => document.querySelector(`[role="dialog"][aria-label="${title}"]`);
+/** Opens the Subtitles or Audio sheet from the actions under the video, and picks `label`. */
+function pick(kind: 'Subtitles' | 'Audio', label: string) {
+  [...document.querySelectorAll<HTMLButtonElement>('.actions .act')].find((b) => b.textContent?.includes(kind))!.click();
+  flushSync();
+  [...sheet(kind)!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.replace('✓', '').trim() === label)!.click();
+  flushSync();
+}
+/** Mounts the movie at 10:00 and plays it 30 s in. */
+async function playingMovie(play: PlayResponse | ((body: { subtitleIndex?: number | null }) => Promise<PlayResponse>)) {
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  api.mockImplementation((path: string, init?: RequestInit) => {
+    if (path !== '/api/play') return Promise.resolve(movieItem());
+    return typeof play === 'function' ? play(JSON.parse(init!.body as string)) : Promise.resolve(play);
+  });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  const v = video();
+  Object.defineProperty(v, 'readyState', { get: () => HTMLMediaElement.HAVE_METADATA });
+  v.currentTime = 30;
+  playing(v);
+  return v;
+}
+const chips = () => [...document.querySelectorAll('.controls .chip')].map((c) => text(c));
+
+test('movie info shows plot and genre', async () => {
+  sys.pip = true;
+  sys.airplay = true;
+  me.itemDetails.mockResolvedValue(heatDetails);
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(vodRes('m1'), movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(text(document.querySelector('.info .plot'))).toBe('A thief plans one last job.'));
+  expect(me.itemDetails).toHaveBeenCalledWith(5);
+  expect(text(document.querySelector('.info .title'))).toBe('Heat');
+  expect(text(document.querySelector('.info .meta'))).toBe('1995 · Crime, Thriller · ★ 8.3');
+  // ★, PiP, AirPlay, then More with the tracks; and nothing to switch to under a movie.
+  expect(actionTexts()).toEqual(['★Favourite', '⧉Picture in picture', '⎚AirPlay', '⋯More']);
+  buttonWith('More')!.click();
+  flushSync();
+  expect([...sheet('More')!.querySelectorAll('button')].map((b) => text(b))).toEqual(['💬 Subtitles', '♪ Audio', '⤢ Full screen', 'Cancel']);
+  expect(document.querySelector('.switch')).toBeNull();
+});
+
+test('HLS track pick restarts at the current position with audioIndex', async () => {
+  const v = await playingMovie(vodRes('m1'));
+  api.mockImplementation((path: string) =>
+    Promise.resolve(path === '/api/play' ? vodRes('m2', { startAtSec: 630, tracks: tracksOf({ audioIndex: 2 }) }) : movieItem()),
+  );
+  pick('Audio', 'Dutch');
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  const body = bodyOf(playCalls()[1]!);
+  expect(body).toMatchObject({ itemId: 5, startAtSec: 630, audioIndex: 2 });
+  expect(body).not.toHaveProperty('subtitleIndex');
+  expect(released.mock.calls).toEqual([['m1', 'cid']]);
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(attachStream.mock.calls[1]![0]).toBe(v);
+  expect(states()).toBeNull(); // a brief pause, not a Starting card
+  // Picking the track already playing does nothing.
+  pick('Audio', 'Dutch');
+  expect(playCalls()).toHaveLength(2);
+  // Fullscreen, the chips say what is chosen.
+  enterFullscreen();
+  expect(chips()).toEqual(['💬 Subtitles: Off', '♪ Audio: Dutch']);
+});
+
+test('subtitle Off sends null and clears the remembered language', async () => {
+  localStorage.setItem('tv.subtitleLang', 'en');
+  await playingMovie(vodRes('m1', { tracks: tracksOf({ subtitleIndex: 3 }) }));
+  buttonWith('Subtitles')!.click();
+  flushSync();
+  const options = [...sheet('Subtitles')!.querySelectorAll('button')];
+  expect(options.map((b) => [text(b), b.getAttribute('aria-pressed')])).toEqual([
+    ['Off', 'false'],
+    ['✓English', 'true'],
+    ['Dutch', 'false'],
+    ['Dutch (PGS) (not supported on this device)', 'false'],
+    ['Cancel', null],
+  ]);
+  options[0]!.click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(bodyOf(playCalls()[1]!)).toMatchObject({ startAtSec: 630, subtitleIndex: null });
+  expect(localStorage.getItem('tv.subtitleLang')).toBeNull();
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // A title with no subtitles in the remembered language starts with them off: Off still forgets it, with no restart.
+  localStorage.setItem('tv.subtitleLang', 'fr');
+  attachStream.mockClear();
+  await playingMovie(vodRes('m3'));
+  pick('Subtitles', 'Off');
+  expect(localStorage.getItem('tv.subtitleLang')).toBeNull();
+  expect(playCalls()).toHaveLength(3);
+});
+
+test('a start with a subtitle shows it', async () => {
+  const showSubtitles = vi.fn();
+  attachStream.mockImplementationOnce(() => ({ destroy: () => {}, showSubtitles }));
+  await playingMovie(vodRes('m1', { tracks: tracksOf({ subtitleIndex: 4 }) }));
+  expect(showSubtitles).toHaveBeenCalledWith(true);
+  enterFullscreen();
+  expect(chips()).toEqual(['💬 Subtitles: Dutch', '♪ Audio: English']);
+
+  // A start without one leaves the stream's subtitles alone.
+  const quiet = vi.fn();
+  attachStream.mockImplementationOnce(() => ({ destroy: () => {}, showSubtitles: quiet }));
+  api.mockImplementation((path: string) => Promise.resolve(path === '/api/play' ? vodRes('m2') : movieItem()));
+  (document.querySelector('.controls .chip') as HTMLElement).click();
+  flushSync();
+  [...sheet('Subtitles')!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Off')!.click();
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(quiet).not.toHaveBeenCalled();
+});
+
+test('two quick subtitle changes end with one session for the last choice', async () => {
+  const session = (id: string): PlayResponse => vodRes(id, { startAtSec: 630 });
+  const answers = new Map<number, (r: PlayResponse) => void>();
+  await playingMovie((body) =>
+    body.subtitleIndex === undefined ? Promise.resolve(vodRes('s1')) : new Promise((resolve) => answers.set(body.subtitleIndex!, resolve)),
+  );
+
+  // The second choice lands before the first restart has started.
+  pick('Subtitles', 'English');
+  pick('Subtitles', 'Dutch');
+  expect(playCalls().map((c) => bodyOf(c).subtitleIndex)).toEqual([undefined, 3, 4]);
+  expect(playCalls().slice(1).map(startAtOf)).toEqual([630, 630]); // both from where it was
+  // The playing session was let go before the first restart was asked for.
+  expect(released.mock.calls).toEqual([['s1', 'cid']]);
+  expect(released.mock.invocationCallOrder[0]).toBeLessThan(api.mock.invocationCallOrder[api.mock.calls.indexOf(playCalls()[1]!)]!);
+
+  // The answers land out of order: the superseded session is released, and only the last choice plays.
+  answers.get(4)!(session('s3'));
+  answers.get(3)!(session('s2'));
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(released).toHaveBeenCalledTimes(2));
+  expect(attachStream.mock.calls[1]![1]).toBe('/api/sessions/s3/cid/master.m3u8');
+  expect(released.mock.calls.map(([s]) => s).sort()).toEqual(['s1', 's2']);
+  expect(heartbeats.filter((b) => !b.stopped).map((b) => b.sessionId)).toEqual(['s3']);
+  expect(localStorage.getItem('tv.subtitleLang')).toBe('nl');
+});
+
+test('starts send the remembered subtitle language', async () => {
+  localStorage.setItem('tv.subtitleLang', 'nl');
+  await playingMovie(vodRes('m1'));
+  expect(bodyOf(playCalls()[0]!)).toMatchObject({ itemId: 5, subtitleLanguage: 'nl' });
+  // A seek restart asks again, so the new session has the subtitles too.
+  api.mockImplementation((path: string) => (path === '/api/play' ? new Promise(() => {}) : Promise.resolve(movieItem())));
+  (document.querySelector('.controls [aria-label="Forward 10 seconds"]') as HTMLElement).click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(bodyOf(playCalls()[1]!)).toMatchObject({ startAtSec: 640, subtitleLanguage: 'nl' });
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // A language /api/play would refuse is not sent, and a track without a usable one isn't remembered.
+  localStorage.setItem('tv.subtitleLang', 'pt-br');
+  attachStream.mockClear();
+  const tracks = tracksOf({ subtitles: [track(6, 'Portuguese (Brazil)', 'pt-br')] });
+  await playingMovie(vodRes('m3', { tracks }));
+  expect(bodyOf(playCalls()[2]!).subtitleLanguage).toBeNull();
+  localStorage.setItem('tv.subtitleLang', 'en');
+  api.mockImplementation((path: string) => Promise.resolve(path === '/api/play' ? vodRes('m4', { tracks }) : movieItem()));
+  pick('Subtitles', 'Portuguese (Brazil)');
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(4));
+  expect(bodyOf(playCalls()[3]!).subtitleIndex).toBe(6);
+  expect(localStorage.getItem('tv.subtitleLang')).toBe('en');
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // Live has no tracks to ask for.
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(5));
+  expect(bodyOf(playCalls()[4]!)).not.toHaveProperty('subtitleLanguage');
+});
+
+/** The element's own audio and text tracks, as Safari lists them for a direct file. */
+function nativeTracks(v: HTMLVideoElement) {
+  const audio = [
+    { label: '', language: 'nld', enabled: true },
+    { label: 'Commentary', language: 'en-GB', enabled: false },
+  ];
+  const text = [
+    { kind: 'subtitles', label: 'English', language: 'en', mode: 'disabled' },
+    { kind: 'metadata', label: '', language: 'nl', mode: 'hidden' },
+    { kind: 'captions', label: '', language: 'nl', mode: 'disabled' },
+  ];
+  Object.defineProperty(v, 'audioTracks', { configurable: true, get: () => audio });
+  Object.defineProperty(v, 'textTracks', { configurable: true, get: () => text });
+  return { audio, text };
+}
+
+test('direct mode enables an English audio track on metadata', async () => {
+  localStorage.setItem('tv.subtitleLang', 'nl');
+  const direct: PlayResponse = { sessionId: 'd1', mode: 'direct', url: '/api/sessions/d1/cid/direct', durationSec: 3000, startAtSec: 600, tracks: null };
+  const v = await playingMovie(direct);
+  const { audio, text: subs } = nativeTracks(v);
+  v.dispatchEvent(new Event('loadedmetadata'));
+  flushSync();
+  expect(audio.map((t) => t.enabled)).toEqual([false, true]);
+  expect(subs.map((t) => t.mode)).toEqual(['disabled', 'hidden', 'showing']); // the remembered Dutch
+  enterFullscreen();
+  expect(chips()).toEqual(['💬 Subtitles: Dutch', '♪ Audio: English (Commentary)']);
+  (document.querySelector('.controls [aria-label="Exit fullscreen"]') as HTMLElement).click();
+  flushSync();
+
+  // The sheets switch the element's own tracks: no new session.
+  pick('Audio', 'Dutch');
+  expect(audio.map((t) => t.enabled)).toEqual([true, false]);
+  pick('Subtitles', 'English');
+  expect(subs.map((t) => t.mode)).toEqual(['showing', 'hidden', 'disabled']);
+  expect(localStorage.getItem('tv.subtitleLang')).toBe('en');
+  pick('Subtitles', 'Off');
+  expect(subs.map((t) => t.mode)).toEqual(['disabled', 'hidden', 'disabled']);
+  expect(localStorage.getItem('tv.subtitleLang')).toBeNull();
+  expect(playCalls()).toHaveLength(1);
+  expect(bodyOf(playCalls()[0]!)).not.toHaveProperty('audioIndex');
+
+  // English already on is left as it is.
+  audio[0]!.enabled = false;
+  audio[1]!.enabled = true;
+  audio[1]!.language = 'eng';
+  v.dispatchEvent(new Event('loadedmetadata'));
+  expect(audio.map((t) => t.enabled)).toEqual([false, true]);
+});
+
+/** The Kitchen's second episode, from the series page (no time given). */
+async function watchingNext(saved: SavedPosition[] = []) {
+  me.itemDetails.mockResolvedValue(kitchenDetails);
+  me.positions.mockResolvedValueOnce(saved);
+  route.url = new URL('http://localhost/watch?item=11&episode=112');
+  serve(vodRes('e1', { startAtSec: 0, durationSec: 1980 }), kitchen());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(document.querySelectorAll('.switch .ep-row')).toHaveLength(2));
+  playing(video());
+}
+
+test('episode list highlights the playing episode', async () => {
+  const pilotWatched: SavedPosition = { episodeRemoteId: '111', positionSec: 0, durationSec: null, finished: true, manual: true, updatedAt: 1 };
+  await watchingNext([pilotWatched]);
+  expect(bodyOf(playCalls()[0]!)).toMatchObject({ itemId: 11, episodeRemoteId: '112', startAtSec: 0 });
+  const rows = [...document.querySelectorAll('.switch .ep-row')];
+  expect(rows.map((r) => r.getAttribute('href'))).toEqual(['/watch?item=11&episode=111', '/watch?item=11&episode=112']);
+  expect(rows.map((r) => r.classList.contains('current'))).toEqual([false, true]);
+  expect(text(rows[1]!.querySelector('.playing'))).toBe('Playing');
+  expect(text(rows[0]!.querySelector('.s'))).toBe('watched HD');
+  expect(text(document.querySelector('.switch .lhead'))).toBe('Season 1 2 episodes');
+  // A row plays its episode in place of this history entry, as Next episode does.
+  expect(document.querySelector('.switch')!.getAttribute('data-sveltekit-replacestate')).toBe('');
+
+  // What it is, what to do, and where Back goes.
+  expect(text(document.querySelector('.info .title'))).toBe('The Kitchen');
+  expect(text(document.querySelector('.info .meta'))).toBe('Season 1 · Episode 2 · Next · 33 min');
+  expect(actionTexts()).toEqual(['★Favourite', '⏭Next episode', '💬Subtitles', '⋯More']);
+  expect(text(document.querySelector('.topbar .back'))).toBe('‹ The Kitchen');
+  buttonWith('Next episode')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/watch?item=11&episode=121', { replaceState: true });
+  // ★ is the series.
+  buttonWith('Favourite')!.click();
+  expect(me.favourite).toHaveBeenCalledWith(11);
+});
+
+test('Up next plays the next episode after 5 s', async () => {
+  fakeTimeouts();
+  await watchingNext();
+  expect(document.querySelector('.up-next')).toBeNull();
+  video().dispatchEvent(new Event('ended'));
+  flushSync();
+  // The last episode of season 1 is followed by the first of season 2.
+  expect(text(document.querySelector('.up-next .label'))).toBe('Up next · S2 E1');
+  expect(text(document.querySelector('.up-next .title'))).toBe('Doors');
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(nav.goto).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(nav.goto.mock.calls).toEqual([['/watch?item=11&episode=121', { replaceState: true }]]);
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // Cancelled, it stays on the ended episode.
+  nav.goto.mockClear();
+  await watchingNext();
+  video().dispatchEvent(new Event('ended'));
+  flushSync();
+  buttonWith('Cancel')!.click();
+  flushSync();
+  expect(document.querySelector('.up-next')).toBeNull();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(nav.goto).not.toHaveBeenCalled();
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // The last episode has nothing up next.
+  me.itemDetails.mockResolvedValue(kitchenDetails);
+  route.url = new URL('http://localhost/watch?item=11&episode=121');
+  serve(vodRes('e3', { startAtSec: 0 }), kitchen());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.querySelectorAll('.switch .ep-row')).toHaveLength(1));
+  video().dispatchEvent(new Event('ended'));
+  flushSync();
+  expect(document.querySelector('.up-next')).toBeNull();
+  expect(buttonWith('Next episode')).toBeUndefined();
+});
+
+test('media session for an episode: its title, the series and poster, with ±10 s', async () => {
+  await watchingNext();
+  await vi.waitFor(() => expect(sys.setNowPlaying.mock.lastCall?.[0]).toMatchObject({ title: 'S1 E2 · Next' }));
+  const [meta, actions] = sys.setNowPlaying.mock.lastCall! as [object, Record<string, () => void>];
+  expect(meta).toEqual({ title: 'S1 E2 · Next', artist: 'The Kitchen', artworkUrl: '/api/art/11/poster' });
+  expect(Object.keys(actions).sort()).toEqual(['pause', 'play', 'seekbackward', 'seekforward']);
+  const v = video();
+  Object.defineProperty(v, 'readyState', { get: () => HTMLMediaElement.HAVE_METADATA });
+  Object.defineProperty(v, 'seekable', { configurable: true, get: () => ({ length: 1, start: () => 0, end: () => 1980 }) });
+  v.currentTime = 100;
+  actions.seekforward!();
+  expect(v.currentTime).toBe(110);
+  actions.seekbackward!();
+  expect(v.currentTime).toBe(100);
+  unmount(app!);
+  document.body.innerHTML = '';
+
+  // A movie: its name as the title and the artist.
+  me.itemDetails.mockResolvedValue(heatDetails);
+  await playingMovie(vodRes('m1'));
+  await vi.waitFor(() => expect(sys.setNowPlaying.mock.lastCall?.[0]).toEqual({ title: 'Heat', artist: 'Heat', artworkUrl: '/api/art/5/poster' }));
 });
