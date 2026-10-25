@@ -21,6 +21,8 @@ export default defineConfig({
           environment: 'node',
           include: ['**/*.scale.test.ts'],
           testTimeout: 120_000,
+          // One file at a time: each measures time and event-loop budgets, which another file's load would distort.
+          fileParallelism: false,
         },
       },
       {
