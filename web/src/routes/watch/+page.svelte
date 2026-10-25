@@ -3,7 +3,7 @@
   import Hls from 'hls.js';
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
-  import type { PlayResponse, Programme, WatchContext } from '@tv/shared';
+  import type { PlayResponse } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { getClientId } from '$lib/clientId';
   import NowList from '$lib/components/guide/NowList.svelte';
@@ -11,8 +11,7 @@
   import PlayerStates, { type PlayerView } from '$lib/components/watch/PlayerStates.svelte';
   import WatchActions, { type WatchAction } from '$lib/components/watch/WatchActions.svelte';
   import WatchInfo from '$lib/components/watch/WatchInfo.svelte';
-  import { programmes } from '$lib/guide';
-  import { formatClock, sharedClock } from '$lib/guide/time';
+  import { sharedClock } from '$lib/guide/time';
   import { favourite, positions, reportPosition, unfavourite } from '$lib/me';
   import { messageFor } from '$lib/messages';
   import { attachStream } from '$lib/player/attach';
@@ -23,15 +22,14 @@
   import { canAirPlay, canPip, setNowPlaying, showAirPlay, togglePip } from '$lib/player/system';
   import { pickResume } from '$lib/resume';
   import { releaseSession, startHeartbeat } from '$lib/session';
-  import { loadChannelOrder, neighbour } from '$lib/watch/channels';
+  import { createChannelList } from '$lib/watch/channelList.svelte.ts';
+  import { neighbour } from '$lib/watch/channels';
   import { watchHref } from '$lib/watch/links';
   import { createOnNow } from '$lib/watch/onNow.svelte.ts';
   import { parseWatchParams, type WatchParams } from '$lib/watch/params';
 
   type Kind = StartParams['kind'];
 
-  /** How far ahead the next programme is looked for. */
-  const NEXT_WINDOW_SEC = 6 * 3600;
   /** Moving on within the page (another channel, From start, Watch live) replaces its history entry, so Back still leaves it. */
   const REPLACE = { replaceState: true };
 
@@ -121,77 +119,26 @@
     manualFullscreen = false;
   });
 
-  /** The server's word on a channel's category: the one asked for when it is one of the channel's, else its first visible one. */
-  let context = $state.raw<(WatchContext & { itemId: number; asked: string | null }) | null>(null);
-  $effect(() => {
-    if (!channel) return;
-    const id = itemId;
-    const asked = askedCategory;
-    let cancelled = false;
-    api<WatchContext>(`/api/items/${id}/context${asked ? `?category=${encodeURIComponent(asked)}` : ''}`).then(
-      (ctx) => {
-        if (!cancelled) context = { ...ctx, itemId: id, asked };
-      },
-      () => {}, // no list is better than a broken page
-    );
-    return () => {
-      cancelled = true;
-    };
+  /** A channel's category, the channels in it, and what follows the programme on now. */
+  const list = createChannelList({
+    get channel() {
+      return channel;
+    },
+    get live() {
+      return kind === 'live';
+    },
+    get itemId() {
+      return itemId;
+    },
+    get askedCategory() {
+      return askedCategory;
+    },
+    get item() {
+      return onNow.item;
+    },
   });
-
-  /** The channels below: the category the page was opened from, else the channel's first visible live category. */
-  const category = $derived(
-    askedCategory ?? (context?.itemId === itemId && context.categoryId !== null ? String(context.categoryId) : null),
-  );
-  const listFilter = $derived(!channel || category === null ? null : category === 'favourites' ? 'favourites' : `category:${category}`);
-  /** The category's guide: where ▦ Guide goes, and Back without history. */
-  const guideHref = $derived(category ? `/browse/live/${category}` : '/browse/live');
-  // Switching channel within the category keeps its name while the new channel's answer is on its way.
-  const listLabel = $derived(
-    context && (context.itemId === itemId || (askedCategory !== null && context.asked === askedCategory)) ? (context.label ?? '') : '',
-  );
   /** Back says where it goes: a channel's category, or Favourites, once known. */
-  const backLabel = $derived(channel && listLabel ? listLabel : null);
-
-  /** The list's channels in order, for channel up and down and "channel 4 of 85": loaded once per list, not per channel. */
-  let loadedOrder = $state.raw<{ filter: string; ids: number[] } | null>(null);
-  $effect(() => {
-    const filter = listFilter;
-    if (!filter) return;
-    const ctl = new AbortController();
-    loadChannelOrder(filter, ctl.signal).then(
-      (ids) => (loadedOrder = { filter, ids }),
-      () => {}, // without it, no channel up and down
-    );
-    return () => ctl.abort();
-  });
-  const order = $derived(loadedOrder && loadedOrder.filter === listFilter ? loadedOrder.ids : []);
-  const where = $derived.by(() => {
-    const at = order.indexOf(itemId);
-    return at < 0 ? null : [listLabel, `channel ${at + 1} of ${order.length}`].filter(Boolean).join(' · ');
-  });
-
-  /** What follows the programme on now, fetched again whenever the item (and so its on-now line) is. */
-  let next = $state.raw<{ itemId: number; programme: Programme | null } | null>(null);
-  $effect(() => {
-    const it = onNow.item;
-    if (kind !== 'live' || !it || it.id !== itemId) return;
-    const ctl = new AbortController();
-    const from = Math.floor(Date.now() / 1000);
-    const after = it.now?.stopSec ?? from;
-    programmes([it.id], from, from + NEXT_WINDOW_SEC, ctl.signal).then(
-      (found) => {
-        const upcoming = (found[it.id] ?? []).filter((p) => p.startSec >= after).sort((a, b) => a.startSec - b.startSec);
-        next = { itemId: it.id, programme: upcoming[0] ?? null };
-      },
-      () => {},
-    );
-    return () => ctl.abort();
-  });
-  const nextLabel = $derived.by(() => {
-    const p = next?.itemId === itemId ? next.programme : null;
-    return p ? `Next · ${formatClock(p.startSec)} ${p.title}` : undefined;
-  });
+  const backLabel = $derived(channel && list.label ? list.label : null);
 
   // The live bar is the programme on the clock. The stream counts its own time; its live edge is now.
   const liveShiftSec = $derived(kind === 'live' && player?.window ? Date.now() / 1000 - player.window.endSec : 0);
@@ -215,8 +162,8 @@
     if (!channel || !it || it.id !== itemId) return;
     const live = kind === 'live';
     const actions: Parameters<typeof setNowPlaying>[1] = { play: resumePlayback, pause: pausePlayback };
-    if (live && neighbour(order, it.id, -1) !== null) actions.previoustrack = () => switchChannel(-1);
-    if (live && neighbour(order, it.id, 1) !== null) actions.nexttrack = () => switchChannel(1);
+    if (live && neighbour(list.order, it.id, -1) !== null) actions.previoustrack = () => switchChannel(-1);
+    if (live && neighbour(list.order, it.id, 1) !== null) actions.nexttrack = () => switchChannel(1);
     const artist = live ? onNow.onNow?.title : params.catchup?.title || undefined;
     setNowPlaying({ title: it.displayName, artist, artworkUrl: it.logoUrl ?? undefined }, actions);
   });
@@ -287,22 +234,22 @@
       now = onNow.onNow;
     }
     if (id === undefined || !now || onNow.item?.id !== id) return;
-    void goto(watchHref(id, { category, catchup: now }), REPLACE);
+    void goto(watchHref(id, { category: list.category, catchup: now }), REPLACE);
   }
 
   /** "● Watch live": this channel, live. */
   function watchLive() {
-    void goto(watchHref(itemId, { category }), REPLACE);
+    void goto(watchHref(itemId, { category: list.category }), REPLACE);
   }
 
   /** Channel up or down, in the list's order. The playing session is released as the next one starts. */
   function switchChannel(dir: -1 | 1) {
-    const id = neighbour(order, itemId, dir);
-    if (id !== null) void goto(watchHref(id, { category }), REPLACE);
+    const id = neighbour(list.order, itemId, dir);
+    if (id !== null) void goto(watchHref(id, { category: list.category }), REPLACE);
   }
 
   function openGuide() {
-    void goto(guideHref);
+    void goto(list.guideHref);
   }
 
   async function toggleFavourite() {
@@ -325,7 +272,7 @@
   /** Back where you came from. Opened from outside the app (a bookmark, a link, a relaunch), to the list it belongs to. */
   function back() {
     if (inAppHistory) return history.back();
-    let home = guideHref;
+    let home = list.guideHref;
     if (kind === 'movie') home = '/browse/movie';
     else if (kind === 'episode') home = `/series/${itemId}`;
     void goto(home, { replaceState: true });
@@ -439,7 +386,7 @@
         mode={kind === 'live' ? 'live' : 'vod'}
         title={name}
         subtitle={kind === 'catchup' ? params.catchup?.title || undefined : kind === 'live' ? onNow.onNow?.title : undefined}
-        nextLabel={kind === 'live' ? nextLabel : undefined}
+        nextLabel={kind === 'live' ? list.nextLabel : undefined}
         {fullscreen}
         programme={kind === 'live' ? onNow.onNow : null}
         {liveShiftSec}
@@ -476,18 +423,18 @@
     {/if}
   </div>
 
-  <WatchInfo {kind} item={onNow.item} onNow={onNow.onNow} catchup={params.catchup} {where} next={nextLabel} />
+  <WatchInfo {kind} item={onNow.item} onNow={onNow.onNow} catchup={params.catchup} where={list.where} next={list.nextLabel} />
   <WatchActions {actions} bind:moreOpen />
 
-  {#if listFilter}
+  {#if list.filter}
     <!-- Something to switch to: the category's channels, the playing one highlighted. A row plays it live, in place of
          this history entry, as channel up and down do. -->
     <section class="switch" aria-label="Channels" data-sveltekit-replacestate>
       <div class="lhead">
-        <strong>{listLabel}</strong>
-        {#if order.length > 0}<span>{order.length} {order.length === 1 ? 'channel' : 'channels'}</span>{/if}
+        <strong>{list.label}</strong>
+        {#if list.order.length > 0}<span>{list.order.length} {list.order.length === 1 ? 'channel' : 'channels'}</span>{/if}
       </div>
-      <NowList filter={listFilter} label={listLabel} currentItemId={itemId} />
+      <NowList filter={list.filter} label={list.label} currentItemId={itemId} />
     </section>
   {/if}
 </div>
