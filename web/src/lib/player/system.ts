@@ -13,6 +13,7 @@ export function canPip(video: HTMLVideoElement): boolean {
   return typeof v.requestPictureInPicture === 'function' && document.pictureInPictureEnabled !== false;
 }
 
+/** Never rejects: a refused PiP request is a no-op. */
 export async function togglePip(video: HTMLVideoElement): Promise<void> {
   const v = video as PresentationVideo;
   if (typeof v.webkitSetPresentationMode === 'function') {
@@ -20,8 +21,12 @@ export async function togglePip(video: HTMLVideoElement): Promise<void> {
     return;
   }
   if (typeof v.requestPictureInPicture !== 'function') return;
-  if (document.pictureInPictureElement) await document.exitPictureInPicture();
-  else await v.requestPictureInPicture();
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await v.requestPictureInPicture();
+  } catch {
+    // Not allowed, no metadata yet, or blocked: PiP simply does not happen.
+  }
 }
 
 export function canAirPlay(): boolean {

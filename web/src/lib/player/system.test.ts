@@ -60,6 +60,18 @@ describe('system integrations', () => {
     delete (document as { exitPictureInPicture?: unknown }).exitPictureInPicture;
   });
 
+  it('togglePip resolves when requestPictureInPicture or exitPictureInPicture rejects', async () => {
+    const video = document.createElement('video');
+    video.requestPictureInPicture = vi.fn().mockRejectedValue(new DOMException('no', 'NotAllowedError'));
+    await expect(togglePip(video)).resolves.toBeUndefined();
+
+    Object.defineProperty(document, 'pictureInPictureElement', { value: video, configurable: true });
+    document.exitPictureInPicture = vi.fn().mockRejectedValue(new DOMException('no', 'InvalidStateError'));
+    await expect(togglePip(video)).resolves.toBeUndefined();
+    delete (document as { pictureInPictureElement?: unknown }).pictureInPictureElement;
+    delete (document as { exitPictureInPicture?: unknown }).exitPictureInPicture;
+  });
+
   it('AirPlay is available when WebKit announces playback targets and opens the picker', () => {
     (window as unknown as Record<string, unknown>).WebKitPlaybackTargetAvailabilityEvent = class {};
     expect(canAirPlay()).toBe(true);

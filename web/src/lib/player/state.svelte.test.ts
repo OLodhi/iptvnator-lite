@@ -19,6 +19,7 @@ describe('player state', () => {
 
     props.paused = false;
     props.currentTime = 20;
+    props.duration = Infinity;
     props.seekable = { length: 1, start: () => 0, end: () => 90 };
     video.dispatchEvent(new Event('play'));
     expect(state.paused).toBe(false);
@@ -55,6 +56,18 @@ describe('player state', () => {
     props.currentTime = 900;
     video.dispatchEvent(new Event('timeupdate'));
     expect(state.positionSec).toBe(500);
+  });
+
+  it('behindSec is 0 for a finite-duration VOD with a seekable window', () => {
+    const { video, props } = fakeVideo();
+    const state = createPlayerState(video, () => 0);
+    props.duration = 3600;
+    props.currentTime = 10;
+    props.seekable = { length: 1, start: () => 0, end: () => 600 };
+    video.dispatchEvent(new Event('progress'));
+    expect(state.window).toEqual({ startSec: 0, endSec: 600 });
+    expect(state.behindSec).toBe(0);
+    state.destroy();
   });
 
   it('error exposes the MediaError code', () => {

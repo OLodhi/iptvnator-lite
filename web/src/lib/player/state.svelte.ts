@@ -27,6 +27,7 @@ export function createPlayerState(video: HTMLVideoElement, getOffset: () => numb
   let positionSec = $state(0);
   let durationSec = $state<number | null>(null);
   let window = $state<{ startSec: number; endSec: number } | null>(null);
+  let live = $state(false);
   let error = $state<number | null>(null);
 
   function read(type?: string) {
@@ -36,6 +37,7 @@ export function createPlayerState(video: HTMLVideoElement, getOffset: () => numb
     muted = video.muted;
     positionSec = offset + (video.currentTime || 0);
     durationSec = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null;
+    live = video.duration === Infinity;
     const ranges = video.seekable;
     window = ranges && ranges.length > 0 ? { startSec: offset + ranges.start(0), endSec: offset + ranges.end(ranges.length - 1) } : null;
     error = video.error ? video.error.code : null;
@@ -55,7 +57,8 @@ export function createPlayerState(video: HTMLVideoElement, getOffset: () => numb
     get positionSec() { return positionSec; },
     get durationSec() { return durationSec; },
     get window() { return window; },
-    get behindSec() { return window ? Math.max(0, window.endSec - positionSec) : 0; },
+    // Live HLS reports duration Infinity; a VOD or a remux in progress has a seekable window but is not behind anything.
+    get behindSec() { return live && window ? Math.max(0, window.endSec - positionSec) : 0; },
     get error() { return error; },
     destroy() {
       for (const name of EVENTS) video.removeEventListener(name, onEvent);
