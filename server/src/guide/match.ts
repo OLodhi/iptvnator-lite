@@ -27,7 +27,7 @@ export function normaliseChannelName(name: string): string {
   return s
     .split(' ')
     .filter((w) => w !== '' && !NOISE.has(w))
-    .map((w) => NUMBERS[w] ?? w)
+    .map((w) => (Object.hasOwn(NUMBERS, w) ? NUMBERS[w]! : w)) // own keys only: "constructor" is inherited
     .join(' ');
 }
 
@@ -283,46 +283,69 @@ function writeLinks(db: Db, providerId: number, links: Map<number, GuideLink>): 
   return { linked: links.size, byMethod };
 }
 
-/** Re-matches the current guide's channels to live items and replaces the provider's links. */
-export function relinkGuide(db: Db, providerId: number): RelinkResult {
+function currentGuide(db: Db, providerId: number): { generation: number; source: GuideSource } {
   const state = db
     .prepare('SELECT generation, source FROM guide_state WHERE provider_id = ?')
     .get(providerId) as { generation: number; source: GuideSource } | undefined;
-  const inputs = readLinkInputs(db, providerId, state?.generation ?? 0, state?.source ?? null);
-  return writeLinks(db, providerId, matchLinks(inputs, undefined));
+  return { generation: state?.generation ?? 0, source: state?.source ?? null };
 }
 
-/** Links matched ahead of their generation's commit, with the database's write mark when their inputs were read. */
-export type LinkPlan = { generation: number; source: 'xmltv' | 'provider'; mark: string; links: Map<number, GuideLink> };
+/** Re-matches the current guide's channels to live items and replaces the provider's links. */
+export function relinkGuide(db: Db, providerId: number): RelinkResult {
+  const { generation, source } = currentGuide(db, providerId);
+  return writeLinks(db, providerId, matchLinks(readLinkInputs(db, providerId, generation, source), undefined));
+}
+
+/**
+ * relinkGuide in steps that yield to the event loop (planLinks), for a large catalogue after a sync, then one
+ * transaction that writes the links (applyLinks). If the guide moved to another generation meanwhile, that one is
+ * matched in the transaction instead.
+ */
+export async function relinkGuideInSteps(db: Db, providerId: number): Promise<RelinkResult> {
+  const names: NameCache = new Map();
+  const { generation, source } = currentGuide(db, providerId);
+  const plan = await planLinks(db, providerId, generation, source, names);
+  return db.transaction(() => {
+    const now = currentGuide(db, providerId);
+    if (now.generation === plan.generation && now.source === plan.source) return applyLinks(db, providerId, plan, names);
+    // A commit is a write too, but applyLinks would match the plan's own generation again.
+    return writeLinks(db, providerId, matchLinks(readLinkInputs(db, providerId, now.generation, now.source), names));
+  })();
+}
+
+/** Links matched ahead of writing them, with the database's write mark from when their inputs were read. */
+export type LinkPlan = { generation: number; source: GuideSource; mark: string; links: Map<number, GuideLink> };
 
 /** Moves on any write to the database: by this connection (total_changes) or by another one (data_version). */
 const writeMark = (db: Db): string =>
   `${db.prepare('SELECT total_changes()').pluck().get() as number}:${db.pragma('data_version', { simple: true }) as number}`;
 
 /**
- * Matches for a generation before it is committed, so the commit's transaction only writes. Reading and matching each
- * take their own turn of the event loop: together, for 50,000 live items, they would block it for about 200 ms.
+ * Matches for a generation ahead of writing its links. Reading, normalising names (prepareNames, in slices) and
+ * matching each take their own turns of the event loop: together, for 50,000 live items, they would block it for
+ * 300 ms or more.
  */
 export async function planLinks(
   db: Db,
   providerId: number,
   generation: number,
-  source: 'xmltv' | 'provider',
+  source: GuideSource,
   names: NameCache,
 ): Promise<LinkPlan> {
   await yieldToEventLoop();
   const mark = writeMark(db);
   const inputs = readLinkInputs(db, providerId, generation, source);
   await yieldToEventLoop();
+  if (source !== 'provider') await prepareNames(inputs.items, inputs.channels, names);
   const links = matchLinks(inputs, names);
   await yieldToEventLoop();
   return { generation, source, mark, links };
 }
 
 /**
- * Writes a plan's links; run it in the transaction that commits the plan's generation, before the commit's own write.
- * If anything was written since the plan read its inputs (a catalogue sync, a manual pick), it matches again from the
- * database, so the links are never stale.
+ * Writes a plan's links. Run it inside a transaction, before any other write there (as when committing the plan's
+ * generation). If anything was written since the plan read its inputs (a catalogue sync, a manual pick), it matches
+ * again from the database first, so the links are never stale.
  */
 export function applyLinks(db: Db, providerId: number, plan: LinkPlan, names: NameCache): RelinkResult {
   const fresh = writeMark(db) === plan.mark;

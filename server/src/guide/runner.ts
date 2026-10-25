@@ -5,8 +5,10 @@ import { silentLog } from '../util/log.ts';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
 import { refreshGuide } from './ingest.ts';
-import { relinkGuide } from './match.ts';
+import { relinkGuideInSteps } from './match.ts';
 import type { GuideStore } from './store.ts';
+
+const errorText = (err: unknown): string => redactUrl(err instanceof Error ? err.message : String(err));
 
 export interface GuideRunner {
   /**
@@ -15,8 +17,8 @@ export interface GuideRunner {
    */
   start(providerId: number): void;
   status(providerId: number): GuideStatus;
-  /** Re-matches channels to guide channels from the stored guide, without fetching. */
-  relink(providerId: number): void;
+  /** Re-matches channels to guide channels from the stored guide, without fetching, in steps that yield. */
+  relink(providerId: number): Promise<void>;
   running(providerId: number): boolean;
   /** Aborts every running refresh and waits for them to settle. The abort is not recorded as a failure. */
   stop(): Promise<void>;
@@ -44,7 +46,6 @@ export function createGuideRunner(deps: {
        (SELECT COUNT(*) FROM guide_links WHERE provider_id = @p) AS linkedChannels`,
   );
 
-  const errorText = (err: unknown): string => redactUrl(err instanceof Error ? err.message : String(err));
 
   async function run(providerId: number, signal: AbortSignal): Promise<void> {
     const startedAt = now();
@@ -97,8 +98,8 @@ export function createGuideRunner(deps: {
       begin(providerId);
     },
     running: (providerId) => active.has(providerId),
-    relink(providerId) {
-      relinkGuide(deps.db, providerId);
+    async relink(providerId) {
+      await relinkGuideInSteps(deps.db, providerId);
     },
     status(providerId) {
       const state = deps.store.state(providerId);
@@ -126,13 +127,19 @@ export function createGuideRunner(deps: {
   };
 }
 
-/** What a catalogue sync calls when it finishes: re-match from the stored guide, and fetch one if there is none. */
-export function afterSync(guide: GuideRunner, store: GuideStore): (providerId: number) => void {
+/**
+ * What a catalogue sync calls when it finishes: re-match from the stored guide, in steps so a large catalogue never
+ * blocks the event loop, then fetch a guide if there is none. It runs in the background; a failure is logged.
+ */
+export function afterSync(guide: GuideRunner, store: GuideStore, log: Log = silentLog): (providerId: number) => void {
   return (providerId) => {
-    try {
-      guide.relink(providerId);
-    } finally {
-      if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
-    }
+    const run = async () => {
+      try {
+        await guide.relink(providerId);
+      } finally {
+        if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
+      }
+    };
+    run().catch((err: unknown) => log.warn({ providerId, error: errorText(err) }, 'guide relink after sync failed'));
   };
 }

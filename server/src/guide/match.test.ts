@@ -7,6 +7,7 @@ import type { Db } from '../db/db.ts';
 import { createGuideStore } from './store.ts';
 import {
   applyLinks, computeLinks, isSeparatorName, loadMatchItems, normaliseChannelName, planLinks, prepareNames, relinkGuide,
+  relinkGuideInSteps,
 } from './match.ts';
 import type { MatchItem } from './match.ts';
 
@@ -25,6 +26,9 @@ describe('normaliseChannelName', () => {
       ['4Music', '4music'], ['E4 [FHD]', 'e4'], ['Sky (Main Event)', 'sky main event'],
     ];
     for (const [input, out] of table) expect(normaliseChannelName(input)).toBe(out);
+  });
+  test('a word that names an inherited object member is kept as a word', () => {
+    expect(normaliseChannelName('Constructor TV')).toBe('constructor tv');
   });
   test('separators', () => {
     expect(isSeparatorName('##### GENERAL FHD #####')).toBe(true);
@@ -274,6 +278,28 @@ describe('relinkGuide', () => {
     db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (1, 'a', 'o')").run();
     applyLinks(db, P, plan, new Map());
     expect(links()[0]).toEqual({ id: 1, key: 'o', method: 'manual' });
+  });
+
+  test('relinkGuideInSteps links as relinkGuide does, yielding before it writes', async () => {
+    commit('xmltv', channels, 'BBC1.uk');
+    const expected = relinkGuide(db, P);
+    const relinked = links();
+    db.prepare('DELETE FROM guide_links').run();
+    let linksAtTick = -1;
+    setImmediate(() => {
+      linksAtTick = links().length;
+    });
+    expect(await relinkGuideInSteps(db, P)).toEqual(expected);
+    expect(linksAtTick).toBe(0);
+    expect(links()).toEqual(relinked);
+  });
+
+  test('relinkGuideInSteps links a generation committed while it matched', async () => {
+    commit('xmltv', channels, 'BBC1.uk');
+    const pending = relinkGuideInSteps(db, P);
+    commit('xmltv', [{ key: 'bbc', name: 'BBC One', names: ['BBC One'] }]); // not pruned, so the old one stays readable
+    await pending;
+    expect(links()).toEqual([{ id: 1, key: 'bbc', method: 'normalised' }, { id: 2, key: 'bbc', method: 'normalised' }]);
   });
 
   test("another connection's write makes it match again too", async () => {

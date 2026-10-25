@@ -44,7 +44,7 @@ const guide = createGuideRunner({
   visibleLiveItemIds: (providerId) => visibleLiveItemIds(db, curation, providerId, DEFAULT_USER_ID),
   log,
 });
-sync = createSyncRunner({ db, providers, onSynced: afterSync(guide, guideStore), log });
+sync = createSyncRunner({ db, providers, onSynced: afterSync(guide, guideStore, log), log });
 const catalogue = createCatalogueRepo(db);
 const seriesInfo = createSeriesInfoCache({ providers, catalogue });
 const prober = createProber({ ffprobePath: config.ffprobePath, db });

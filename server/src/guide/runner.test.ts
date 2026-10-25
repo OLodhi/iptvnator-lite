@@ -86,8 +86,12 @@ function makeRunner(over: Partial<Parameters<typeof createGuideRunner>[0]> = {})
   return runner;
 }
 
+async function until(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 400 && !done(); i++) await new Promise((res) => setTimeout(res, 25));
+}
+
 async function settled(r: GuideRunner): Promise<void> {
-  for (let i = 0; i < 400 && r.running(providerId); i++) await new Promise((res) => setTimeout(res, 25));
+  await until(() => !r.running(providerId));
 }
 
 test('start runs one refresh at a time and reports status', async () => {
@@ -144,12 +148,39 @@ test('onSynced relinks and starts the first guide refresh', async () => {
   expect(r.status(providerId).linkedChannels).toBe(0);
   const again = createSyncRunner({ db, providers, onSynced: afterSync(r, store), log });
   again.start(providerId);
-  for (let i = 0; i < 400 && again.status(providerId).state === 'running'; i++) await new Promise((res) => setTimeout(res, 25));
+  // The relink runs in the background after the sync.
+  await until(() => again.status(providerId).state !== 'running' && r.status(providerId).linkedChannels > 0);
   expect(again.status(providerId).state).toBe('idle');
   expect(r.running(providerId)).toBe(false);
   expect(r.status(providerId).linkedChannels).toBe(2);
   expect(store.state(providerId)?.attemptedAt).toBe(before);
   expect(xmltvCalls).toBe(calls);
+});
+
+test('afterSync returns at once and relinks in the background', async () => {
+  const r = makeRunner();
+  r.start(providerId);
+  await settled(r);
+  db.prepare('DELETE FROM guide_links WHERE provider_id = ?').run(providerId);
+  afterSync(r, store, log)(providerId);
+  expect(r.status(providerId).linkedChannels).toBe(0);
+  await until(() => r.status(providerId).linkedChannels > 0);
+  expect(r.status(providerId).linkedChannels).toBe(2);
+});
+
+test('a failed after-sync relink is logged redacted, and the first refresh still starts', async () => {
+  let started = 0;
+  const failing: GuideRunner = {
+    ...makeRunner(),
+    relink: () => Promise.reject(new Error('relink failed http://h/x?username=alice&password=hunter2')),
+    start: () => void started++,
+  };
+  afterSync(failing, store, log)(providerId);
+  await until(() => lines.some((l) => l.msg === 'guide relink after sync failed'));
+  const line = lines.find((l) => l.msg === 'guide relink after sync failed');
+  expect(line).toMatchObject({ level: 'warn', o: { providerId } });
+  expect(JSON.stringify(line)).not.toMatch(/hunter2|alice/);
+  expect(started).toBe(1); // no guide stored yet
 });
 
 test('a failure before the refresh starts is recorded and anchors the backoff', async () => {
