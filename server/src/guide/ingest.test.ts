@@ -405,7 +405,19 @@ describe('refreshGuide failures keep the current guide', () => {
     });
   });
 
-  test('a failed relink rolls the commit back and keeps the current one', async () => {
+  test('a failed commit after new links were written rolls them back and keeps the current one', async () => {
+    const before = await goodGuide();
+    // A manual pick makes the new links differ from the current ones.
+    db.prepare("INSERT INTO guide_maps (provider_id, item_remote_id, channel_key) VALUES (?, '1', 'other.uk')").run(providerId);
+    // Only the commit sets guide_state.generation: beginGeneration and recordFailure leave it alone.
+    db.exec("CREATE TEMP TRIGGER no_commit BEFORE UPDATE OF generation ON guide_state BEGIN SELECT RAISE(ABORT, 'commit exploded'); END");
+    await expect(refresh(await clientFor())).rejects.toThrow('commit exploded');
+    expectUnchanged(before);
+    expect(link('1')).toEqual({ key: 'hls.uk', method: 'id' });
+    expect(store.state(providerId)).toMatchObject({ failures: 1, lastError: 'commit exploded' });
+  });
+
+  test('a failed link write keeps the current one', async () => {
     const before = await goodGuide();
     db.exec("CREATE TEMP TRIGGER no_links BEFORE INSERT ON guide_links BEGIN SELECT RAISE(ABORT, 'links exploded'); END");
     await expect(refresh(await clientFor())).rejects.toThrow('links exploded');
