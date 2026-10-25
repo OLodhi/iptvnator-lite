@@ -54,6 +54,16 @@ const UPSTREAM_HEADERS_TIMEOUT_MS = 15_000;
 // Only what FFmpeg writes into a session dir: playlists, segments, WebVTT subtitle segments and the fMP4 init file.
 // Plain names only, so nothing can climb out of the dir (the session manager checks again).
 const SESSION_FILE = /^(?:[\w-]+\.(m3u8|ts|m4s|vtt)|init\.(mp4))$/;
+const START_AT_ZERO = '#EXT-X-START:TIME-OFFSET=0,PRECISE=YES';
+
+/** Puts EXT-X-START after #EXTM3U, unless the playlist has one. */
+function withStartAtZero(playlist: Buffer): Buffer {
+  const text = playlist.toString('utf8');
+  if (text.includes('#EXT-X-START')) return playlist;
+  const withStart = text.replace(/^#EXTM3U(\r?\n)?/, (_tag, eol: string | undefined) => `#EXTM3U${eol ?? '\n'}${START_AT_ZERO}${eol ?? '\n'}`);
+  return Buffer.from(withStart, 'utf8');
+}
+
 const FILE_TYPES: Record<string, string> = {
   m3u8: 'application/vnd.apple.mpegurl',
   ts: 'video/mp2t',
@@ -191,6 +201,8 @@ export const playbackRoutes = (deps: PlaybackRouteDeps): FastifyPluginAsync =>
         } catch {
           return notFound(reply);
         }
+        // A VOD player starts where the playlist says; without this some start at the end, as for live.
+        if (sessions.kindOf(id) !== 'live') playlist = withStartAtZero(playlist);
         return reply.type(FILE_TYPES[ext]!).header('cache-control', 'no-cache').send(playlist);
       }
       let handle: FileHandle;

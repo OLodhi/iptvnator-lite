@@ -7,6 +7,7 @@ export function stubSessions(overrides: Partial<SessionManager> = {}): SessionMa
     touch: () => false,
     release: async () => {},
     resolveFile: () => null,
+    kindOf: () => null,
     directSource: () => null,
     activeUpstreams: () => 0,
     reap: async () => {},

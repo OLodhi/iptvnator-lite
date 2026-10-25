@@ -695,6 +695,33 @@ describe('session manager', () => {
     });
   });
 
+  test('after a failed relay probe and a direct re-probe, FFmpeg still reads through the relay', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    const probe = vi.fn(async (_url: string, _userAgent: string, readFrom?: string) => {
+      if (readFrom) throw new Error('ffprobe failed with exit code 1');
+      return fresh(MKV_MOVIE);
+    });
+    h = harness({ relay, probe });
+    await h.m.start(movie(1, 'A'));
+    expect(h.events).toEqual(['relay:register', 'relay:unregister', 'relay:register', 'spawn:1']);
+    expect(argAfter(h.children[0]!.args, '-i')).toBe(RELAY_URL);
+  });
+
+  test('...unless the direct probe reports HLS', async () => {
+    let h!: ReturnType<typeof harness>;
+    const relay = stubRelay((event) => h.events.push(event));
+    const probe = vi.fn(async (_url: string, _userAgent: string, readFrom?: string) => {
+      if (readFrom) throw new Error('ffprobe failed with exit code 1');
+      return fresh({ ...MKV_MOVIE, formatName: 'hls' });
+    });
+    h = harness({ relay, probe });
+    const php = { ...movie(4, 'A'), sourceUrl: 'http://provider.test/movie/user/secret/4.php' };
+    await h.m.start(php);
+    expect(relay.register).toHaveBeenCalledTimes(1);
+    expect(argAfter(h.children[0]!.args, '-i')).toBe(php.sourceUrl);
+  });
+
   test('a probe through the relay that outlasts the start deadline releases the registration', async () => {
     let h!: ReturnType<typeof harness>;
     const relay = stubRelay((event) => h.events.push(event));

@@ -23,7 +23,7 @@ function has(args: string[], ...seq: string[]): void {
 
 const base = { url: 'http://h/live/u/p/1.m3u8', userAgent: 'TiviMate/4.7.0', live: true, startAtSec: 0, outDir: 'O', startNumber: 0 };
 
-test('copy plan for live writes a 300 s sliding window of ts segments', () => {
+test('copy plan for live writes a 10-minute sliding window of ts segments', () => {
   const a = buildFfmpegArgs({ ...base, plan: copyTs });
   expect(a.slice(0, 5)).toEqual(['-hide_banner', '-loglevel', 'warning', '-nostdin', '-fflags']);
   has(a, '-fflags', '+genpts+discardcorrupt');
@@ -38,7 +38,7 @@ test('copy plan for live writes a 300 s sliding window of ts segments', () => {
   has(a, '-f', 'hls');
   has(a, '-hls_time', '3');
   has(a, '-hls_init_time', '1');
-  has(a, '-hls_list_size', '100');
+  has(a, '-hls_list_size', '200');
   // omit_endlist (R31): an exiting FFmpeg must not mark the live playlist finished while it is relaunched.
   has(a, '-hls_flags', 'delete_segments+independent_segments+omit_endlist');
   has(a, '-hls_segment_type', 'mpegts');

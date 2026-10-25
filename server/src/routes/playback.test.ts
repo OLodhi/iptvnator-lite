@@ -318,6 +318,33 @@ describe('playback routes', () => {
     }
   });
 
+  describe('playlist start offset', () => {
+    const START = '#EXT-X-START:TIME-OFFSET=0,PRECISE=YES';
+    const servePlaylist = async (kind: 'live' | 'movie', body: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'tv-start-'));
+      writeFileSync(join(dir, 'index.m3u8'), body);
+      vi.spyOn(sessions, 'touch').mockReturnValue(true);
+      vi.spyOn(sessions, 'resolveFile').mockImplementation((_id, file) => join(dir, file));
+      vi.spyOn(sessions, 'kindOf').mockReturnValue(kind);
+      try {
+        return (await w.app.inject('/api/sessions/sess/A/index.m3u8')).body;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const vodList = '#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:3,\nseg_00000.ts\n#EXT-X-ENDLIST\n';
+
+    test('a VOD playlist carries EXT-X-START at 0', async () => {
+      expect(await servePlaylist('movie', vodList)).toBe(vodList.replace('#EXTM3U\n', `#EXTM3U\n${START}\n`));
+      const already = vodList.replace('#EXTM3U\n', '#EXTM3U\n#EXT-X-START:TIME-OFFSET=5\n');
+      expect(await servePlaylist('movie', already)).toBe(already); // not added twice
+    });
+
+    test('a live playlist does not', async () => {
+      expect(await servePlaylist('live', vodList)).toBe(vodList);
+    });
+  });
+
   test('session files are served with their HLS types, and nothing else is', async () => {
     const root = mkdtempSync(join(tmpdir(), 'tv-files-'));
     const dir = join(root, 'session');
@@ -1249,7 +1276,7 @@ function drain(res: IncomingMessage): Promise<number> {
 // A real provider streams a live channel endlessly, in real time. The paced fake does the same, so a long
 // viewing shows what the session's stall watchdog, restarts and segment cleanup do over time.
 describe.skipIf(!ffmpegPath || !ffprobePath)('sustained live playback against a paced provider', () => {
-  const LIVE_LIST_SIZE = 100; // -hls_list_size for live (server/src/playback/ffmpegArgs.ts)
+  const LIVE_LIST_SIZE = 200; // -hls_list_size for live (server/src/playback/ffmpegArgs.ts)
   const config = testConfig();
   const lines: string[] = [];
   const log = {

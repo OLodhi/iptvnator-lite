@@ -97,6 +97,8 @@ export interface SessionManager {
   touch(sessionId: string, clientId: string): boolean;
   release(sessionId: string, clientId: string): Promise<void>;
   resolveFile(sessionId: string, file: string): string | null;
+  /** What the session plays (a live playlist moves; the others have a fixed length), or null if it is gone. */
+  kindOf(sessionId: string): StartRequest['kind'] | null;
   directSource(sessionId: string): { url: string; userAgent: string } | null;
   activeUpstreams(providerId: number): number;
   reap(): Promise<void>;
@@ -608,6 +610,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (deps.relay && s.kind !== 'live' && !isHlsUrl(s.sourceUrl)) {
         s.relayed = deps.relay.register({ url: s.sourceUrl, userAgent: s.userAgent });
       }
+      const wasRelayed = s.relayed !== null;
       let probe = await probeSource(s, deadline.expired);
       if (s.state !== 'starting') throw stoppedError();
       if (req.fallbackSourceUrl && finitePlaylist(s, probe)) {
@@ -633,6 +636,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // HLS that only its content gave away: FFmpeg reads it from the provider, like any HLS input.
         if (s.inputFormat.includes('hls')) await letGoOfRelay(s);
         if (s.state !== 'starting') throw stoppedError();
+        // The relay probe failed and the provider was probed directly, but FFmpeg still reads a file: keep one
+        // provider connection (a seek would open a second) by putting the relay back in front of it.
+        if (wasRelayed && !s.relayed && deps.relay && !s.inputFormat.includes('hls')) {
+          s.relayed = deps.relay.register({ url: s.sourceUrl, userAgent: s.userAgent });
+        }
         s.plan = plan;
         s.outDir = join(deps.transcodeDir, s.id);
         mkdirSync(s.outDir, { recursive: true });
@@ -822,6 +830,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const s = sessions.get(sessionId);
       if (!s?.outDir || !PLAIN_FILE.test(file)) return null;
       return join(s.outDir, file);
+    },
+
+    kindOf(sessionId) {
+      return sessions.get(sessionId)?.kind ?? null;
     },
 
     directSource(sessionId) {

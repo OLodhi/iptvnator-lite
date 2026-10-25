@@ -15,7 +15,7 @@ export type FfmpegInput = {
 
 const SEGMENT_SECONDS = 3;
 // 100 segments x 3 s = the 300 s rewind window for live.
-const LIVE_LIST_SIZE = 100;
+const LIVE_LIST_SIZE = 200;
 
 /**
  * With a subtitle rendition FFmpeg writes a master playlist naming one variant (stream_%v.m3u8, %v = 0) and its
