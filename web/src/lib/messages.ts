@@ -10,9 +10,8 @@ export function messageFor(err: Pick<ApiClientError, 'code' | 'details'>): strin
       return 'That address answered, but not like an IPTV provider.';
     case 'PROVIDER_CONNECTION_LIMIT': {
       const limit = (err.details as { limit?: unknown } | undefined)?.limit;
-      return typeof limit === 'number'
-        ? `Your provider allows ${limit} ${limit === 1 ? 'stream' : 'streams'} at a time, and it’s in use.`
-        : 'Your provider allows only a limited number of streams at a time, and it’s in use.';
+      const allows = typeof limit === 'number' ? `${limit} ${limit === 1 ? 'stream' : 'streams'}` : 'only a limited number of streams';
+      return `Your provider allows ${allows} at a time. Something is already playing on another device.`;
     }
     case 'STREAM_START_TIMEOUT':
     case 'UPSTREAM_ERROR':

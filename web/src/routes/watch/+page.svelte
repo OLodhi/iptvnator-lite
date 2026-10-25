@@ -6,27 +6,50 @@
   import type { PlayResponse } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { getClientId } from '$lib/clientId';
-  import { formatClock } from '$lib/guide/time';
+  import PlayerControls from '$lib/components/player/PlayerControls.svelte';
+  import PlayerStates, { type PlayerView } from '$lib/components/watch/PlayerStates.svelte';
+  import WatchActions, { type WatchAction } from '$lib/components/watch/WatchActions.svelte';
+  import WatchInfo from '$lib/components/watch/WatchInfo.svelte';
+  import { positions, reportPosition } from '$lib/me';
   import { messageFor } from '$lib/messages';
   import { attachStream } from '$lib/player/attach';
-  import { positions, reportPosition } from '$lib/me';
-  import { createPlayback } from '$lib/player/playback';
-  import { pickResume } from '$lib/resume';
+  import { createOrientation } from '$lib/player/orientation.svelte.ts';
+  import { createPlayback, type StartParams } from '$lib/player/playback';
   import { createProgressReporter } from '$lib/player/progress';
+  import { createPlayerState, type PlayerState } from '$lib/player/state.svelte.ts';
+  import { canAirPlay, canPip, showAirPlay, togglePip } from '$lib/player/system';
+  import { pickResume } from '$lib/resume';
   import { releaseSession, startHeartbeat } from '$lib/session';
   import { createOnNow } from '$lib/watch/onNow.svelte.ts';
-  import { parseWatchParams } from '$lib/watch/params';
+  import { parseWatchParams, type WatchParams } from '$lib/watch/params';
+
+  type Kind = StartParams['kind'];
 
   let video = $state<HTMLVideoElement>();
-  let error = $state('');
-  let stopped = $state(false);
-  let resumeAt = $state<number | null>(null); // set while the Resume / Start over prompt is showing
-  let begun = 0; // bumped on every begin(), so a late positions() answer for an old URL is ignored
+  let player = $state<PlayerState>();
+  /** What covers the video; null while it plays. */
+  let view = $state<PlayerView | null>({ kind: 'starting' });
+  /** The probed length of the movie, episode or catch-up programme: the element's own duration grows while remuxing. */
+  let durationSec = $state<number | null>(null);
+  let manualFullscreen = $state(false);
+  let moreOpen = $state(false);
+  let begun = 0; // bumped on every begin(), so a late answer for an old URL is ignored
 
   const params = $derived(parseWatchParams(page.url));
-  const catchup = $derived(params.catchup);
-  const onNow = createOnNow(); // only for the On now line and From start
-  const item = $derived(onNow.item);
+  const onNow = createOnNow();
+  const orientation = createOrientation();
+  // Sideways, or after ⤢: the video fills the screen. The same <video> stays, so playback carries on.
+  const fullscreen = $derived(orientation.landscape || manualFullscreen);
+
+  /** Catch-up and episodes say what they are; a plain item is a channel or a movie, which only the item knows. */
+  function kindNow(p: WatchParams): Kind | null {
+    if (p.catchup) return 'catchup';
+    if (p.episode) return 'episode';
+    const it = onNow.item;
+    return it && it.id === p.itemId ? (it.kind === 'live' ? 'live' : 'movie') : null;
+  }
+  const kind = $derived(kindNow(params));
+  const name = $derived(onNow.item?.displayName ?? '');
 
   const reporter = createProgressReporter({ report: reportPosition, now: Date.now });
 
@@ -36,72 +59,91 @@
     startHeartbeat: (sessionId, clientId, opts) => startHeartbeat(sessionId, clientId, opts),
     attachStream: (v, url, opts) => attachStream(v, url, { Hls, ...opts }),
     clientId: getClientId,
-    onStarted: ({ offsetSec, durationSec }) => {
+    onStarted: ({ offsetSec, durationSec: total }) => {
+      durationSec = total;
+      const started = playback.current();
+      if (!video || !started) return;
+      autoplay(video);
       // Live has nothing to resume; catch-up has a duration but is never progress-tracked.
-      if (!video || durationSec === null || catchup) return;
-      reporter.attach(video, {
-        itemId: params.itemId,
-        episodeRemoteId: params.episode ?? undefined,
-        offsetSec,
-        durationSec
-      });
+      if (total === null || started.params.catchup) return;
+      const { itemId, episodeRemoteId } = started.params;
+      reporter.attach(video, { itemId, episodeRemoteId, offsetSec, durationSec: total });
     },
     onStopping: () => {
       void reporter.flush();
       reporter.detach();
     },
     onGone: () => {
-      stopped = true;
+      view = { kind: 'stopped' };
     },
     onError: (err) => {
-      if (!(err instanceof ApiClientError)) error = 'Something went wrong. Please try again.';
+      let message = 'Something went wrong. Please try again.';
       // The server says why a catch-up window was refused: no catch-up on this channel, too old, and so on.
-      else error = err.code === 'VALIDATION' && catchup ? err.message : messageFor(err);
-    }
+      if (err instanceof ApiClientError) message = err.code === 'VALIDATION' && params.catchup ? err.message : messageFor(err);
+      view = { kind: 'failed', message };
+    },
   });
 
-  function mmss(sec: number): string {
-    const s = Math.floor(sec);
-    const h = Math.floor(s / 3600);
-    const mm = String(Math.floor((s % 3600) / 60)).padStart(h ? 2 : 1, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+  // Positions are absolute. A restart has no offset until its new session is attached, and by then the old source is
+  // gone (currentTime 0), so meanwhile the position shown is where the restart is headed.
+  const offsetSec = () => playback.current()?.offsetSec ?? (video ? playback.absoluteSec(video) : 0);
+
+  $effect(() => {
+    if (!video) return;
+    const state = createPlayerState(video, offsetSec);
+    player = state;
+    return () => state.destroy();
+  });
+
+  const caps = $derived(video ? { pip: canPip(video), airplay: canAirPlay() } : { pip: false, airplay: false });
+
+  /** Plays the new stream. A browser that won't start it without a tap gets Tap to play. */
+  function autoplay(v: HTMLVideoElement) {
+    v.play().catch((err: unknown) => {
+      const refused = (err as { name?: string } | null)?.name === 'NotAllowedError';
+      if (refused && v.paused && (view === null || view.kind === 'starting')) view = { kind: 'tapToPlay' };
+    });
   }
 
   function start(startAtSec: number) {
-    resumeAt = null;
     if (!video) return;
-    error = '';
-    stopped = false;
-    const episodeRemoteId = params.episode ?? undefined;
-    const window = catchup ? { startSec: catchup.startSec, stopSec: catchup.stopSec } : undefined;
-    // The item may still be loading: a plain ?item= then counts as a movie (for live, hls.js just starts at the new session's first segment).
-    const kind = window ? 'catchup' : episodeRemoteId ? 'episode' : item?.kind === 'live' ? 'live' : 'movie';
-    void playback.start(
-      { kind, itemId: params.itemId, episodeRemoteId, startAtSec: window ? 0 : startAtSec, catchup: window },
-      video
-    );
+    view = { kind: 'starting' };
+    const p = params;
+    const mine = begun;
+    const play = (k: Kind) => {
+      if (mine !== begun || !video) return;
+      const catchup = p.catchup ? { startSec: p.catchup.startSec, stopSec: p.catchup.stopSec } : undefined;
+      void playback.start({ kind: k, itemId: p.itemId, episodeRemoteId: p.episode ?? undefined, startAtSec, catchup }, video);
+    };
+    const known = kindNow(p);
+    if (known) return play(known);
+    // An item that can't be fetched still plays, as a movie: its seeks restart the session, which a channel ignores.
+    void onNow.load(p.itemId).then((it) => play(it?.kind === 'live' ? 'live' : 'movie'));
   }
 
+  /** Tap to restart: a movie, episode or catch-up programme carries on from where it was. */
   function restart() {
-    start(playback.isVod() && video && !catchup ? playback.absoluteSec(video) : 0);
+    start(playback.isVod() && video ? playback.absoluteSec(video) : 0);
   }
 
   /** Starts playback for the current URL: catch-up, an explicit time, the resume prompt, or from the top. */
   function begin() {
     const mine = ++begun;
     if (!video) return;
-    if (catchup) return start(0);
-    if (params.t) return start(params.t);
-    const episode = params.episode;
-    positions(params.itemId).then(
+    const p = params;
+    durationSec = null;
+    void onNow.load(p.itemId);
+    if (p.catchup) return start(0);
+    if (p.t) return start(p.t);
+    view = { kind: 'starting' };
+    positions(p.itemId).then(
       (saved) => {
         if (mine !== begun) return;
-        const best = pickResume(saved, episode);
-        if (best) resumeAt = best.positionSec;
+        const best = pickResume(saved, p.episode);
+        if (best) view = { kind: 'resume', atSec: best.positionSec };
         else start(0);
       },
-      () => mine === begun && start(0) // no saved position available: just play
+      () => mine === begun && start(0), // no saved position available: just play
     );
   }
 
@@ -111,14 +153,8 @@
     untrack(begin);
   });
 
-  const itemId = $derived(params.itemId);
-  $effect(() => {
-    const id = itemId;
-    untrack(() => void onNow.load(id));
-  });
-
   async function fromStart() {
-    const id = item?.id;
+    const id = onNow.item?.id;
     let now = onNow.onNow;
     // The programme ended before the page noticed: start the one on now instead, if any.
     if (now && now.stopSec * 1000 <= Date.now()) {
@@ -129,6 +165,77 @@
     void goto(`/watch?item=${id}&from=${now.startSec}&to=${now.stopSec}&title=${encodeURIComponent(now.title)}`);
   }
 
+  function back() {
+    history.back();
+  }
+
+  function togglePlay() {
+    if (!video) return;
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  }
+
+  function skip(delta: number) {
+    if (video) void playback.seekTo(video, playback.absoluteSec(video) + delta);
+  }
+
+  function seek(sec: number) {
+    if (video) void playback.seekTo(video, sec);
+  }
+
+  function goLive() {
+    if (video && player?.window) void playback.seekTo(video, player.window.endSec);
+  }
+
+  function toggleMute() {
+    if (video) video.muted = !video.muted;
+  }
+
+  function toggleFullscreen() {
+    manualFullscreen = !fullscreen;
+  }
+
+  function pip() {
+    if (video) void togglePip(video);
+  }
+
+  function airplay() {
+    if (video) showAirPlay(video);
+  }
+
+  function tapToPlay() {
+    if (video) video.play().catch(() => {});
+  }
+
+  function resume() {
+    if (view?.kind === 'resume') start(view.atSec);
+  }
+
+  /** Playing: whatever covered the start, a recovered error or Tap to play goes. */
+  function onPlaying() {
+    if (view && (view.kind === 'starting' || view.kind === 'error' || view.kind === 'tapToPlay')) view = null;
+  }
+
+  function onPlay() {
+    if (view?.kind === 'tapToPlay') view = null;
+  }
+
+  /** A stream the element can't play. One that dies with a stopped or refused session has nothing new to say. */
+  function onVideoError() {
+    if (view === null || view.kind === 'starting' || view.kind === 'tapToPlay') view = { kind: 'error' };
+  }
+
+  const actions = $derived.by(() => {
+    const list: WatchAction[] = [];
+    if (kind === 'live' && onNow.onNow && (onNow.item?.catchupDays ?? 0) > 0) {
+      list.push({ key: 'from-start', icon: '↺', label: 'From start', run: fromStart });
+    }
+    if (caps.pip) list.push({ key: 'pip', icon: '⧉', label: 'Picture in picture', run: pip });
+    if (caps.airplay) list.push({ key: 'airplay', icon: '⎚', label: 'AirPlay', run: airplay });
+    list.push({ key: 'fullscreen', icon: '⤢', label: 'Full screen', run: toggleFullscreen });
+    return list;
+  });
+
   beforeNavigate((nav) => {
     // A same-route navigation restarts playback itself; tearing down here would strand the video if it fails or is cancelled.
     if (nav.to?.url.pathname === '/watch') return;
@@ -137,50 +244,104 @@
   onDestroy(() => {
     playback.teardown();
     onNow.destroy();
+    orientation.destroy();
   });
 </script>
 
 <svelte:window onpagehide={playback.teardown} />
 
-<p><button class="stopped" onclick={() => history.back()}>‹ Back</button></p>
+<div class="watch" class:fullscreen>
+  <header class="topbar">
+    <button type="button" class="back" onclick={back}>‹ Back</button>
+  </header>
 
-{#if error}
-  <p class="error" role="alert">{error}</p>
-{/if}
-
-{#if resumeAt !== null}
-  <p class="resume">
-    <button class="stopped" onclick={() => start(resumeAt ?? 0)}>Resume from {mmss(resumeAt)}</button>
-    <button class="stopped" onclick={() => start(0)}>Start over</button>
-  </p>
-{/if}
-
-{#if catchup}
-  <p class="onnow">
-    {['↺ Catch-up', catchup.title, `${formatClock(catchup.startSec)}–${formatClock(catchup.stopSec)}`].filter(Boolean).join(' · ')}
-  </p>
-{:else if onNow.onNow}
-  <p class="onnow">
-    On now: {onNow.onNow.title} · until {formatClock(onNow.onNow.stopSec)}
-    {#if (item?.catchupDays ?? 0) > 0}
-      <button class="stopped" onclick={fromStart}>↺ From start</button>
+  <div class="player" class:blocked={view !== null}>
+    <video bind:this={video} playsinline autoplay onplay={onPlay} onplaying={onPlaying} onerror={onVideoError}></video>
+    {#if player}
+      <!-- Catch-up positions count from the programme's start, so its bar is the VOD one. -->
+      <PlayerControls
+        state={player}
+        mode={kind === 'live' ? 'live' : 'vod'}
+        title={name}
+        subtitle={kind === 'catchup' ? params.catchup?.title || undefined : kind === 'live' ? onNow.onNow?.title : undefined}
+        {fullscreen}
+        {caps}
+        tracks={{ audio: false, subtitles: false }}
+        {durationSec}
+        holding={moreOpen || view !== null}
+        onTogglePlay={togglePlay}
+        onSkip={skip}
+        onSeek={seek}
+        onGoLive={kind === 'live' ? goLive : undefined}
+        onPip={pip}
+        onAirPlay={airplay}
+        onToggleMute={toggleMute}
+        onFullscreen={toggleFullscreen}
+        onTracks={() => {}}
+        onBack={back}
+      />
     {/if}
-  </p>
-{/if}
+    {#if view}
+      <PlayerStates
+        {view}
+        {name}
+        artwork={onNow.item?.logoUrl ?? null}
+        poster={kind === 'movie' || kind === 'episode'}
+        onResume={resume}
+        onStartOver={() => start(0)}
+        onRestart={restart}
+        onPlay={tapToPlay}
+      />
+    {/if}
+  </div>
 
-<video bind:this={video} playsinline controls autoplay></video>
-
-{#if stopped}
-  <button class="stopped" onclick={restart}>Playback stopped. Tap to restart.</button>
-{/if}
+  <WatchInfo {kind} item={onNow.item} onNow={onNow.onNow} catchup={params.catchup} />
+  <WatchActions {actions} bind:moreOpen />
+</div>
 
 <style>
-  .onnow {
-    margin: 8px 0;
-    overflow-wrap: anywhere;
+  .topbar {
+    display: flex;
+    align-items: center;
+    padding: 2px 8px 4px;
   }
-  /* The button sits on its own full-width row under the line, so it never wraps at 320px. */
-  .onnow button {
+  .back {
     min-height: 44px;
+    padding: 0 8px;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .player {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: #000;
+  }
+  video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
+  /* Whatever covers the video replaces the play and scrub controls; the top row (Back, mute) stays. */
+  .player.blocked :global(.controls .center),
+  .player.blocked :global(.controls .bottom) {
+    visibility: hidden;
+  }
+  /* Sideways: video only. Sheets sit above it, so one left open stays usable. */
+  .watch.fullscreen {
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .fullscreen .player {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    aspect-ratio: auto;
   }
 </style>

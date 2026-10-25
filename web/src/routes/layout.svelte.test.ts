@@ -8,6 +8,7 @@ import Layout from './+layout.svelte';
 
 let app: ReturnType<typeof mount> | undefined;
 afterEach(() => {
+  route.url = new URL('http://localhost/browse/live/4');
   if (app) unmount(app);
   app = undefined;
   document.body.innerHTML = '';
@@ -25,4 +26,12 @@ test('the tab bar has five tabs: Live, Movies, Series, Search, Settings', () => 
     ['Settings', '/settings'],
   ]);
   expect(tabs.filter((a) => a.getAttribute('aria-current') === 'page').map((a) => a.textContent)).toEqual(['Live']);
+});
+
+test('no tab bar on /watch', () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  const children = createRawSnippet(() => ({ render: () => '<p>page</p>' }));
+  app = mount(Layout, { target: document.body, props: { children } });
+  expect(document.querySelector('.tabbar')).toBeNull();
+  expect(document.querySelector('main')?.textContent).toBe('page');
 });

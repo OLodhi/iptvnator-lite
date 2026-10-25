@@ -11,14 +11,25 @@
     { href: '/search', label: 'Search' },
     { href: '/settings', label: 'Settings' }
   ];
+
+  // The watch page has its own Back, and fills the screen when held sideways.
+  const watching = $derived(page.url.pathname.startsWith('/watch'));
 </script>
 
-<main>
+<main class:watching>
   {@render children()}
 </main>
 
-<nav class="tabbar" aria-label="Sections">
-  {#each tabs as tab}
-    <a href={tab.href} aria-current={page.url.pathname.startsWith(tab.href) ? 'page' : undefined}>{tab.label}</a>
-  {/each}
-</nav>
+{#if !watching}
+  <nav class="tabbar" aria-label="Sections">
+    {#each tabs as tab}
+      <a href={tab.href} aria-current={page.url.pathname.startsWith(tab.href) ? 'page' : undefined}>{tab.label}</a>
+    {/each}
+  </nav>
+{/if}
+
+<style>
+  main.watching {
+    padding: 0 0 env(safe-area-inset-bottom);
+  }
+</style>

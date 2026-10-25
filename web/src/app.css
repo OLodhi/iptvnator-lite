@@ -171,27 +171,6 @@ input {
   color: var(--accent);
 }
 
-video {
-  display: block;
-  width: 100%;
-  max-height: 70vh;
-  background: #000;
-  border-radius: 12px;
-}
-
-.stopped {
-  display: block;
-  width: 100%;
-  margin: 12px 0;
-  min-height: var(--row-height);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
-}
-
 /* Long-pressable rows: no iOS callout or text selection. */
 .pressable {
   -webkit-touch-callout: none;
