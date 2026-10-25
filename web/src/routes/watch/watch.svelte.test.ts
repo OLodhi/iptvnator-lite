@@ -1623,6 +1623,38 @@ test('episode list highlights the playing episode', async () => {
   expect(me.favourite).toHaveBeenCalledWith(11);
 });
 
+const pilotAt20: SavedPosition = { episodeRemoteId: '111', positionSec: 1200, durationSec: 1980, finished: false, manual: false, updatedAt: 2 };
+
+test('switching to a part-watched episode releases the playing one before Resume shows', async () => {
+  const destroy = vi.fn();
+  attachStream.mockImplementationOnce(() => ({ destroy, showSubtitles: () => {} }));
+  await watchingNext();
+  me.positions.mockResolvedValueOnce([pilotAt20]);
+  go('http://localhost/watch?item=11&episode=111');
+  await vi.waitFor(() => expect(buttonWith('Resume from 20:00')).toBeDefined());
+  // Nothing plays under the prompt, and the provider's one stream is free again.
+  expect(destroy).toHaveBeenCalledTimes(1);
+  expect(released.mock.calls).toEqual([['e1', 'cid']]);
+  expect(heartbeats.map((b) => b.stopped)).toEqual([true]);
+  expect(playCalls()).toHaveLength(1);
+
+  buttonWith('Resume from 20:00')!.click();
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(bodyOf(playCalls()[1]!)).toMatchObject({ episodeRemoteId: '111', startAtSec: 1200 });
+});
+
+test('a session lost under the Resume prompt leaves the prompt as it is', async () => {
+  await watchingNext();
+  const gone = heartbeats[0]!.onGone;
+  me.positions.mockResolvedValueOnce([pilotAt20]);
+  go('http://localhost/watch?item=11&episode=111');
+  await vi.waitFor(() => expect(buttonWith('Resume from 20:00')).toBeDefined());
+  gone();
+  flushSync();
+  expect(buttonWith('Resume from 20:00')).toBeDefined();
+  expect(buttonWith('Tap to restart')).toBeUndefined();
+});
+
 test('Up next plays the next episode after 5 s', async () => {
   fakeTimeouts();
   await watchingNext();

@@ -123,7 +123,8 @@
       restarting = true;
     },
     onGone: () => {
-      view = { kind: 'stopped' };
+      // The Resume choice is for the title switched to: whatever played before it has nothing to restart.
+      if (view?.kind !== 'resume') view = { kind: 'stopped' };
     },
     onError: (err) => {
       let message = 'Something went wrong. Please try again.';
@@ -308,8 +309,11 @@
         if (mine !== begun) return;
         saved = { itemId: p.itemId, list };
         const best = pickResume(list, p.episode);
-        if (best) view = { kind: 'resume', atSec: best.positionSec };
-        else start(0);
+        if (!best) return start(0);
+        // Whatever played before (another episode, from the rows or Up next) stops now, its place saved, rather than
+        // playing on under the choice and holding the provider's stream.
+        playback.teardown();
+        view = { kind: 'resume', atSec: best.positionSec };
       },
       () => mine === begun && start(0), // no saved position available: just play
     );
