@@ -183,6 +183,39 @@ test('a failed after-sync relink is logged redacted, and the first refresh still
   expect(started).toBe(1); // no guide stored yet
 });
 
+test('a sync that finishes while the first refresh runs queues no second refresh', async () => {
+  const slow = {
+    ...providers,
+    clientFor: (id: number) => {
+      const client = providers.clientFor(id);
+      return {
+        ...client,
+        xmltv: async (opts?: Parameters<typeof client.xmltv>[0]) => {
+          xmltvCalls++;
+          await new Promise((res) => setTimeout(res, 200));
+          return client.xmltv(opts);
+        },
+      };
+    },
+  } as ProviderService;
+  const r = makeRunner({ providers: slow });
+  let relinked = false;
+  const watched: GuideRunner = {
+    ...r,
+    relink: async (id) => {
+      await r.relink(id);
+      relinked = true;
+    },
+  };
+  r.start(providerId);
+  afterSync(watched, store, log)(providerId);
+  await until(() => relinked);
+  expect(r.running(providerId)).toBe(true); // the first refresh is still going, and no guide is stored yet
+  await settled(r);
+  expect(xmltvCalls).toBe(1);
+  expect(r.status(providerId)).toMatchObject({ state: 'idle', source: 'xmltv' });
+});
+
 test('a failure before the refresh starts is recorded and anchors the backoff', async () => {
   let attempts = 0;
   const broken = {

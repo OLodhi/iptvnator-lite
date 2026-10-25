@@ -129,7 +129,8 @@ export function createGuideRunner(deps: {
 
 /**
  * What a catalogue sync calls when it finishes: re-match from the stored guide, in steps so a large catalogue never
- * blocks the event loop, then fetch a guide if there is none. It runs in the background; a failure is logged.
+ * blocks the event loop, then fetch a guide if there is none and none is being fetched. It runs in the background;
+ * a failure is logged.
  */
 export function afterSync(guide: GuideRunner, store: GuideStore, log: Log = silentLog): (providerId: number) => void {
   return (providerId) => {
@@ -137,7 +138,8 @@ export function afterSync(guide: GuideRunner, store: GuideStore, log: Log = sile
       try {
         await guide.relink(providerId);
       } finally {
-        if (store.state(providerId)?.fetchedAt == null) guide.start(providerId);
+        // start() would queue a second full refresh behind the first one.
+        if (store.state(providerId)?.fetchedAt == null && !guide.running(providerId)) guide.start(providerId);
       }
     };
     run().catch((err: unknown) => log.warn({ providerId, error: errorText(err) }, 'guide relink after sync failed'));
