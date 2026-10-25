@@ -20,7 +20,7 @@ export function whatsOn(
 }
 
 export function grid(
-  p: { filter: string; from: number; to: number; cursor?: string | null },
+  p: { filter: string; from: number; to: number; cursor?: string | null; limit?: number },
   signal?: AbortSignal,
 ): Promise<Page<GridRow>> {
   return api<Page<GridRow>>(`/api/guide/grid${query(p)}`, signal ? { signal } : undefined);

@@ -1,7 +1,7 @@
 import { createSubscriber } from 'svelte/reactivity';
 
 export type Segment = 'earlier' | 'now' | 'tonight' | 'tomorrow';
-export type SegmentQuery = { mode: 'now' } | { mode: 'range' | 'past'; from: number; to: number };
+export type SegmentQuery = { mode: 'range' | 'past'; from: number; to: number };
 
 const deviceZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 const HOUR = 3600;
@@ -36,10 +36,9 @@ function addDays(y: number, m: number, d: number, days: number) {
   return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
 }
 
-/** The guide query for a segment; the broadcast day starts at 06:00 local. null = nothing to show. */
-export function segmentQuery(segment: Segment, nowMs: number, tz: string = deviceZone()): SegmentQuery | null {
+/** The programme query for a segment (Now lists the channels instead); the broadcast day starts at 06:00 local. null = nothing to show. */
+export function segmentQuery(segment: Exclude<Segment, 'now'>, nowMs: number, tz: string = deviceZone()): SegmentQuery | null {
   const now = Math.floor(nowMs / 1000);
-  if (segment === 'now') return { mode: 'now' };
   if (segment === 'earlier') return { mode: 'past', from: now - 24 * HOUR, to: now };
   const base = wallParts(now - 6 * HOUR, tz);
   const at = (days: number, h: number) => {

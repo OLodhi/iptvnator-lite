@@ -34,7 +34,6 @@ test('tonight is empty between 02:00 and 06:00', () => {
 test('earlier is the last 24 hours in past mode', () => {
   const now = ms('2026-10-24T10:00:00Z');
   expect(segmentQuery('earlier', now, tz)).toEqual({ mode: 'past', from: now / 1000 - 86400, to: now / 1000 });
-  expect(segmentQuery('now', now, tz)).toEqual({ mode: 'now' });
 });
 
 test('zonedEpochSec is deterministic around the clock changes', () => {

@@ -1,11 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { CatalogItem, Page, WhatsOnEntry } from '@tv/shared';
+  import type { CatalogItem, WhatsOnEntry } from '@tv/shared';
   import { ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { whatsOn } from '$lib/guide';
   import { formatClock, progress, segmentQuery, sharedClock, type Segment, type SegmentQuery } from '$lib/guide/time';
   import VirtualList from '$lib/components/VirtualList.svelte';
+  import NowList from './NowList.svelte';
   import WhatsOnRow from './WhatsOnRow.svelte';
 
   type Props = {
@@ -26,9 +27,6 @@
     { key: 'tomorrow', label: 'Tomorrow' },
   ];
   const clock = sharedClock();
-  // The route's default page size, and its largest.
-  const PAGE = 50;
-  const MAX_PAGE = 200;
 
   let segment = $state<Segment>('now');
   let entries = $state<WhatsOnEntry[]>([]);
@@ -38,7 +36,6 @@
   let noWindow = $state(false);
   let query: SegmentQuery | null = null;
   let seq = 0;
-  let refreshing = false; // a quiet refresh is in flight; paging waits for its swap
   let controller: AbortController | undefined;
 
   async function load(mine: number, cursor: string | null) {
@@ -57,56 +54,22 @@
     }
   }
 
-  // Re-fetches as many rows as are loaded, from the start, then swaps them in at once: the list never
-  // shrinks, so a scrolled reader stays put. A failure keeps the current rows.
-  async function refresh(mine: number) {
-    if (!query) return;
-    const params = { filter, ...query };
-    const want = entries.length;
-    const items: WhatsOnEntry[] = [];
-    let cursor: string | null = null;
-    refreshing = true;
-    try {
-      do {
-        const limit = Math.min(MAX_PAGE, Math.max(PAGE, want - items.length));
-        const page: Page<WhatsOnEntry> = await whatsOn({ ...params, cursor, limit }, controller?.signal);
-        if (mine !== seq) return;
-        items.push(...page.items);
-        cursor = page.nextCursor;
-      } while (cursor && items.length < want);
-      entries = items;
-      nextCursor = cursor;
-      error = '';
-    } catch {
-      // Quiet: the rows on screen stay.
-    } finally {
-      if (mine === seq) {
-        refreshing = false;
-        loading = false;
-      }
-    }
-  }
-
-  // A full reload starts the list again from page 1; a quiet one refreshes the loaded rows in place.
-  function reload(quiet: boolean) {
+  // Starts the segment's programmes again from page 1. Now is the channel list, which loads its own.
+  function reload() {
     const mine = ++seq;
-    refreshing = false;
     controller?.abort();
     controller = new AbortController();
-    if (!quiet) {
-      entries = [];
-      nextCursor = null;
-    }
+    entries = [];
+    nextCursor = null;
+    if (segment === 'now') return;
     query = segmentQuery(segment, clock.nowMs, tz);
     noWindow = query === null;
     if (noWindow) {
-      entries = [];
-      nextCursor = null;
       loading = false;
       error = '';
       return;
     }
-    void (quiet ? refresh(mine) : load(mine, null));
+    void load(mine, null);
   }
 
   // A new segment, filter or zone starts a fresh list; responses for the old one are discarded by the token.
@@ -114,39 +77,21 @@
     void segment;
     void filter;
     void tz;
-    untrack(() => reload(false));
+    untrack(reload);
     return () => {
       seq++;
       controller?.abort();
     };
   });
 
-  // The Now list goes stale: refresh it every minute while the app is on screen, and when it comes back to the foreground.
-  $effect(() => {
-    if (segment !== 'now') return;
-    const timer = setInterval(() => {
-      if (document.visibilityState !== 'hidden') reload(true);
-    }, 60_000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') reload(true);
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
-  });
-
   function more() {
-    if (!nextCursor || loading || refreshing) return;
+    if (!nextCursor || loading) return;
     void load(seq, nextCursor);
   }
 
   // Until the page knows its category's name, the texts go without it.
   const where = $derived(label ? ` in ${label}` : '');
-  const emptyText = $derived(
-    segment === 'tonight' || segment === 'tomorrow' ? `Nothing on${where} ${segment === 'tonight' ? 'tonight' : 'tomorrow'}` : segment === 'earlier' ? `Nothing earlier${where}` : `Nothing on${where} right now`,
-  );
+  const emptyText = $derived(segment === 'earlier' ? `Nothing earlier${where}` : `Nothing on${where} ${segment === 'tonight' ? 'tonight' : 'tomorrow'}`);
 
   const hrefFor = (e: WhatsOnEntry): string | null =>
     e.live
@@ -162,29 +107,33 @@
   {/each}
 </div>
 
-{#if error}
-  <p class="error" role="alert">{error} <button type="button" class="retry" onclick={() => reload(false)}>Retry</button></p>
-{/if}
+{#if segment === 'now'}
+  <NowList {filter} {label} {onLongPress} {tz} />
+{:else}
+  {#if error}
+    <p class="error" role="alert">{error} <button type="button" class="retry" onclick={reload}>Retry</button></p>
+  {/if}
 
-{#if noWindow}
-  <p class="empty">Nothing more tonight</p>
-{:else if !loading && !error && entries.length === 0}
-  <p class="empty">{emptyText}</p>
-{/if}
+  {#if noWindow}
+    <p class="empty">Nothing more tonight</p>
+  {:else if !loading && !error && entries.length === 0}
+    <p class="empty">{emptyText}</p>
+  {/if}
 
-<VirtualList items={entries} rowHeight={68} onEnd={more}>
-  {#snippet row(e: WhatsOnEntry)}
-    <WhatsOnRow
-      item={e.item}
-      href={hrefFor(e)}
-      title={e.programme.title}
-      sub={`${e.item.displayName} · ${e.live ? `until ${formatClock(e.programme.stopSec, tz)}` : `${formatClock(e.programme.startSec, tz)}–${formatClock(e.programme.stopSec, tz)}`}`}
-      progress={e.live ? progress(e.programme.startSec, e.programme.stopSec, clock.nowMs) : null}
-      action={e.live ? 'play' : e.catchup ? 'catchup' : null}
-      {onLongPress}
-    />
-  {/snippet}
-</VirtualList>
+  <VirtualList items={entries} rowHeight={68} onEnd={more}>
+    {#snippet row(e: WhatsOnEntry)}
+      <WhatsOnRow
+        item={e.item}
+        href={hrefFor(e)}
+        title={e.programme.title}
+        sub={`${e.item.displayName} · ${e.live ? `until ${formatClock(e.programme.stopSec, tz)}` : `${formatClock(e.programme.startSec, tz)}–${formatClock(e.programme.stopSec, tz)}`}`}
+        progress={e.live ? progress(e.programme.startSec, e.programme.stopSec, clock.nowMs) : null}
+        action={e.live ? 'play' : e.catchup ? 'catchup' : null}
+        {onLongPress}
+      />
+    {/snippet}
+  </VirtualList>
+{/if}
 
 <style>
   .segments {

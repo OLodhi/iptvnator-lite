@@ -125,6 +125,9 @@ const viewButtons = () => [...document.querySelectorAll<HTMLButtonElement>('.vie
 const viewButton = (name: string) => viewButtons().find((b) => b.textContent?.trim() === name)!;
 const segmentButtons = () => [...document.querySelectorAll<HTMLButtonElement>('.segments button')];
 const pressed = (buttons: HTMLButtonElement[]) => buttons.filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent?.trim());
+const texts = (selector: string) => [...document.querySelectorAll(selector)].map((e) => e.textContent?.trim());
+/** What's on's Now list asks the grid route about the coming minute; the grid asks about hours. */
+const nowListCalls = () => guide.grid.mock.calls.filter(([p]) => p.to - p.from === 60);
 
 test('movies and series still list posters, not the guide', async () => {
   for (const kind of ['movie', 'series']) {
@@ -217,9 +220,13 @@ test("a live category offers What's on and Grid: Grid first, and What's on lists
   expect(pressed(viewButtons())).toEqual(["What's on"]);
   expect(segmentButtons().map((b) => b.textContent?.trim())).toEqual(['Earlier', 'Now', 'Tonight', 'Tomorrow']);
   expect(pressed(segmentButtons())).toEqual(['Now']);
-  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(1));
-  expect(guide.whatsOn.mock.calls[0]![0]).toMatchObject({ filter: 'category:4', mode: 'now' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on in Action right now'));
+  await vi.waitFor(() => expect(nowListCalls()).toHaveLength(1));
+  expect(nowListCalls()[0]![0]).toMatchObject({ filter: 'category:4', cursor: null });
+  // Every channel, each with what's on now underneath; a tap watches it live.
+  await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 1', 'Ch 2']));
+  expect(texts('.entry .sub')).toEqual(['No guide information', 'No guide information']);
+  expect([...document.querySelectorAll('a.entry')].map((a) => a.getAttribute('href'))).toEqual(['/watch?item=1', '/watch?item=2']);
+  expect(guide.whatsOn).not.toHaveBeenCalled();
   viewButton('Grid').click();
   flushSync();
   expect(guideGrid()).not.toBeNull();
@@ -229,11 +236,14 @@ test("a live category offers What's on and Grid: Grid first, and What's on lists
 test("Live favourites' What's on lists the favourites", async () => {
   route.params = { kind: 'live', categoryId: 'favourites' };
   guide.guideMeta.mockResolvedValue(metaWith('whatson'));
+  guide.grid.mockResolvedValue({ items: [], nextCursor: null });
   app = mount(Category, { target: document.body });
-  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalled());
+  await vi.waitFor(() => expect(guide.grid).toHaveBeenCalled());
   expect(pressed(viewButtons())).toEqual(["What's on"]);
-  expect(guide.whatsOn.mock.calls[0]![0]).toMatchObject({ filter: 'favourites', mode: 'now' });
-  expect(guide.grid).not.toHaveBeenCalled();
+  expect(guide.grid).toHaveBeenCalledTimes(1); // the Now list's, with no grid
+  expect(nowListCalls()[0]![0]).toMatchObject({ filter: 'favourites', cursor: null });
+  expect(guideGrid()).toBeNull();
+  expect(guide.whatsOn).not.toHaveBeenCalled();
   await vi.waitFor(() => expect(document.body.textContent).toContain('Nothing on in Favourites right now'));
 });
 
@@ -256,9 +266,9 @@ test('the view is saved with the guide prefs, and another category opens on it',
   unmount(app);
   route.params = { kind: 'live', categoryId: 'favourites' };
   app = mount(Category, { target: document.body });
-  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(nowListCalls()).toHaveLength(2));
   expect(pressed(viewButtons())).toEqual(["What's on"]);
-  expect(guide.whatsOn.mock.calls[1]![0]).toMatchObject({ filter: 'favourites', mode: 'now' });
+  expect(nowListCalls()[1]![0]).toMatchObject({ filter: 'favourites' });
   expect(guideGrid()).toBeNull();
 });
 
@@ -279,38 +289,57 @@ test('a view still waiting to be saved is saved once on leaving the page', async
 
 test("switching category on the page keeps the view, reloads What's on for the new category on Now, and drops the old answer", async () => {
   route.params = { kind: 'live', categoryId: '4' };
-  guide.whatsOn.mockResolvedValueOnce(whatsOnPage(1));
   app = mount(Category, { target: document.body });
   await vi.waitFor(() => expect(guideGrid()).not.toBeNull());
+  guide.grid.mockResolvedValueOnce(rows(1));
   viewButton("What's on").click(); // the server still says grid when the next meta loads
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 1'));
+  await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 1']));
   let resolveOld!: (p: Page<WhatsOnEntry>) => void;
   guide.whatsOn.mockImplementationOnce(() => new Promise((r) => (resolveOld = r)));
   segmentButtons().find((b) => b.textContent?.trim() === 'Earlier')!.click();
-  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(2));
-  expect(guide.whatsOn.mock.calls[1]![0]).toMatchObject({ filter: 'category:4', mode: 'past' });
+  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(1));
+  expect(guide.whatsOn.mock.calls[0]![0]).toMatchObject({ filter: 'category:4', mode: 'past' });
 
-  guide.whatsOn.mockResolvedValueOnce(whatsOnPage(2));
+  guide.grid.mockResolvedValueOnce(rows(2));
   route.params = { kind: 'live', categoryId: '5' };
   flushSync();
-  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 2'));
+  await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 2']));
   expect(guide.guideMeta).toHaveBeenCalledTimes(2);
-  expect(guide.whatsOn).toHaveBeenCalledTimes(3);
-  expect(guide.whatsOn.mock.calls[2]![0]).toMatchObject({ filter: 'category:5', mode: 'now' });
-  expect((guide.whatsOn.mock.calls[1]![1] as AbortSignal).aborted).toBe(true);
+  expect(nowListCalls()).toHaveLength(2);
+  expect(nowListCalls()[1]![0]).toMatchObject({ filter: 'category:5', cursor: null });
+  expect((guide.whatsOn.mock.calls[0]![1] as AbortSignal).aborted).toBe(true);
   expect(pressed(viewButtons())).toEqual(["What's on"]);
   expect(pressed(segmentButtons())).toEqual(['Now']);
-  expect(guide.grid).toHaveBeenCalledTimes(1); // only before the switch to What's on
+  expect(guide.grid).toHaveBeenCalledTimes(3); // the grid's only load came before the switch to What's on
   resolveOld(whatsOnPage(3));
   await new Promise((r) => setTimeout(r, 20));
   expect(document.body.textContent).not.toContain('Show 3');
-  expect(document.body.textContent).not.toContain('Show 1');
+  expect(texts('.entry .title')).toEqual(['Ch 2']);
+});
+
+test('switching category while the Now list loads asks about the new category and drops the old answer', async () => {
+  route.params = { kind: 'live', categoryId: '4' };
+  guide.guideMeta.mockResolvedValue(metaWith('whatson'));
+  let resolveOld!: (p: Page<GridRow>) => void;
+  guide.grid.mockImplementationOnce(() => new Promise((r) => (resolveOld = r)));
+  app = mount(Category, { target: document.body });
+  await vi.waitFor(() => expect(guide.grid).toHaveBeenCalledTimes(1));
+  expect(guide.grid.mock.calls[0]![0]).toMatchObject({ filter: 'category:4', cursor: null });
+  guide.grid.mockResolvedValueOnce(rows(2));
+  route.params = { kind: 'live', categoryId: '5' };
+  flushSync();
+  await vi.waitFor(() => expect(texts('.entry .title')).toEqual(['Ch 2']));
+  expect(guide.grid).toHaveBeenCalledTimes(2);
+  expect(guide.grid.mock.calls[1]![0]).toMatchObject({ filter: 'category:5', cursor: null });
+  expect((guide.grid.mock.calls[0]![1] as AbortSignal).aborted).toBe(true);
+  resolveOld(rows(1));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(texts('.entry .title')).toEqual(['Ch 2']);
 });
 
 test("long-pressing a What's on row: Favourite toggles, and Map guide channel opens the guide source sheet and reloads What's on", async () => {
   route.params = { kind: 'live', categoryId: '4' };
   guide.guideMeta.mockResolvedValue(metaWith('whatson'));
-  guide.whatsOn.mockResolvedValue(whatsOnPage(1, 2));
   app = mount(Category, { target: document.body });
   await vi.waitFor(() => expect(document.querySelectorAll('.entry').length).toBe(2));
   const row = () => document.querySelectorAll<HTMLElement>('.entry')[1]!;
@@ -328,5 +357,5 @@ test("long-pressing a What's on row: Favourite toggles, and Map guide channel op
   expect(document.querySelector('.sheet-title')?.textContent).toBe('Ch 2');
   [...document.querySelectorAll<HTMLButtonElement>('.result')].find((b) => b.textContent === 'Automatic matching')!.click();
   await vi.waitFor(() => expect(guide.setGuideSource).toHaveBeenCalledWith(2, null));
-  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(2)); // What's on loads again with the new link
+  await vi.waitFor(() => expect(guide.grid).toHaveBeenCalledTimes(2)); // What's on loads again with the new link
 });
