@@ -37,8 +37,12 @@ import { ApiClientError } from '$lib/api';
 import Watch from './+page.svelte';
 
 let app: ReturnType<typeof mount> | undefined;
+// 22:13:20 UTC on 1 January 1970: during liveItem's News at Ten (22:00–23:00).
+const NOW_MS = 80_000_000;
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW_MS);
   api.mockReset();
   attachStream.mockClear();
   heartbeats.length = 0;
@@ -51,8 +55,17 @@ beforeEach(() => {
 afterEach(() => {
   if (app) unmount(app);
   app = undefined;
+  vi.useRealTimers();
   document.body.innerHTML = '';
+  Reflect.deleteProperty(document, 'visibilityState');
 });
+
+/** Fakes the page's timeouts too, from NOW_MS. */
+function fakeTimeouts() {
+  vi.useRealTimers();
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  vi.setSystemTime(NOW_MS);
+}
 
 const playCalls = () => api.mock.calls.filter(([path]) => path === '/api/play');
 const startAtOf = (call: unknown[]) => JSON.parse((call[1] as RequestInit).body as string).startAtSec as number;
@@ -221,7 +234,10 @@ function go(url: string) {
   flushSync();
 }
 
-test('catch-up back to live plays live without catchup and keeps the on-now line without a refetch', async () => {
+const film = { title: 'Film', startSec: 82800, stopSec: 90000 }; // 23:00–01:00, after News at Ten
+
+test('catch-up back to live plays live without catchup; the on-now line needs no refetch while current, and moves on once it has ended', async () => {
+  fakeTimeouts();
   route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
   serve(catchupRes, liveItem());
   app = mount(Watch, { target: document.body });
@@ -233,6 +249,120 @@ test('catch-up back to live plays live without catchup and keeps the on-now line
   expect(bodyOf(playCalls()[1]!).catchup).toBeUndefined();
   await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
   expect(itemCalls()).toHaveLength(1);
+
+  // From start of News at Ten, watched past its end: back to live shows what is on now.
+  serve(catchupRes, liveItem({ now: film }));
+  go('http://localhost/watch?item=7&from=79200&to=82800&title=News%20at%20Ten');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(3));
+  await vi.advanceTimersByTimeAsync(82_800_000 - Date.now());
+  expect(itemCalls()).toHaveLength(2);
+  serve(liveRes, liveItem({ now: film }));
+  go('http://localhost/watch?item=7');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(4));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film · until 01:00'));
+  expect(itemCalls()).toHaveLength(2);
+});
+
+test('the on-now line moves to the next programme at its stop time, hidden until the new one arrives', async () => {
+  fakeTimeouts();
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten · until 23:00'));
+  let answer!: (it: CatalogItem) => void;
+  api.mockImplementation((path: string) => (path === '/api/play' ? Promise.resolve(liveRes) : new Promise((r) => (answer = r))));
+  await vi.advanceTimersByTimeAsync(82_800_000 - Date.now() - 1);
+  flushSync();
+  expect(itemCalls()).toHaveLength(1);
+  expect(document.body.textContent).toContain('On now: News at Ten');
+  await vi.advanceTimersByTimeAsync(1);
+  flushSync();
+  expect(itemCalls()).toHaveLength(2);
+  expect(document.body.textContent).not.toContain('On now');
+  expect(buttonWith('From start')).toBeUndefined();
+  answer(liveItem({ now: film }));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film · until 01:00'));
+  expect(buttonWith('From start')).toBeDefined();
+});
+
+test('From start after the programme has ended opens the programme on now, and does nothing when none is on', async () => {
+  fakeTimeouts();
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
+  // The clock passes the stop time before the timer has run, as on a phone that has just woken up.
+  vi.setSystemTime(83_000_000);
+  serve(liveRes, liveItem({ now: film }));
+  buttonWith('From start')!.click();
+  await vi.waitFor(() => expect(nav.goto).toHaveBeenCalledWith('/watch?item=7&from=82800&to=90000&title=Film'));
+  expect(nav.goto).toHaveBeenCalledTimes(1);
+  expect(itemCalls()).toHaveLength(2);
+
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film'));
+  vi.setSystemTime(90_001_000);
+  serve(liveRes, liveItem({ now: null }));
+  buttonWith('From start')!.click();
+  await vi.waitFor(() => expect(itemCalls()).toHaveLength(3));
+  await vi.waitFor(() => expect(document.body.textContent).not.toContain('On now'));
+  expect(nav.goto).toHaveBeenCalledTimes(1);
+});
+
+test('the refetch timer is cleared on item change and on teardown', async () => {
+  fakeTimeouts();
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
+  expect(vi.getTimerCount()).toBe(1);
+  let answer8!: (it: CatalogItem) => void;
+  api.mockImplementation((path: string) =>
+    path === '/api/play' ? Promise.resolve(liveRes) : path === '/api/items/8' ? new Promise((r) => (answer8 = r)) : Promise.resolve(liveItem()),
+  );
+  go('http://localhost/watch?item=8');
+  await vi.waitFor(() => expect(api.mock.calls.some(([path]) => path === '/api/items/8')).toBe(true));
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(83_000_000 - Date.now()); // past News at Ten's stop, with item 8 still loading
+  expect(itemCalls()).toHaveLength(1);
+  answer8(liveItem({ id: 8, now: { title: 'Late Show', startSec: 79200, stopSec: 86400 } }));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Late Show'));
+  expect(vi.getTimerCount()).toBe(1);
+  unmount(app);
+  app = undefined;
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test('an answer whose programme has already ended by this clock is hidden and asked again 30 s later, not at once', async () => {
+  fakeTimeouts();
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem({ now: { title: 'Ended', startSec: 76000, stopSec: 79000 } }));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(itemCalls()).toHaveLength(1));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).not.toContain('On now');
+  serve(liveRes, liveItem());
+  await vi.advanceTimersByTimeAsync(29_000);
+  expect(itemCalls()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(itemCalls()).toHaveLength(2);
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
+});
+
+test('coming back to the foreground refetches the item; a hidden page does not', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
+  let visibility = 'hidden';
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(itemCalls()).toHaveLength(1);
+  vi.setSystemTime(83_000_000);
+  serve(liveRes, liveItem({ now: film }));
+  visibility = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film'));
+  expect(itemCalls()).toHaveLength(2);
 });
 
 test('two quick query changes leave one active session on the latest window; superseded ones are released once, never attached', async () => {

@@ -19,8 +19,14 @@
   let error = $state('');
   let stopped = $state(false);
   let resumeAt = $state<number | null>(null); // set while the Resume / Start over prompt is showing
-  let item = $state<CatalogItem | null>(null); // fetched once per item, only for the On now line and From start
+  let item = $state<CatalogItem | null>(null); // only for the On now line and From start: fetched per item, and again when its programme ends
+  let checkedAt = $state(Date.now()); // when the On now programme was last held against the clock
+  let itemSeq = 0; // bumped on every item fetch and item change, so only the latest answer lands
+  let itemTimer: ReturnType<typeof setTimeout> | undefined;
   let begun = 0; // bumped on every begin(), so a late positions() answer for an old URL is ignored
+  // An answer whose programme has already ended by this device's clock (one ahead of the server's) is retried after this.
+  const RETRY_MS = 30_000;
+  const MAX_TIMEOUT_MS = 2 ** 31 - 1; // a longer setTimeout fires at once
 
   /** Catch-up mode: from and to are positive integers and to is after from. Anything else plays normally. */
   const catchup = $derived.by(() => {
@@ -119,25 +125,59 @@
   });
 
   const itemId = $derived(Number(page.url.searchParams.get('item')));
+  // Hidden once its stop time has been seen to pass, until a fresh answer arrives.
+  const onNow = $derived(item?.kind === 'live' && item.now && item.now.stopSec * 1000 > checkedAt ? item.now : null);
+
+  /** Fetches the item and schedules the next fetch for when its programme ends. Resolves null if superseded or failed. */
+  function fetchItem(id: number): Promise<CatalogItem | null> {
+    const mine = ++itemSeq;
+    return api<CatalogItem>(`/api/items/${id}`).then(
+      (it) => {
+        if (mine !== itemSeq) return null;
+        clearTimeout(itemTimer);
+        item = it ?? null;
+        checkedAt = Date.now();
+        const stopSec = item?.now?.stopSec;
+        if (stopSec !== undefined) {
+          const untilStop = stopSec * 1000 - checkedAt;
+          itemTimer = setTimeout(() => refetchItem(id), untilStop > 0 ? Math.min(untilStop, MAX_TIMEOUT_MS) : RETRY_MS);
+        }
+        return item;
+      },
+      () => null // no On now line is better than a blocked player
+    );
+  }
+
+  /** Hides an ended programme at once and fetches what is on now. */
+  function refetchItem(id: number): Promise<CatalogItem | null> {
+    checkedAt = Date.now();
+    return fetchItem(id);
+  }
 
   // Keyed on the item id alone, so switching between live and catch-up for one item doesn't refetch or blank the line.
   $effect(() => {
     const id = itemId;
-    let current = true;
     item = null;
-    api<CatalogItem>(`/api/items/${id}`).then(
-      (it) => current && (item = it ?? null),
-      () => {} // no On now line is better than a blocked player
-    );
+    void fetchItem(id);
+    // Timers may not run while the phone sleeps: check again when the app comes back.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refetchItem(id);
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
-      current = false;
+      itemSeq++;
+      clearTimeout(itemTimer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   });
 
-  function fromStart() {
-    const now = item?.now;
-    if (!item || !now) return;
-    void goto(`/watch?item=${item.id}&from=${now.startSec}&to=${now.stopSec}&title=${encodeURIComponent(now.title)}`);
+  async function fromStart() {
+    let current = item;
+    // The programme ended before the page noticed: start the one on now instead, if any.
+    if (current?.now && current.now.stopSec * 1000 <= Date.now()) current = await refetchItem(current.id);
+    const now = current?.now;
+    if (!current || !now) return;
+    void goto(`/watch?item=${current.id}&from=${now.startSec}&to=${now.stopSec}&title=${encodeURIComponent(now.title)}`);
   }
 
   beforeNavigate((nav) => {
@@ -167,10 +207,10 @@
   <p class="onnow">
     {['↺ Catch-up', catchup.title, `${formatClock(catchup.startSec)}–${formatClock(catchup.stopSec)}`].filter(Boolean).join(' · ')}
   </p>
-{:else if item?.kind === 'live' && item.now}
+{:else if onNow}
   <p class="onnow">
-    On now: {item.now.title} · until {formatClock(item.now.stopSec)}
-    {#if (item.catchupDays ?? 0) > 0}
+    On now: {onNow.title} · until {formatClock(onNow.stopSec)}
+    {#if (item?.catchupDays ?? 0) > 0}
       <button class="stopped" onclick={fromStart}>↺ From start</button>
     {/if}
   </p>
