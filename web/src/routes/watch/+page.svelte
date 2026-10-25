@@ -28,7 +28,8 @@
     const from = q.get('from') ?? '';
     const to = q.get('to') ?? '';
     const positive = /^[1-9]\d*$/;
-    if (!positive.test(from) || !positive.test(to) || Number(to) <= Number(from)) return null;
+    if (!positive.test(from) || !positive.test(to)) return null;
+    if (!Number.isSafeInteger(Number(from)) || !Number.isSafeInteger(Number(to)) || Number(to) <= Number(from)) return null;
     return { startSec: Number(from), stopSec: Number(to), title: q.get('title') ?? '' };
   });
 
@@ -117,8 +118,11 @@
     untrack(begin);
   });
 
+  const itemId = $derived(Number(page.url.searchParams.get('item')));
+
+  // Keyed on the item id alone, so switching between live and catch-up for one item doesn't refetch or blank the line.
   $effect(() => {
-    const id = Number(page.url.searchParams.get('item'));
+    const id = itemId;
     let current = true;
     item = null;
     api<CatalogItem>(`/api/items/${id}`).then(
@@ -136,7 +140,11 @@
     void goto(`/watch?item=${item.id}&from=${now.startSec}&to=${now.stopSec}&title=${encodeURIComponent(now.title)}`);
   }
 
-  beforeNavigate(playback.teardown);
+  beforeNavigate((nav) => {
+    // A same-route navigation restarts playback itself; tearing down here would strand the video if it fails or is cancelled.
+    if (nav.to?.url.pathname === '/watch') return;
+    playback.teardown();
+  });
   onDestroy(playback.teardown);
 </script>
 
@@ -156,7 +164,9 @@
 {/if}
 
 {#if catchup}
-  <p class="onnow">↺ Catch-up · {catchup.title} · {formatClock(catchup.startSec)}–{formatClock(catchup.stopSec)}</p>
+  <p class="onnow">
+    {['↺ Catch-up', catchup.title, `${formatClock(catchup.startSec)}–${formatClock(catchup.stopSec)}`].filter(Boolean).join(' · ')}
+  </p>
 {:else if item?.kind === 'live' && item.now}
   <p class="onnow">
     On now: {item.now.title} · until {formatClock(item.now.stopSec)}
@@ -171,3 +181,14 @@
 {#if stopped}
   <button class="stopped" onclick={restart}>Playback stopped. Tap to restart.</button>
 {/if}
+
+<style>
+  .onnow {
+    margin: 8px 0;
+    overflow-wrap: anywhere;
+  }
+  /* The button sits on its own full-width row under the line, so it never wraps at 320px. */
+  .onnow button {
+    min-height: 44px;
+  }
+</style>

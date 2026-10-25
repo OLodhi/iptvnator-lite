@@ -21,8 +21,9 @@ vi.mock('hls.js', () => ({ default: {} }));
 vi.mock('$lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api')>()), api }));
 const me = vi.hoisted(() => ({ positions: vi.fn(async () => []), reportPosition: vi.fn(async () => {}) }));
 vi.mock('$lib/me', () => me);
+const released = vi.hoisted(() => vi.fn(async (_s: string, _c: string) => {}));
 vi.mock('$lib/session', () => ({
-  releaseSession: vi.fn(async () => {}),
+  releaseSession: released,
   startHeartbeat: vi.fn((_s: string, _c: string, opts: { onGone: () => void }) => {
     heartbeats.push(opts);
     return () => {};
@@ -41,6 +42,7 @@ beforeEach(() => {
   attachStream.mockClear();
   heartbeats.length = 0;
   nav.goto.mockClear();
+  released.mockClear();
   me.positions.mockClear();
   me.reportPosition.mockClear();
   route.url = new URL('http://localhost/watch?item=7&t=600');
@@ -209,4 +211,67 @@ test('a query change while mounted starts a new session and tears down the old o
   expect(bodyOf(playCalls()[1]!)).toMatchObject({ catchup: { startSec: 79200, stopSec: 82800 } });
   expect(me.positions).toHaveBeenCalledTimes(1); // the first, normal session only
   expect(document.body.textContent).toContain('↺ Catch-up · News');
+});
+
+const itemCalls = () => api.mock.calls.filter(([path]) => path === '/api/items/7');
+function go(url: string) {
+  route.url = new URL(url);
+  tick.n++;
+  flushSync();
+}
+
+test('catch-up back to live plays live without catchup and keeps the on-now line without a refetch', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(itemCalls()).toHaveLength(1));
+  serve(liveRes, liveItem());
+  go('http://localhost/watch?item=7');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(bodyOf(playCalls()[1]!).catchup).toBeUndefined();
+  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
+  expect(itemCalls()).toHaveLength(1);
+});
+
+test('a double From start tap and the query change leave one active session; the old one is released once', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  let n = 0;
+  api.mockImplementation(async (path: string) =>
+    path === '/api/play' ? { ...catchupRes, sessionId: `s${++n}`, durationSec: null } : liveItem(),
+  );
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
+  const btn = buttonWith('From start')!;
+  btn.click();
+  btn.click();
+  expect(nav.goto).toHaveBeenCalledTimes(2);
+  go('http://localhost/watch?item=7&from=79200&to=82800&title=News');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(playCalls()).toHaveLength(2);
+  expect(released.mock.calls).toEqual([['s1', 'cid']]);
+});
+
+test.each([
+  ['from=0&to=7200', 'zero from'],
+  ['from=abc&to=7200', 'non-numeric from'],
+  ['from=3600', 'missing to'],
+  ['from=123456789012345678901234567890&to=999999999999999999999999999999', '30-digit values'],
+])('%s (%s) falls back to live play', async (query) => {
+  route.url = new URL(`http://localhost/watch?item=7&t=5&${query}`);
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(bodyOf(playCalls()[0]!).catchup).toBeUndefined();
+  expect(document.body.textContent).not.toContain('Catch-up');
+});
+
+test('a catch-up label without a title has no double separator', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  const text = document.querySelector('.onnow')!.textContent!.replace(/\s+/g, ' ').trim();
+  expect(text).toBe('↺ Catch-up · 01:00–02:00');
 });
