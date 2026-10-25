@@ -5,9 +5,8 @@
   import { messageFor } from '$lib/messages';
   import { whatsOn } from '$lib/guide';
   import { formatClock, progress, segmentQuery, sharedClock, type Segment, type SegmentQuery } from '$lib/guide/time';
-  import { longpress } from '$lib/actions/longpress';
-  import Artwork from '$lib/components/Artwork.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
+  import WhatsOnRow from './WhatsOnRow.svelte';
 
   type Props = {
     filter: string;
@@ -175,31 +174,15 @@
 
 <VirtualList items={entries} rowHeight={68} onEnd={more}>
   {#snippet row(e: WhatsOnEntry)}
-    {@const href = hrefFor(e)}
-    {@const action = e.live ? 'play' : e.catchup ? 'catchup' : null}
-    <svelte:element
-      this={href ? 'a' : 'div'}
-      class="entry"
-      {href}
-      draggable="false"
-      use:longpress={{ onLongPress: () => onLongPress?.(e.item) }}
-    >
-      <span class="thumb"><Artwork name={e.item.displayName} src={e.item.logoUrl} fit="contain" /></span>
-      <span class="text">
-        <span class="title">{e.programme.title}</span>
-        <span class="sub">
-          {e.item.displayName} · {e.live ? `until ${formatClock(e.programme.stopSec, tz)}` : `${formatClock(e.programme.startSec, tz)}–${formatClock(e.programme.stopSec, tz)}`}
-        </span>
-        {#if e.live}
-          <span class="bar" aria-hidden="true"><span style:width="{Math.round(progress(e.programme.startSec, e.programme.stopSec, clock.nowMs) * 100)}%"></span></span>
-        {/if}
-      </span>
-      {#if action === 'play'}
-        <span class="action play" aria-label="Watch live">▶</span>
-      {:else if action === 'catchup'}
-        <span class="action catchup">↺ Catch up</span>
-      {/if}
-    </svelte:element>
+    <WhatsOnRow
+      item={e.item}
+      href={hrefFor(e)}
+      title={e.programme.title}
+      sub={`${e.item.displayName} · ${e.live ? `until ${formatClock(e.programme.stopSec, tz)}` : `${formatClock(e.programme.startSec, tz)}–${formatClock(e.programme.stopSec, tz)}`}`}
+      progress={e.live ? progress(e.programme.startSec, e.programme.stopSec, clock.nowMs) : null}
+      action={e.live ? 'play' : e.catchup ? 'catchup' : null}
+      {onLongPress}
+    />
   {/snippet}
 </VirtualList>
 
@@ -243,67 +226,5 @@
     text-align: center;
     color: var(--muted);
     padding: 32px 0;
-  }
-  .entry {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    height: 100%;
-    border-bottom: 1px solid var(--border);
-    color: var(--text);
-    text-decoration: none;
-  }
-  a.entry:active {
-    background: var(--surface);
-  }
-  .thumb {
-    flex: none;
-    width: 64px;
-    height: 40px;
-    border-radius: 8px;
-    overflow: hidden;
-    background: var(--surface);
-  }
-  .text {
-    flex: 1;
-    min-width: 0;
-  }
-  .title,
-  .sub {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .title {
-    font-weight: 600;
-  }
-  .sub {
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-  .bar {
-    display: block;
-    height: 2px;
-    margin-top: 4px;
-    border-radius: 1px;
-    background: var(--border);
-  }
-  .bar > span {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-  }
-  .action {
-    flex: none;
-    padding-right: 4px;
-    font-size: 0.85rem;
-  }
-  .play {
-    font-size: 1.2rem;
-  }
-  .catchup {
-    color: #ff9f43;
-    font-weight: 600;
   }
 </style>
