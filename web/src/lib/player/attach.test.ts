@@ -92,6 +92,16 @@ test('VOD hls.js starts at 0', () => {
   expect(live.Hls.mock.calls[0]![0]).not.toHaveProperty('startPosition');
 });
 
+test('live hls.js reports an endless duration, so the player can tell how far behind live it is', () => {
+  const live = fakeHls(true);
+  attachStream(video(''), PLAYLIST, { Hls: live.Hls, vod: false, ua: CHROME });
+  expect(live.Hls).toHaveBeenCalledWith({ liveDurationInfinity: true });
+
+  const vod = fakeHls(true);
+  attachStream(video(''), PLAYLIST, { Hls: vod.Hls, vod: true, ua: CHROME });
+  expect(vod.Hls.mock.calls[0]![0]).not.toHaveProperty('liveDurationInfinity');
+});
+
 test('direct URLs are always set as src', () => {
   const { Hls } = fakeHls(true);
   const v = video('');

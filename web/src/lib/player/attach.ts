@@ -66,7 +66,9 @@ function elementStream(video: HTMLVideoElement, url: string): StreamHandle {
 }
 
 function hlsJsStream(Hls: HlsCtor, video: HTMLVideoElement, url: string, vod: boolean): StreamHandle {
-  const hls = new Hls(vod ? { startPosition: 0 } : {});
+  // Live gets duration Infinity and a seekable window over the segments still listed, as Safari reports it: that is
+  // how the player tells live from a remux in progress, and how far behind live it is.
+  const hls = new Hls(vod ? { startPosition: 0 } : { liveDurationInfinity: true });
   hls.on(Hls.Events.ERROR, (_e, data) => {
     if (!data.fatal) return;
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
