@@ -348,6 +348,54 @@ test('catch-up seek restarts at the minute and lands within a minute', async () 
   expect(pb.absoluteSec(video)).toBe(30);
 });
 
+test('catch-up seek past now in an airing programme clamps to now − 30 and restarts at that minute', async () => {
+  const { deps, pending, video, open } = setup();
+  const nowSec = 2000; // 1000 s into a programme that runs until 4600
+  const pb = createPlayback({ ...deps, now: () => nowSec * 1000 });
+  const programme = { startSec: 1000, stopSec: 4600 };
+  const p = pb.start({ kind: 'catchup', itemId: 7, startAtSec: 0, catchup: programme }, video);
+  pending[0]!.resolve(res('c1', 3600));
+  await p;
+  open(300);
+
+  const seek = pb.seekTo(video, 3000); // not aired yet: the server would refuse a window starting there
+  expect(deps.play).toHaveBeenCalledTimes(2);
+  const window = playBody(deps, 1).catchup!;
+  expect(window).toEqual({ startSec: 1960, stopSec: 4600 }); // 970 s in, at its minute
+  expect(window.startSec).toBeLessThanOrEqual(nowSec - 30);
+  // The playing session is released only as the new, valid start is requested.
+  expect(deps.releaseSession.mock.calls).toEqual([['c1', 'cid']]);
+  expect(deps.releaseSession.mock.invocationCallOrder[0]).toBeLessThan(deps.play.mock.invocationCallOrder[1]!);
+  pending[1]!.resolve(res('c2', 2640));
+  await seek;
+  open(30);
+  expect(video.currentTime).toBe(10);
+  expect(pb.absoluteSec(video)).toBe(970);
+
+  // A programme that started under 30 s ago has nowhere later to go: the seek lands at its start.
+  const fresh = createPlayback({ ...deps, now: () => (programme.startSec + 20) * 1000 });
+  const q = fresh.start({ kind: 'catchup', itemId: 7, startAtSec: 0, catchup: programme }, video);
+  pending[2]!.resolve(res('c3', 3600));
+  await q;
+  open(10);
+  await fresh.seekTo(video, 600);
+  expect(video.currentTime).toBe(0);
+  expect(deps.play).toHaveBeenCalledTimes(3);
+});
+
+test('a seek during the first catch-up Starting is clamped to the programme length', async () => {
+  const { deps, pending, video } = setup();
+  const pb = createPlayback({ ...deps, now: () => 100_000_000 }); // long after the programme
+  const programme = { startSec: 1000, stopSec: 4600 };
+  void pb.start({ kind: 'catchup', itemId: 7, startAtSec: 0, catchup: programme }, video);
+  const seek = pb.seekTo(video, 5000); // the first response hasn't come back: no duration from the server yet
+  expect(pending[0]!.signal.aborted).toBe(true);
+  expect(playBody(deps, 1)).toMatchObject({ catchup: { startSec: 4540, stopSec: 4600 } }); // 3595 s in, at its minute
+  pending[1]!.resolve(res('c2', 60));
+  await seek;
+  expect(pb.current()).toMatchObject({ offsetSec: 3540, durationSec: 3600, params: { startAtSec: 3595 } });
+});
+
 const tracks: SessionTracks = {
   audio: [
     { index: 1, label: 'English', language: 'en', isDefault: true, forced: false, available: true },

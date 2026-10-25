@@ -1,4 +1,5 @@
 import type HlsType from 'hls.js';
+import { seekWhenOpen } from './seekWhenOpen.ts';
 
 type HlsCtor = typeof HlsType;
 
@@ -32,19 +33,9 @@ export function prefersNativeHls(ua: string, video: HTMLVideoElement): boolean {
   return /Safari\//.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua);
 }
 
-/** Seeks to `sec` on the first `loadedmetadata`, or at once if metadata is already there; returns a canceller. */
-function seekOnce(video: HTMLVideoElement, sec: number | undefined): () => void {
-  if (sec === undefined || sec <= 0) return () => {};
-  const seek = () => {
-    video.currentTime = sec;
-  };
-  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-    seek();
-    return () => {};
-  }
-  video.addEventListener('loadedmetadata', seek, { once: true });
-  return () => video.removeEventListener('loadedmetadata', seek);
-}
+/** Seeks to `sec` once the file is open, unless that is the start; returns a canceller. */
+const seekOnce = (video: HTMLVideoElement, sec: number | undefined): (() => void) =>
+  sec === undefined || sec <= 0 ? () => {} : seekWhenOpen(video, sec);
 
 function showTextTracks(video: HTMLVideoElement, on: boolean) {
   const tracks = video.textTracks;

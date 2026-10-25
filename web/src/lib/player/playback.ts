@@ -1,8 +1,11 @@
 import type { PlayRequest, PlayResponse, SessionTracks } from '@tv/shared';
 import type { StreamHandle } from './attach.ts';
+import { seekWhenOpen } from './seekWhenOpen.ts';
 
 /** A seek never lands closer than this to the end, so it can't end playback the moment it arrives. */
 const END_MARGIN_SEC = 5;
+/** A catch-up seek stays this far behind now, so its window has aired and the provider has it. */
+const NOW_MARGIN_SEC = 30;
 /** Catch-up windows start on a whole minute: the provider's timeshift URLs count in minutes. */
 const MINUTE_SEC = 60;
 
@@ -16,6 +19,8 @@ export type PlaybackDeps = {
    */
   attachStream: (video: HTMLVideoElement, url: string, opts: { startAtSec?: number; vod: boolean }) => StreamHandle;
   clientId: () => string;
+  /** The clock, in ms; Date.now when left out. */
+  now?: () => number;
   onGone: () => void;
   /** Called once the stream is attached; durationSec comes from the server. */
   onStarted?: (info: {
@@ -70,19 +75,6 @@ function playRequest(params: StartParams, clientId: string): PlayRequest {
   if (params.subtitleIndex !== undefined) req.subtitleIndex = params.subtitleIndex;
   if (params.subtitleLanguage !== undefined) req.subtitleLanguage = params.subtitleLanguage;
   return req;
-}
-
-/** Seeks to `sec` once the stream's metadata is known; returns a canceller. */
-function seekWhenOpen(video: HTMLVideoElement, sec: number): () => void {
-  const seek = () => {
-    video.currentTime = sec;
-  };
-  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-    seek();
-    return () => {};
-  }
-  video.addEventListener('loadedmetadata', seek, { once: true });
-  return () => video.removeEventListener('loadedmetadata', seek);
 }
 
 /**
@@ -162,9 +154,9 @@ export function createPlayback(deps: PlaybackDeps) {
     deps.onStarted?.({ offsetSec, durationSec: duration, mode: res.mode, tracks: res.tracks, handle: stream });
   }
 
-  /** Starts playing, after ending whatever was playing. */
+  /** Starts playing, after ending whatever was playing. A catch-up programme's length is known before the server answers. */
   function start(params: StartParams, video: HTMLVideoElement): Promise<void> {
-    return begin(params, video, null);
+    return begin(params, video, params.catchup ? params.catchup.stopSec - params.catchup.startSec : null);
   }
 
   /**
@@ -177,14 +169,16 @@ export function createPlayback(deps: PlaybackDeps) {
   }
 
   /**
-   * Seeks to an absolute position, kept 5 s short of the end. What has been remuxed so far is seeked within;
-   * anything else restarts a movie, episode or catch-up programme there.
+   * Seeks to an absolute position, kept 5 s short of the end, and for a programme still airing 30 s short of now.
+   * What has been remuxed so far is seeked within; anything else restarts a movie, episode or catch-up programme there.
    */
   async function seekTo(video: HTMLVideoElement, absSec: number): Promise<void> {
     if (!latest) return;
     const { params, durationSec } = latest;
-    let target = Math.max(0, absSec);
-    if (durationSec !== null) target = Math.min(target, Math.max(0, durationSec - END_MARGIN_SEC));
+    let latestSec = durationSec === null ? Infinity : durationSec - END_MARGIN_SEC;
+    // The server refuses a window that starts after now, and the playing session would already be gone.
+    if (params.catchup) latestSec = Math.min(latestSec, (deps.now ?? Date.now)() / 1000 - params.catchup.startSec - NOW_MARGIN_SEC);
+    const target = Math.max(0, Math.min(absSec, latestSec));
     if (active) {
       const ranges = video.seekable;
       const loadedEndSec = active.offsetSec + (ranges.length > 0 ? ranges.end(ranges.length - 1) : 0);
