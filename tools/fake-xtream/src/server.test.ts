@@ -1,10 +1,11 @@
+import { spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { generateCatalogue, smallCatalogue } from './catalogue.ts';
+import { generateCatalogue, richCatalogue, smallCatalogue } from './catalogue.ts';
 import { startFakeXtream } from './server.ts';
 import type { FakeXtream } from './server.ts';
 
@@ -445,3 +446,85 @@ async function vi_waitFor(cond: () => boolean, ms = 3000): Promise<void> {
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+describe('fake xtream watch-page fixtures', () => {
+  let rich: FakeXtream;
+  beforeAll(async () => {
+    rich = await startFakeXtream({ mediaDir, catalogue: richCatalogue() });
+  });
+  afterAll(async () => {
+    await rich?.close();
+  });
+
+  test('series 11 info carries plot, artwork, season covers and episode stills', async () => {
+    const info = await (await api(rich, '&action=get_series_info&series_id=11')).json();
+    expect(info.info).toEqual({
+      name: 'EN - THE KITCHEN (2022)',
+      cover: `${rich.url}/images/poster.png`,
+      plot: 'A chef takes over a busy kitchen.',
+      cast: 'Ann Lee, Bo Chan',
+      director: 'Cy Dee',
+      genre: 'Drama / Comedy',
+      releaseDate: '2022-06-23',
+      rating: '8',
+      backdrop_path: [`${rich.url}/images/backdrop.png`],
+    });
+    expect(info.seasons).toEqual([{ season_number: 1, name: 'Season 1', cover: `${rich.url}/images/s1.png` }]);
+    expect(Object.keys(info.episodes).sort()).toEqual(['0', '1', '2']);
+    expect(info.episodes['1'].map((e: { title: string }) => e.title)).toEqual([
+      'EN - THE KITCHEN (2022) - S01E01 - Pilot',
+      'EN - THE KITCHEN (2022) - S01E02 - Rush',
+    ]);
+    expect(info.episodes['0'][0]).toMatchObject({ id: '100', title: 'Behind the scenes', season: 0 });
+    expect(info.episodes['1'][0].info).toEqual({
+      movie_image: `${rich.url}/images/ep111.png`,
+      air_date: '2022-06-23',
+      duration_secs: 30,
+      video: { width: 1920, height: 1080 },
+    });
+  });
+
+  test('get_vod_info returns details for movie 5 and an empty info for others', async () => {
+    const five = await (await api(rich, '&action=get_vod_info&vod_id=5')).json();
+    expect(five).toEqual({
+      info: {
+        plot: 'Two languages, two subtitles.',
+        genre: 'Test',
+        cast: 'A, B',
+        director: 'C',
+        releasedate: '2021-01-01',
+        rating: '7',
+        movie_image: `${rich.url}/images/poster.png`,
+        backdrop_path: [`${rich.url}/images/backdrop.png`],
+        duration_secs: 30,
+      },
+      movie_data: { stream_id: 5 },
+    });
+    expect(await (await api(rich, '&action=get_vod_info&vod_id=1')).json()).toEqual({ info: {}, movie_data: {} });
+  });
+
+  test('richCatalogue adds movie 5 and series 11 while smallCatalogue is unchanged', async () => {
+    expect(smallCatalogue().movie.items.map((m) => m.id)).toEqual([1, 2, 3]);
+    expect(smallCatalogue().series.items.map((s) => s.id)).toEqual([10]);
+    const vod = await (await api(rich, '&action=get_vod_streams')).json();
+    expect(vod.map((s: { stream_id: string }) => s.stream_id)).toEqual(['1', '2', '3', '5']);
+  });
+
+  test('images are served as PNG', async () => {
+    const res = await fetch(`${rich.url}/images/poster.png`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect([...new Uint8Array(await res.arrayBuffer()).slice(1, 4)]).toEqual([0x50, 0x4e, 0x47]);
+  });
+
+  const ffprobe = process.env.TV_FFPROBE_PATH;
+  test.skipIf(!ffprobe)('multi.mkv has two audio and two subtitle streams', () => {
+    const r = spawnSync(ffprobe!, ['-v', 'error', '-show_entries', 'stream=codec_type:stream_tags=language', '-of', 'json', join(mediaDir, 'multi.mkv')], {
+      encoding: 'utf8',
+    });
+    const streams = JSON.parse(r.stdout).streams as { codec_type: string; tags?: { language?: string } }[];
+    const langs = (type: string) => streams.filter((x) => x.codec_type === type).map((x) => x.tags?.language);
+    expect(langs('audio')).toEqual(['nld', 'eng']);
+    expect(langs('subtitle')).toEqual(['eng', 'nld']);
+  });
+});

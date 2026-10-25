@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,13 @@ const sources = (seconds: number) => [
   '-t', String(seconds),
 ];
 const h264 = ['-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-b:v', '2M', '-g', '50', '-c:a', 'aac', '-b:a', '96k'];
+
+// One cue every 5 s over 30 s.
+const srt = (label: string) =>
+  Array.from({ length: 6 }, (_, i) => {
+    const t = (n: number) => `00:00:${String(n).padStart(2, '0')},000`;
+    return `${i + 1}\n${t(i * 5)} --> ${t(i * 5 + 4)}\n${label} ${i + 1}\n`;
+  }).join('\n');
 
 type Job = { output: string; args: string[] };
 const jobs: Job[] = [
@@ -38,6 +45,23 @@ const jobs: Job[] = [
 ];
 
 mkdirSync(join(mediaDir, 'hls'), { recursive: true });
+// multi.mkv: audio 1 nld (default) and 2 eng, subtitles 1 eng and 2 nld.
+writeFileSync(join(mediaDir, 'multi-eng.srt'), srt('English'));
+writeFileSync(join(mediaDir, 'multi-nld.srt'), srt('Nederlands'));
+jobs.push({
+  output: 'multi.mkv',
+  args: [
+    ...sources(30),
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=30',
+    '-i', join(mediaDir, 'multi-eng.srt'), '-i', join(mediaDir, 'multi-nld.srt'),
+    '-map', '0:v', '-map', '1:a', '-map', '2:a', '-map', '3:0', '-map', '4:0',
+    ...h264, '-c:s', 'srt',
+    '-metadata:s:a:0', 'language=nld', '-metadata:s:a:1', 'language=eng',
+    '-metadata:s:s:0', 'language=eng', '-metadata:s:s:1', 'language=nld',
+    '-disposition:a:0', 'default', '-disposition:a:1', '0',
+  ],
+});
+
 for (const job of jobs) {
   const out = join(mediaDir, ...job.output.split('/'));
   if (existsSync(out)) {

@@ -8,7 +8,7 @@ import { Readable, pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { createGzip } from 'node:zlib';
 import { generateCatalogue, smallCatalogue } from './catalogue.ts';
-import type { FakeCatalogue, FakeKind } from './catalogue.ts';
+import type { FakeCatalogue, FakeEpisode, FakeKind } from './catalogue.ts';
 import { DEFAULT_WINDOW, formatInZone, listings, xmltvChunks } from './guide.ts';
 import type { GuideWindow } from './guide.ts';
 
@@ -57,8 +57,8 @@ export type RefusedRequest = { path: string; heldBy: string[] };
 const MEDIA: Record<'live' | 'movie' | 'series', Record<string, string>> = {
   live: { '1': 'hls/index.m3u8', '2': 'raw.ts', '3': 'mpeg2.ts' },
   // Movie 4 is in no built-in catalogue: tests that need its moov-at-end MP4 add it.
-  movie: { '1': 'movie.mkv', '2': 'movie.mp4', '3': 'hevc.mkv', '4': 'movie-moov-end.mp4' },
-  series: { '101': 'movie.mkv', '102': 'movie.mkv', '201': 'movie.mkv' },
+  movie: { '1': 'movie.mkv', '2': 'movie.mp4', '3': 'hevc.mkv', '4': 'movie-moov-end.mp4', '5': 'multi.mkv' },
+  series: { '101': 'movie.mkv', '102': 'movie.mkv', '201': 'movie.mkv', '111': 'multi.mkv' },
 };
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -67,6 +67,12 @@ const CONTENT_TYPES: Record<string, string> = {
   mkv: 'video/x-matroska',
   mp4: 'video/mp4',
 };
+
+// A 1x1 PNG, served for every /images/*.png.
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==',
+  'base64',
+);
 
 const CHUNK = 1000;
 
@@ -122,6 +128,11 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
       if (!file) return status(res, 404);
       const as = file.endsWith('.m3u8') ? 'playlist' : kind === 'live' ? 'live' : 'file';
       return serveMedia(req, res, join(mediaDir, ...file.split('/')), as);
+    }
+    const image = /^\/images\/[\w.-]+\.png$/.test(path);
+    if (image) {
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length });
+      return void res.end(PNG);
     }
     const seg = /^\/hls\/([^/]+)$/.exec(path);
     const liveSeg = opts.paced ? /^seg-live-(\d+)\.ts$/.exec(seg?.[1] ?? '') : null;
@@ -393,8 +404,27 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
             info: { duration_secs: 60 },
           });
         }
+        if (id === '11') return json(res, richSeriesInfo(item.name, catalogue.episodes[id] ?? []));
         return json(res, { info: { name: item.name, cover: '', rating: '7.0', category_id: item.categoryId }, episodes });
       }
+      case 'get_vod_info':
+        if (q.get('vod_id') === '5') {
+          return json(res, {
+            info: {
+              plot: 'Two languages, two subtitles.',
+              genre: 'Test',
+              cast: 'A, B',
+              director: 'C',
+              releasedate: '2021-01-01',
+              rating: '7',
+              movie_image: `${baseUrl}/images/poster.png`,
+              backdrop_path: [`${baseUrl}/images/backdrop.png`],
+              duration_secs: 30,
+            },
+            movie_data: { stream_id: 5 },
+          });
+        }
+        return json(res, { info: {}, movie_data: {} });
       case 'get_short_epg':
         return json(res, tableListings(q, 'short'));
       case 'get_simple_data_table':
@@ -405,6 +435,41 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
       default:
         return json(res, []);
     }
+  }
+
+  // Series 11 has artwork and a deliberately incomplete seasons list (no season 2, no specials).
+  function richSeriesInfo(name: string, eps: FakeEpisode[]): unknown {
+    const episodes: Record<string, unknown[]> = {};
+    for (const e of eps) {
+      (episodes[String(e.season)] ??= []).push({
+        id: String(e.id),
+        episode_num: e.num,
+        title: e.title,
+        container_extension: 'mkv',
+        season: e.season,
+        info: {
+          movie_image: `${baseUrl}/images/ep${e.id}.png`,
+          air_date: '2022-06-23',
+          duration_secs: 30,
+          video: { width: 1920, height: 1080 },
+        },
+      });
+    }
+    return {
+      info: {
+        name,
+        cover: `${baseUrl}/images/poster.png`,
+        plot: 'A chef takes over a busy kitchen.',
+        cast: 'Ann Lee, Bo Chan',
+        director: 'Cy Dee',
+        genre: 'Drama / Comedy',
+        releaseDate: '2022-06-23',
+        rating: '8',
+        backdrop_path: [`${baseUrl}/images/backdrop.png`],
+      },
+      seasons: [{ season_number: 1, name: 'Season 1', cover: `${baseUrl}/images/s1.png` }],
+      episodes,
+    };
   }
 
   function json(res: ServerResponse, body: unknown): void {

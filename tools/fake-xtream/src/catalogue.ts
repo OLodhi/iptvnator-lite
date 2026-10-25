@@ -105,3 +105,29 @@ export function smallCatalogue(): FakeCatalogue {
     },
   };
 }
+
+/** smallCatalogue() plus the watch-page fixtures: movie 5 (two audio, two subtitle tracks) and series 11 (rich info, partial seasons). */
+export function richCatalogue(): FakeCatalogue {
+  const base = smallCatalogue();
+  const kitchen = 'EN - THE KITCHEN (2022)';
+  return {
+    ...base,
+    movie: {
+      ...base.movie,
+      items: [...base.movie.items, { id: 5, name: 'EN - Multi Track (2021)', categoryId: '10' }],
+    },
+    series: {
+      ...base.series,
+      items: [...base.series.items, { id: 11, name: kitchen, categoryId: '20' }],
+    },
+    episodes: {
+      ...base.episodes,
+      '11': [
+        { id: 111, season: 1, num: 1, title: `${kitchen} - S01E01 - Pilot` },
+        { id: 112, season: 1, num: 2, title: `${kitchen} - S01E02 - Rush` },
+        { id: 121, season: 2, num: 1, title: `${kitchen} - S02E01 - Review` },
+        { id: 100, season: 0, num: 1, title: 'Behind the scenes' },
+      ],
+    },
+  };
+}
