@@ -297,6 +297,8 @@ async function ingestProvider(deps: Deps, generation: number, nowSec: number): P
       if (!item) return;
       if (!first && gapMs > 0) await delay(gapMs, undefined, { signal });
       signal?.throwIfAborted();
+      // Another worker may have failed the refresh during the gap.
+      if (failed) return;
       let listings: Listing[];
       try {
         listings = await client.epgTable(item.remoteId, { signal, tz: deps.timezone });

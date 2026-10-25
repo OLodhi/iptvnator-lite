@@ -313,6 +313,40 @@ describe('refreshGuide fallback to the provider EPG', () => {
     expect(store.state(providerId)).toMatchObject({ generation: 0, failures: 1 });
   });
 
+  test('a worker waiting out its gap sends nothing more once an auth failure or the breaker has stopped the fallback', async () => {
+    const real = await setup({ guide: 'none', catalogue: hundredChannels() });
+    // One worker's auth failure lands while the other waits its gap.
+    let calls = 0;
+    let afterStop = 0;
+    let stopped = false;
+    const rejected: XtreamClient = {
+      ...real,
+      async epgTable() {
+        if (stopped) afterStop++;
+        if (++calls === 2) {
+          await new Promise((r) => setTimeout(r, 10));
+          stopped = true;
+          throw AUTH_FAILED();
+        }
+        return [];
+      },
+    };
+    await expect(refresh(rejected, { fallbackConcurrency: 2, fallbackGapMs: 50 })).rejects.toMatchObject({ code: 'PROVIDER_AUTH_FAILED' });
+    expect(afterStop).toBe(0);
+
+    // The tenth failure in a row trips the breaker while the other worker waits its gap.
+    let failures = 0;
+    const down: XtreamClient = {
+      ...real,
+      async epgTable() {
+        failures++;
+        throw new Error('socket hang up');
+      },
+    };
+    await expect(refresh(down, { fallbackConcurrency: 2, fallbackGapMs: 20 })).rejects.toMatchObject({ code: 'PROVIDER_UNREACHABLE' });
+    expect(failures).toBe(10);
+  });
+
   test('failed channels after a success are only channels without listings', async () => {
     const real = await setup({ guide: 'none', catalogue: hundredChannels() });
     let calls = 0;
