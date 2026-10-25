@@ -187,6 +187,8 @@
     pointer-events: none;
     background: linear-gradient(rgb(0 0 0 / 0.6), transparent 28%, transparent 62%, rgb(0 0 0 / 0.75));
     transition: opacity 0.2s;
+    /* A quick second tap is a skip, never iOS's double-tap zoom: on the tap surface and the buttons on it alike. */
+    touch-action: manipulation;
   }
   .controls.hidden {
     opacity: 0;

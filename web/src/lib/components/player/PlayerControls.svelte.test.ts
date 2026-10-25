@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import PlayerControls from './PlayerControls.svelte';
+import source from './PlayerControls.svelte?raw';
 
 let app: ReturnType<typeof mount> | undefined;
 let props: Record<string, unknown>;
@@ -112,6 +113,16 @@ test('double-tap right skips +10 and left −10', () => {
   advance(301);
   tap(surface, 800);
   expect(onSkip).toHaveBeenCalledTimes(2);
+});
+
+test('a double-tap is never a zoom: the tap surface and the buttons on it take manipulation only', () => {
+  // jsdom applies no component CSS, so read the rule. touch-action applies to the overlay's descendants too.
+  const css = source.slice(source.indexOf('<style>'));
+  const at = css.indexOf('\n  .controls {');
+  const controls = css.slice(at, css.indexOf('}', at));
+  expect(controls).toContain('touch-action: manipulation;');
+  setup();
+  expect(document.querySelector('.controls > .surface')).not.toBeNull();
 });
 
 test('fullscreen shows the title, channel buttons and track chips', () => {
