@@ -6,6 +6,7 @@ import { startFakeXtream } from '../../../tools/fake-xtream/src/server.ts';
 import { buildApp } from '../app.ts';
 import { createCatalogueRepo } from '../catalogue/repo.ts';
 import { createSeriesInfoCache } from '../catalogue/seriesInfo.ts';
+import { createVodInfoCache } from '../catalogue/vodInfo.ts';
 import { syncCatalogue } from '../catalogue/sync.ts';
 import { createSyncRunner } from '../catalogue/syncRunner.ts';
 import { createCurationService } from '../curation/service.ts';
@@ -27,10 +28,11 @@ export async function startBrowseApp(catalogue: FakeCatalogue) {
   const providers = createProviderService({ db, userAgent: config.defaultUserAgent });
   const repo = createCatalogueRepo(db);
   const seriesInfo = createSeriesInfoCache({ providers, catalogue: repo });
+  const vodInfo = createVodInfoCache({ providers, catalogue: repo });
   const curation = createCurationService({ db, now: Date.now });
   const personal = createPersonalService({ db, now: Date.now });
   const app: FastifyInstance = await buildApp({
-    config, db, providers, catalogue: repo, curation, personal, seriesInfo,
+    config, db, providers, catalogue: repo, curation, personal, seriesInfo, vodInfo,
     sync: createSyncRunner({ db, providers }),
     sessions: stubSessions(),
     ...guideDeps(db, providers),
@@ -38,7 +40,7 @@ export async function startBrowseApp(catalogue: FakeCatalogue) {
   const providerId = (await providers.add({ kind: 'xtream', serverUrl: fake.url, username: 'u', password: 'p' })).id;
   await syncCatalogue({ db, client: providers.clientFor(providerId), providerId });
   return {
-    app, db, fake, providers, providerId, catalogue: repo, curation, personal, seriesInfo,
+    app, db, fake, providers, providerId, catalogue: repo, curation, personal, seriesInfo, vodInfo,
     close: async () => {
       await app.close();
       await fake.close();

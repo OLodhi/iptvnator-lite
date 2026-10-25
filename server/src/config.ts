@@ -7,6 +7,8 @@ export type Config = {
   host: string;
   dataDir: string;
   logoDir: string;
+  /** Proxied series and movie artwork (posters, backdrops, stills). */
+  artDir: string;
   transcodeDir: string;
   ffmpegPath: string;
   ffprobePath: string;
@@ -27,6 +29,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // Against the repo root, not the cwd: `npm start` (in server/) and `node server/src/main.ts` share one database.
     dataDir,
     logoDir: path.join(dataDir, 'logos'),
+    artDir: path.join(dataDir, 'art'),
     transcodeDir: env.TV_TRANSCODE_DIR ?? path.join(os.tmpdir(), 'tv-sessions'),
     ffmpegPath: env.TV_FFMPEG_PATH ?? 'ffmpeg',
     ffprobePath: env.TV_FFPROBE_PATH ?? 'ffprobe',

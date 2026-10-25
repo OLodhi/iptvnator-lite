@@ -15,6 +15,7 @@ import { createGuideStore } from './guide/store.ts';
 import { visibleLiveItemIds } from './guide/visible.ts';
 import { createPrefsService } from './prefs/service.ts';
 import { DEFAULT_USER_ID } from './users.ts';
+import { createArtCache } from './logos/art.ts';
 import { createLogoCache } from './logos/cache.ts';
 import { createProber, withProbeLog } from './playback/probe.ts';
 import { startUpstreamRelay } from './playback/relay.ts';
@@ -75,8 +76,9 @@ const logos = createLogoCache({
   userAgent: config.defaultUserAgent,
   allowPrivate: config.allowPrivateImageHosts,
 });
+const art = createArtCache(config);
 const app = await buildApp({
-  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, guide, prefs, logos, log, httpLogLevel: 'warn',
+  config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, guide, prefs, logos, art, log, httpLogLevel: 'warn',
 });
 
 const scheduler = createRefreshScheduler({
@@ -91,6 +93,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   scheduler.stop();
   logos.stop();
+  art.stop();
   try {
     // Together: closing the app aborts direct streams, stopAll ends every FFmpeg, and the guide refresh is aborted.
     await Promise.allSettled([app.close(), sessions.stopAll(), guide.stop()]);
@@ -108,4 +111,5 @@ void refreshLegacyAccounts({ providers, log });
 await app.listen({ port: config.port, host: config.host });
 scheduler.start();
 logos.start();
+art.start();
 console.log(`Server listening on http://${config.host}:${config.port}`);

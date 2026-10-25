@@ -386,7 +386,7 @@ export async function startFakeXtream(opts: FakeXtreamOptions): Promise<FakeXtre
           series_id: String(it.id),
           cover: '',
           rating: '7.0',
-          releaseDate: '2020-01-01',
+          releaseDate: it.id === 11 ? '2022-06-23' : '2020-01-01', // the rich series (11) is a 2022 show
           category_id: it.categoryId,
         }));
       case 'get_series_info': {

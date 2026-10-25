@@ -25,6 +25,9 @@ import type { PrefsService } from './prefs/service.ts';
 import type { GuideRunner } from './guide/runner.ts';
 import { guideRoutes } from './routes/guide.ts';
 import { importRoutes } from './routes/import.ts';
+import { createArtCache } from './logos/art.ts';
+import { createVodInfoCache, type VodInfoCache } from './catalogue/vodInfo.ts';
+import { detailsRoutes } from './routes/details.ts';
 import { logoRoutes } from './routes/logos.ts';
 import { meRoutes } from './routes/me.ts';
 import { playbackRoutes } from './routes/playback.ts';
@@ -50,6 +53,10 @@ export type AppDeps = {
   now?: () => number;
   /** Proxied logos and posters; a cache over `config.logoDir` if left out. */
   logos?: LogoCache;
+  /** Movie details from the provider; a cache over the catalogue if left out. */
+  vodInfo?: VodInfoCache;
+  /** Proxied series and movie artwork; a cache over `config.artDir` if left out. */
+  art?: LogoCache;
   /** Where IPTVnator uploads are spooled; the OS temp directory if left out. */
   tmpDir?: string;
   /** Largest IPTVnator upload in bytes; 512 MB if left out. */
@@ -74,6 +81,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       userAgent: config.defaultUserAgent,
       allowPrivate: config.allowPrivateImageHosts,
     });
+  const art = deps.art ?? createArtCache(config);
+  const vodInfo = deps.vodInfo ?? createVodInfoCache({ catalogue: deps.catalogue, providers: deps.providers });
   const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
 
   await app.register(
@@ -101,6 +110,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         meRoutes({ personal: deps.personal, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo }),
       );
       await api.register(logoRoutes({ catalogue: deps.catalogue, logos }));
+      await api.register(
+        detailsRoutes({
+          db: deps.db, catalogue: deps.catalogue, seriesInfo: deps.seriesInfo, vodInfo, curation: deps.curation, art,
+        }),
+      );
       await api.register(browseRoutes({ presenter, providers: deps.providers }));
       await api.register(
         searchRoutes({

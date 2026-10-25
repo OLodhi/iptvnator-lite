@@ -110,6 +110,26 @@ export type GuideSource = { key: string; name: string };
 export type Quality = 'HD' | '4K';
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
+/** An episode with its still (a server-relative /api/art path) for the series page. */
+export type EpisodeDetail = Episode & { imageUrl: string | null; airDate: string | null; quality: Quality | null };
+export type SeasonDetail = { season: number; name: string; coverUrl: string | null; episodes: EpisodeDetail[] };
+type DetailsBase = {
+  plot: string | null;
+  genre: string | null;
+  cast: string | null;
+  director: string | null;
+  year: number | null;
+  rating: string | null;
+  /** A server-relative /api/art path, or null when the provider has no image. */
+  posterUrl: string | null;
+  backdropUrl: string | null;
+};
+export type ItemDetails = (
+  | { kind: 'series'; seasons: SeasonDetail[] }
+  | { kind: 'movie'; durationSec: number | null }
+) & DetailsBase;
+/** Where the watch page's Back and "more in this list" lead for a live channel. */
+export type WatchContext = { categoryId: number | null; label: string | null };
 export type PlayRequest = {
   itemId: number;
   episodeRemoteId?: string;
