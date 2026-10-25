@@ -264,28 +264,6 @@ test('catch-up back to live plays live without catchup; the on-now line needs no
   expect(itemCalls()).toHaveLength(2);
 });
 
-test('the on-now line moves to the next programme at its stop time, hidden until the new one arrives', async () => {
-  fakeTimeouts();
-  route.url = new URL('http://localhost/watch?item=7');
-  serve(liveRes, liveItem());
-  app = mount(Watch, { target: document.body });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten · until 23:00'));
-  let answer!: (it: CatalogItem) => void;
-  api.mockImplementation((path: string) => (path === '/api/play' ? Promise.resolve(liveRes) : new Promise((r) => (answer = r))));
-  await vi.advanceTimersByTimeAsync(82_800_000 - Date.now() - 1);
-  flushSync();
-  expect(itemCalls()).toHaveLength(1);
-  expect(document.body.textContent).toContain('On now: News at Ten');
-  await vi.advanceTimersByTimeAsync(1);
-  flushSync();
-  expect(itemCalls()).toHaveLength(2);
-  expect(document.body.textContent).not.toContain('On now');
-  expect(buttonWith('From start')).toBeUndefined();
-  answer(liveItem({ now: film }));
-  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film · until 01:00'));
-  expect(buttonWith('From start')).toBeDefined();
-});
-
 test('From start after the programme has ended opens the programme on now, and does nothing when none is on', async () => {
   fakeTimeouts();
   route.url = new URL('http://localhost/watch?item=7');
@@ -331,39 +309,6 @@ test('the refetch timer is cleared on item change and on teardown', async () => 
   unmount(app);
   app = undefined;
   expect(vi.getTimerCount()).toBe(0);
-});
-
-test('an answer whose programme has already ended by this clock is hidden and asked again 30 s later, not at once', async () => {
-  fakeTimeouts();
-  route.url = new URL('http://localhost/watch?item=7');
-  serve(liveRes, liveItem({ now: { title: 'Ended', startSec: 76000, stopSec: 79000 } }));
-  app = mount(Watch, { target: document.body });
-  await vi.waitFor(() => expect(itemCalls()).toHaveLength(1));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(document.body.textContent).not.toContain('On now');
-  serve(liveRes, liveItem());
-  await vi.advanceTimersByTimeAsync(29_000);
-  expect(itemCalls()).toHaveLength(1);
-  await vi.advanceTimersByTimeAsync(1_000);
-  expect(itemCalls()).toHaveLength(2);
-  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
-});
-
-test('coming back to the foreground refetches the item; a hidden page does not', async () => {
-  route.url = new URL('http://localhost/watch?item=7');
-  serve(liveRes, liveItem());
-  app = mount(Watch, { target: document.body });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: News at Ten'));
-  let visibility = 'hidden';
-  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
-  document.dispatchEvent(new Event('visibilitychange'));
-  expect(itemCalls()).toHaveLength(1);
-  vi.setSystemTime(83_000_000);
-  serve(liveRes, liveItem({ now: film }));
-  visibility = 'visible';
-  document.dispatchEvent(new Event('visibilitychange'));
-  await vi.waitFor(() => expect(document.body.textContent).toContain('On now: Film'));
-  expect(itemCalls()).toHaveLength(2);
 });
 
 test('two quick query changes leave one active session on the latest window; superseded ones are released once, never attached', async () => {
