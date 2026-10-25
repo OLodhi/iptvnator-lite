@@ -14,8 +14,9 @@
   let { open, kind, tracks, selected, onPick, onClose }: Props = $props();
 
   const actions = $derived([
-    ...(kind === 'subtitles' ? [{ label: 'Off', selected: selected === null, run: () => onPick(null) }] : []),
+    ...(kind === 'subtitles' ? [{ key: 'off', label: 'Off', selected: selected === null, run: () => onPick(null) }] : []),
     ...tracks.map((t) => ({
+      key: t.index,
       label: t.available ? t.label : `${t.label} (not supported on this device)`,
       disabled: !t.available,
       selected: t.index === selected,

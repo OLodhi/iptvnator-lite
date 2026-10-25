@@ -1,5 +1,5 @@
 <script lang="ts">
-  type Action = { label: string; danger?: boolean; disabled?: boolean; selected?: boolean; run: () => void };
+  type Action = { key?: string | number; label: string; danger?: boolean; disabled?: boolean; selected?: boolean; run: () => void };
   type Props = { open: boolean; title: string; actions: Action[]; onClose: () => void };
 
   let { open, title, actions, onClose }: Props = $props();
@@ -25,7 +25,7 @@
   <div class="backdrop" role="presentation" onclick={backdropClick}></div>
   <div class="sheet" role="dialog" aria-modal="true" aria-label={title}>
     <p class="sheet-title">{title}</p>
-    {#each actions as a (a.label)}
+    {#each actions as a, i (a.key ?? `${i}:${a.label}`)}
       <button
         type="button"
         class="sheet-action"

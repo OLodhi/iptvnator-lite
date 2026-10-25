@@ -41,3 +41,21 @@ test('audio has no Off entry and marks the selected track', () => {
   expect(buttons[1]!.getAttribute('aria-pressed')).toBe('true');
   expect(document.querySelector('.sheet-title')?.textContent).toBe('Audio');
 });
+
+test('two tracks with the same label both render and each picks its own index', () => {
+  const onPick = vi.fn();
+  app = mount(TrackSheet, {
+    target: document.body,
+    props: { open: true, kind: 'subtitles', tracks: [t(4, 'English'), t(5, 'English'), t(6, 'Off')], selected: 5, onPick, onClose: vi.fn() },
+  });
+  flushSync();
+  const buttons = actions();
+  expect(buttons).toHaveLength(4);
+  expect(buttons[2]!.getAttribute('aria-pressed')).toBe('true');
+  buttons[2]!.click();
+  expect(onPick).toHaveBeenLastCalledWith(5);
+  buttons[1]!.click();
+  expect(onPick).toHaveBeenLastCalledWith(4);
+  buttons[3]!.click();
+  expect(onPick).toHaveBeenLastCalledWith(6);
+});
