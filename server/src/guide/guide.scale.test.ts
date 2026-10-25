@@ -90,9 +90,12 @@ function expectedCounts(nowSec: number): { generated: number; stored: number } {
   return { generated: GUIDE.channels * starts.length, stored: archived * kept(ARCHIVE_DAYS) + (GUIDE.channels - archived) * kept(1) };
 }
 
-/** Within 2%: the fake reads its own clock, a moment after ours, which can move its grid by an hour. */
+/**
+ * Within one programme per channel: the fake reads its own clock, a moment after ours, which can move its grid across
+ * an hour boundary and so by at most one slot per channel.
+ */
 function expectNear(actual: number, expected: number, what: string): void {
-  expect(Math.abs(actual - expected) / expected, `${what}: ${actual}, expected about ${expected}`).toBeLessThan(0.02);
+  expect(Math.abs(actual - expected), `${what}: ${actual}, expected about ${expected}`).toBeLessThanOrEqual(GUIDE.channels);
 }
 
 type Measured<T> = { result: T; seconds: number; maxDelayMs: number; rssGrowthMb: number };
@@ -224,6 +227,7 @@ test(
     expect(current).toBeGreaterThan(first);
     expect(generationsIn('programmes')).toEqual([current]);
     expect(generationsIn('guide_channels')).toEqual([current]);
+    expect(m.result.linked).toBe(GUIDE.channels);
     expectNear(m.result.programmes, expectedCounts(Math.floor(nowMs / 1000)).stored, 'programmes stored');
     expect(programmeRows()).toBe(m.result.programmes);
     expect(m.seconds).toBeLessThan(120);

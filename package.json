@@ -5,7 +5,7 @@
   "engines": { "node": ">=24" },
   "workspaces": ["shared", "server", "web", "tools/fake-xtream"],
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --project server --project tools/fake-xtream --project web",
     "test:scale": "vitest run --project server-scale",
     "typecheck": "tsc -p server && tsc -p tools/fake-xtream && npm run check -w web",
     "dev:server": "npm run dev -w server",
