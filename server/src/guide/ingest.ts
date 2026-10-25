@@ -6,7 +6,7 @@ import type { Listing } from '../providers/xtream/normalise.ts';
 import { silentLog } from '../util/log.ts';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
-import { applyLinks, computeLinks, loadManualMaps, loadMatchItems, planLinks, prepareNames } from './match.ts';
+import { applyLinks, linkCandidates, loadManualMaps, loadMatchItems, planLinks, prepareNames } from './match.ts';
 import type { MatchItem, NameCache } from './match.ts';
 import type { GuideChannelRow, GuideStore, ProgrammeRow } from './store.ts';
 import { maybeGunzip, parseXmltv } from './xmltv.ts';
@@ -182,7 +182,11 @@ function loadCatchupDays(db: Db, providerId: number): Map<number, number> {
   return new Map(rows.map((r) => [r.id, r.days]));
 }
 
-/** The keys live items link to among `channels`, plus every item's own guide id. */
+/**
+ * Every key a live item could link to among `channels`, plus every item's own guide id. Which candidate an item
+ * links to depends on which have listings, so all of them are wanted; each keeps the catch-up days of every item
+ * that could link to it. They are all declared channels, so at most the whole guide is wanted.
+ */
 function wantedKeys(
   items: MatchItem[],
   channels: { key: string; names: string[] }[],
@@ -192,7 +196,7 @@ function wantedKeys(
 ): Wanted {
   const days = new Map<string, number>();
   const want = (key: string, itemId: number) => days.set(key, Math.max(days.get(key) ?? 1, catchup.get(itemId) ?? 0));
-  for (const [itemId, link] of computeLinks({ items, channels, manual, names })) want(link.key, itemId);
+  for (const [itemId, keys] of linkCandidates({ items, channels, manual, names })) for (const key of keys) want(key, itemId);
   for (const item of items) if (item.epgChannelId) want(item.epgChannelId, item.id);
 
   const exact = new Map<string, number>();

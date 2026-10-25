@@ -14,6 +14,7 @@ import { createXtreamClient } from '../providers/xtream/client.ts';
 import type { XtreamClient } from '../providers/xtream/client.ts';
 import type { Log } from '../util/log.ts';
 import { GUIDE_FUTURE_SEC, GuideError, refreshGuide } from './ingest.ts';
+import { relinkGuide, relinkGuideInSteps } from './match.ts';
 import { createGuideStore } from './store.ts';
 import type { GuideStore } from './store.ts';
 
@@ -170,6 +171,52 @@ describe('refreshGuide from xmltv', () => {
     expect(r.programmes).toBe(456);
     expect(store.currentGeneration(providerId)).toBeGreaterThan(0);
     expect(lines.some((l) => l.level === 'warn' && JSON.stringify(l.o).includes('disk full'))).toBe(true);
+  });
+});
+
+describe('refreshGuide past a guide channel without listings', () => {
+  const rename = (remoteId: string, name: string, epgChannelId: string) =>
+    db.prepare("UPDATE items SET name = ?, epg_channel_id = ? WHERE kind = 'live' AND remote_id = ?").run(name, epgChannelId, remoteId);
+  const allLinks = () => db.prepare('SELECT item_id, channel_key, method FROM guide_links ORDER BY item_id').all();
+  // The guide id's channel holds one programme, which ended yesterday; the schedule is under TNTSports1.uk, one
+  // programme of it older than a day.
+  const tnt = (stubName: string, scheduleName: string) =>
+    `<tv>${xmlChannel('TNT.Sports.1.HD.uk', stubName)}${xmlChannel('TNTSports1.uk', scheduleName)}` +
+    `${xmlProgramme('TNT.Sports.1.HD.uk', NOW - 20 * HOUR)}${xmlProgramme('TNTSports1.uk', NOW - 30 * HOUR)}` +
+    `${xmlProgramme('TNTSports1.uk', NOW)}${xmlProgramme('TNTSports1.uk', NOW + HOUR)}</tv>`;
+
+  test("an item's later-step candidates are wanted, so it links to a populated channel its guide id does not name", async () => {
+    const real = await setup();
+    rename('1', 'UK| TNT SPORTS 1 HD', 'TNT.Sports.1.HD.uk'); // 2 days of catch-up
+    await refresh(feeding(real, tnt('TNT Sports 1 (old)', 'UK| TNT Sports 1 HD')));
+
+    expect(link('1')).toEqual({ key: 'TNTSports1.uk', method: 'normalised' });
+    // Stored for the item's own 2 days, as a guide it may link to.
+    expect(span('TNTSports1.uk')).toEqual({ first: NOW - 30 * HOUR, last: NOW + HOUR, n: 3 });
+    expect(span('TNT.Sports.1.HD.uk')).toMatchObject({ n: 1 });
+  });
+
+  test('the TNT shape: X HD links to the populated guide of X HD ◉, and every relink path agrees', async () => {
+    const real = await setup();
+    rename('1', 'UK| TNT SPORTS 1 HD', 'TNT.Sports.1.HD.uk'); // 2 days of catch-up
+    rename('3', 'UK| TNT SPORTS 1 HD ◉', 'TNTSports1.uk'); // none
+    await refresh(feeding(real, tnt('UK| TNT SPORTS 1 HD', 'TNT S1')));
+
+    expect(link('1')).toEqual({ key: 'TNTSports1.uk', method: 'sibling' });
+    expect(link('3')).toEqual({ key: 'TNTSports1.uk', method: 'id' });
+    // Kept for item 1's 2 days of catch-up, though only item 3 names the channel.
+    expect(span('TNTSports1.uk')).toMatchObject({ first: NOW - 30 * HOUR, n: 3 });
+
+    const inIngest = allLinks();
+    relinkGuide(db, providerId, NOW);
+    expect(allLinks()).toEqual(inIngest);
+    db.prepare('DELETE FROM guide_links').run();
+    await relinkGuideInSteps(db, providerId, NOW);
+    expect(allLinks()).toEqual(inIngest);
+    // Once the schedule's last programme has stopped, nothing has listings: each item is back on its own guide id.
+    relinkGuide(db, providerId, NOW + 2 * HOUR);
+    expect(link('1')).toEqual({ key: 'TNT.Sports.1.HD.uk', method: 'id' });
+    expect(link('3')).toEqual({ key: 'TNTSports1.uk', method: 'id' });
   });
 });
 
