@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { checkPublicUrl } from '../net/publicAddress.ts';
 
 export interface CachedLogo {
   path: string;
@@ -36,6 +37,8 @@ const FAILURE_TTL_MS = 3_600_000;
 const MAX_FAILURES = 5_000;
 export const MAX_CONCURRENT_FETCHES = 8;
 export const MAX_QUEUED_FETCHES = 200;
+const MAX_REDIRECTS = 3;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 /** A temp file this young may still be mid-write. */
 const TMP_MIN_AGE_MS = 600_000;
 
@@ -75,8 +78,13 @@ export function createLogoCache(deps: {
   /** Outbound fetches at once (this cache's, shared by all requests) and how many more may wait for a slot. */
   maxConcurrent?: number;
   maxQueued?: number;
+  /** Fetch from loopback, private and link-local addresses too (for a provider on the LAN); refused if left out. */
+  allowPrivate?: boolean;
+  /** Resolves host names for the address check; the system resolver if left out. */
+  lookup?: Parameters<typeof checkPublicUrl>[1];
 }): LogoCache {
-  const { dir, now, userAgent } = deps;
+  const { dir, now, userAgent, lookup } = deps;
+  const allowPrivate = deps.allowPrivate ?? false;
   const fetchFn = deps.fetchFn ?? fetch;
   const ttlMs = deps.ttlMs ?? 7 * DAY_MS;
   const maxBytes = deps.maxBytes ?? 2_000_000;
@@ -169,10 +177,21 @@ export function createLogoCache(deps: {
   /** The image at `url`, or null if the provider has no usable one (a failure, not an image, too big or too slow). */
   async function download(url: string): Promise<{ body: Buffer; ext: string } | null> {
     try {
-      const res = await fetchFn(url, {
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: userAgent ? { 'user-agent': userAgent } : {},
-      });
+      const signal = AbortSignal.timeout(timeoutMs);
+      let res: Response;
+      for (let hop = 0; ; hop++) {
+        if (!allowPrivate && !(await checkPublicUrl(url, lookup))) return null;
+        res = await fetchFn(url, {
+          signal,
+          redirect: 'manual',
+          headers: userAgent ? { 'user-agent': userAgent } : {},
+        });
+        const location = res.headers.get('location');
+        if (!REDIRECT_STATUSES.has(res.status) || !location) break;
+        await res.body?.cancel();
+        if (hop >= MAX_REDIRECTS) return null;
+        url = new URL(location, url).href;
+      }
       const ext = res.ok ? EXTENSIONS[(res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()] : undefined;
       if (!ext) {
         await res.body?.cancel();

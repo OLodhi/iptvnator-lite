@@ -69,7 +69,12 @@ const sessions = createSessionManager({
 });
 const personal = createPersonalService({ db, now: Date.now });
 const prefs = createPrefsService(db);
-const logos = createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
+const logos = createLogoCache({
+  dir: config.logoDir,
+  now: Date.now,
+  userAgent: config.defaultUserAgent,
+  allowPrivate: config.allowPrivateImageHosts,
+});
 const app = await buildApp({
   config, db, providers, sync, catalogue, seriesInfo, sessions, curation, personal, guide, prefs, logos, log, httpLogLevel: 'warn',
 });

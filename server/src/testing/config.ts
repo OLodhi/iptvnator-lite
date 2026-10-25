@@ -12,5 +12,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     TV_FFMPEG_PATH: process.env.TV_FFMPEG_PATH,
     TV_FFPROBE_PATH: process.env.TV_FFPROBE_PATH,
   });
-  return { ...base, ...overrides };
+  // The test image servers listen on 127.0.0.1.
+  return { ...base, allowPrivateImageHosts: true, ...overrides };
 }

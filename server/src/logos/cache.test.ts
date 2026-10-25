@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { PNG, startImageServer } from '../testing/imageServer.ts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,7 +27,7 @@ beforeEach(() => {
 const files = () => fs.readdirSync(dir);
 
 test('caches on disk and serves the second request without fetching', async () => {
-  const cache = createLogoCache({ dir, now, userAgent: 'TestAgent/1' });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, userAgent: 'TestAgent/1' });
   const first = await cache.get(`${server.url}/logo.png`);
   expect(first?.contentType).toBe('image/png');
   expect(fs.readFileSync(first!.path)).toEqual(PNG);
@@ -40,7 +40,7 @@ test('caches on disk and serves the second request without fetching', async () =
 });
 
 test('refetches after the TTL', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 1000 });
   await cache.get(`${server.url}/logo.png`);
   clock += 999;
   await cache.get(`${server.url}/logo.png`);
@@ -51,28 +51,28 @@ test('refetches after the TTL', async () => {
 });
 
 test('concurrent requests for one URL share a fetch', async () => {
-  const cache = createLogoCache({ dir, now });
+  const cache = createLogoCache({ allowPrivate: true, dir, now });
   const results = await Promise.all([1, 2, 3].map(() => cache.get(`${server.url}/logo.png`)));
   expect(new Set(results.map((r) => r?.path)).size).toBe(1);
   expect(server.hits).toHaveLength(1);
 });
 
 test('returns null for a non-image content type', async () => {
-  const cache = createLogoCache({ dir, now });
+  const cache = createLogoCache({ allowPrivate: true, dir, now });
   expect(await cache.get(`${server.url}/page.html`)).toBeNull();
   expect(await cache.get(`${server.url}/missing.png`)).toBeNull();
   expect(fs.existsSync(dir) ? files() : []).toEqual([]);
 });
 
 test('returns null and keeps nothing for a body over maxBytes', async () => {
-  const cache = createLogoCache({ dir, now, maxBytes: 6_000 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, maxBytes: 6_000 });
   expect(await cache.get(`${server.url}/big.png`)).toBeNull();
   expect(fs.existsSync(dir) ? files() : []).toEqual([]);
-  expect(await createLogoCache({ dir, now, maxBytes: 20_000 }).get(`${server.url}/big.png`)).not.toBeNull();
+  expect(await createLogoCache({ allowPrivate: true, dir, now, maxBytes: 20_000 }).get(`${server.url}/big.png`)).not.toBeNull();
 });
 
 test('returns null on timeout', async () => {
-  const cache = createLogoCache({ dir, now, timeoutMs: 150 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, timeoutMs: 150 });
   expect(await cache.get(`${server.url}/slow.png`)).toBeNull();
   expect(fs.existsSync(dir) ? files() : []).toEqual([]);
 });
@@ -80,6 +80,7 @@ test('returns null on timeout', async () => {
 test('rejects non-http(s) URLs', async () => {
   let called = 0;
   const cache = createLogoCache({
+    allowPrivate: true,
     dir,
     now,
     fetchFn: (async () => {
@@ -94,7 +95,7 @@ test('rejects non-http(s) URLs', async () => {
 });
 
 test('a failed rename returns null and leaves no temp file', async () => {
-  const cache = createLogoCache({ dir, now });
+  const cache = createLogoCache({ allowPrivate: true, dir, now });
   const key = createHash('sha256').update(`${server.url}/logo.png`).digest('hex');
   fs.mkdirSync(path.join(dir, `${key}.png`)); // a directory in the way makes the final rename fail
   expect(await cache.get(`${server.url}/logo.png`)).toBeNull();
@@ -105,7 +106,7 @@ test('a failed rename returns null and leaves no temp file', async () => {
 });
 
 test('a logo whose fetch failed is not fetched again for an hour, then it is', async () => {
-  const cache = createLogoCache({ dir, now });
+  const cache = createLogoCache({ allowPrivate: true, dir, now });
   const missing = `${server.url}/missing.png`;
   expect(await cache.get(missing)).toBeNull();
   clock += 3_600_000 - 1;
@@ -117,7 +118,7 @@ test('a logo whose fetch failed is not fetched again for an hour, then it is', a
 });
 
 test('remembered failures are bounded, the oldest forgotten first', async () => {
-  const cache = createLogoCache({ dir, now, maxFailures: 2 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, maxFailures: 2 });
   for (const name of ['a', 'b', 'c']) expect(await cache.get(`${server.url}/${name}.png`)).toBeNull();
   await cache.get(`${server.url}/c.png`); // still remembered
   await cache.get(`${server.url}/a.png`); // forgotten when c failed: fetched again
@@ -131,7 +132,7 @@ const put = (name: string, size: number, ageMs: number) => {
 };
 
 test('sweep removes temp files and files older than twice the TTL, keeping fresh ones', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 1000 });
   put('a.png.1.2.tmp', 10, 600_001);
   put('old.png', 20, 2001);
   put('stale.png', 30, 1500); // expired but under 2x: kept
@@ -141,7 +142,7 @@ test('sweep removes temp files and files older than twice the TTL, keeping fresh
 });
 
 test('sweep leaves fresh temp files alone', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 1000 });
   put('writing.png.1.2.tmp', 10, 599_000); // a write may still be under way
   put('left.png.1.2.tmp', 20, 600_001);
   expect(await cache.sweep()).toEqual({ deleted: 1, bytes: 20 });
@@ -149,19 +150,19 @@ test('sweep leaves fresh temp files alone', async () => {
 });
 
 test('sweep evicts the oldest files first when over the cap', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 250 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 10_000, maxCacheBytes: 250 });
   put('newest.png', 100, 1);
   put('oldest.png', 100, 300);
   put('middle.png', 100, 200);
   expect(await cache.sweep()).toEqual({ deleted: 1, bytes: 100 });
   expect(files().sort()).toEqual(['middle.png', 'newest.png']);
-  expect(await createLogoCache({ dir: path.join(dir, 'missing'), now }).sweep()).toEqual({ deleted: 0, bytes: 0 });
+  expect(await createLogoCache({ allowPrivate: true, dir: path.join(dir, 'missing'), now }).sweep()).toEqual({ deleted: 0, bytes: 0 });
 });
 
 test('start sweeps now and daily; stop ends the timer', async () => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }); // file I/O and waitFor stay real
   try {
-    const cache = createLogoCache({ dir, now, ttlMs: 1000 });
+    const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 1000 });
     put('old1.png', 1, 5000);
     cache.start();
     await vi.waitFor(() => expect(files()).toEqual([])); // real file I/O: wait for it
@@ -193,7 +194,7 @@ test('caps concurrent logo fetches at 8', async () => {
   await new Promise<void>((resolve) => hanging.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(hanging.address() as AddressInfo).port}`;
   try {
-    const cache = createLogoCache({ dir, now, timeoutMs: 5000 });
+    const cache = createLogoCache({ allowPrivate: true, dir, now, timeoutMs: 5000 });
     const all = Promise.all(Array.from({ length: 20 }, (_, i) => cache.get(`${base}/${i}.png`)));
     await vi.waitFor(() => expect(held).toHaveLength(8));
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -234,7 +235,7 @@ test('answers busy beyond the queue, and never queues cached or failed logos', a
     new Promise<Response>((resolve) =>
       gates.push(() => resolve(new Response(PNG, { headers: { 'content-type': 'image/png' } }))),
     )) as unknown as typeof fetch;
-  const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, maxQueued: 1 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, fetchFn, maxConcurrent: 1, maxQueued: 1 });
   const lookedUp = watchLookups();
   const running = cache.get('http://a/1.png');
   await vi.waitFor(() => expect(gates).toHaveLength(1)); // 1 holds the slot
@@ -265,7 +266,7 @@ test.each([
     }
     return Promise.resolve(new Response(PNG, { headers: { 'content-type': 'image/png' } }));
   }) as unknown as typeof fetch;
-  const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, timeoutMs: 50 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, fetchFn, maxConcurrent: 1, timeoutMs: 50 });
   const lookedUp = watchLookups();
   const results = [cache.get('http://a/1.png')];
   await vi.waitFor(() => expect(started).toEqual(['http://a/1.png']));
@@ -281,7 +282,7 @@ test.each([
 });
 
 test('the size cap leaves young temp files alone', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 50 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 10_000, maxCacheBytes: 50 });
   put('writing.png.1.2.tmp', 100, 1000); // older than the logos, but under ten minutes
   put('a.png', 100, 300);
   put('b.png', 100, 200);
@@ -290,9 +291,73 @@ test('the size cap leaves young temp files alone', async () => {
 });
 
 test('a large young temp file does not push logos over the cap', async () => {
-  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 150 });
+  const cache = createLogoCache({ allowPrivate: true, dir, now, ttlMs: 10_000, maxCacheBytes: 150 });
   put('writing.png.1.2.tmp', 1000, 1000);
   put('a.png', 100, 300);
   expect(await cache.sweep()).toEqual({ deleted: 0, bytes: 0 });
   expect(files().sort()).toEqual(['a.png', 'writing.png.1.2.tmp']);
+});
+
+describe('redirects and private addresses', () => {
+  const publicLookup = async () => [{ address: '93.184.216.34' }];
+  const png = () => new Response(PNG, { headers: { 'content-type': 'image/png' } });
+  const redirect = (location: string, status = 302) => new Response(null, { status, headers: { location } });
+  const scripted = (routes: Record<string, () => Response>) => {
+    const seen: string[] = [];
+    const fetchFn = (async (input: string, init?: RequestInit) => {
+      seen.push(input);
+      expect(init?.redirect).toBe('manual');
+      const route = routes[input];
+      return route ? route() : new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+    return { fetchFn, seen };
+  };
+
+  test('a redirect to a private address is refused and remembered as a failure', async () => {
+    const { fetchFn, seen } = scripted({ 'http://img.example.com/a.png': () => redirect('http://127.0.0.1/x') });
+    const cache = createLogoCache({ dir, now, fetchFn, lookup: publicLookup, allowPrivate: false });
+    expect(await cache.get('http://img.example.com/a.png')).toBeNull();
+    expect(seen).toEqual(['http://img.example.com/a.png']);
+    expect(await cache.get('http://img.example.com/a.png')).toBeNull();
+    expect(seen).toHaveLength(1); // remembered, not retried
+  });
+
+  test('a private first hop is refused without fetching', async () => {
+    const { fetchFn, seen } = scripted({});
+    const cache = createLogoCache({ dir, now, fetchFn, lookup: async () => [{ address: '10.0.0.5' }] });
+    expect(await cache.get('http://nas.local/a.png')).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  test('a fourth redirect is refused', async () => {
+    const { fetchFn, seen } = scripted({
+      'http://a.example.com/0': () => redirect('/1'),
+      'http://a.example.com/1': () => redirect('/2', 301),
+      'http://a.example.com/2': () => redirect('/3', 307),
+      'http://a.example.com/3': () => redirect('/4', 308),
+      'http://a.example.com/4': png,
+    });
+    const cache = createLogoCache({ dir, now, fetchFn, lookup: publicLookup });
+    expect(await cache.get('http://a.example.com/0')).toBeNull();
+    expect(seen).toHaveLength(4);
+  });
+
+  test('a public redirect chain is followed', async () => {
+    const { fetchFn, seen } = scripted({
+      'http://a.example.com/0': () => redirect('/1'),
+      'http://a.example.com/1': () => redirect('https://cdn.example.com/2', 303),
+      'https://cdn.example.com/2': () => redirect('3'),
+      'https://cdn.example.com/3': png,
+    });
+    const cache = createLogoCache({ dir, now, fetchFn, lookup: publicLookup });
+    const logo = await cache.get('http://a.example.com/0');
+    expect(logo?.contentType).toBe('image/png');
+    expect(seen).toHaveLength(4);
+  });
+
+  test('allowPrivate skips the address check', async () => {
+    const { fetchFn } = scripted({ 'http://127.0.0.1/a.png': png });
+    const cache = createLogoCache({ dir, now, fetchFn, allowPrivate: true });
+    expect(await cache.get('http://127.0.0.1/a.png')).not.toBeNull();
+  });
 });

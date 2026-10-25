@@ -13,6 +13,8 @@ export type Config = {
   webDir: string;
   defaultUserAgent: string;
   transcodeInterlaced: boolean;
+  /** Lets image fetches reach loopback, private and link-local hosts (a provider on the LAN). Off unless TV_ALLOW_PRIVATE_IMAGES=1. */
+  allowPrivateImageHosts: boolean;
 };
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -31,5 +33,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     webDir: env.TV_WEB_DIR ?? path.join(repoRoot, 'web', 'build'),
     defaultUserAgent: 'TiviMate/4.7.0',
     transcodeInterlaced: env.TV_TRANSCODE_INTERLACED === '1',
+    allowPrivateImageHosts: env.TV_ALLOW_PRIVATE_IMAGES === '1',
   };
 }

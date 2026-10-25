@@ -67,7 +67,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const presenter = createPresenter({ ...deps, guide: queries, now });
   const search = createSearch(deps.db);
   const logos =
-    deps.logos ?? createLogoCache({ dir: config.logoDir, now: Date.now, userAgent: config.defaultUserAgent });
+    deps.logos ??
+    createLogoCache({
+      dir: config.logoDir,
+      now: Date.now,
+      userAgent: config.defaultUserAgent,
+      allowPrivate: config.allowPrivateImageHosts,
+    });
   const app = Fastify({ logger: deps.httpLogLevel ? { level: deps.httpLogLevel } : false });
 
   await app.register(
