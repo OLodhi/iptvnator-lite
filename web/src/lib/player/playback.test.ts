@@ -314,6 +314,34 @@ test('seekTo clamps past the end to duration − 5 and before 0 to 0', async () 
   await back;
 });
 
+test('a seek beyond what is loaded and a track change say they restart; a start or a seek within does not', async () => {
+  const { deps, pending, video, open } = setup();
+  const onRestarting = vi.fn();
+  const pb = createPlayback({ ...deps, onRestarting });
+  const p = pb.start({ kind: 'movie', itemId: 1, startAtSec: 0 }, video);
+  pending[0]!.resolve({ ...res('s1', 3000), tracks });
+  await p;
+  open(120);
+  await pb.seekTo(video, 60);
+  expect(onRestarting).not.toHaveBeenCalled();
+
+  void pb.seekTo(video, 1800);
+  expect(onRestarting).toHaveBeenCalledTimes(1);
+  expect(onRestarting.mock.invocationCallOrder[0]).toBeLessThan(deps.play.mock.invocationCallOrder[1]!);
+  pending[1]!.resolve({ ...res('s2', 3000), startAtSec: 1800, tracks });
+  await flush();
+  void pb.restartWith(video, { subtitleIndex: 3 });
+  expect(onRestarting).toHaveBeenCalledTimes(2);
+
+  // Live never restarts for a seek.
+  const live = createPlayback({ ...deps, onRestarting });
+  const q = live.start({ kind: 'live', itemId: 2, startAtSec: 0 }, video);
+  pending[3]!.resolve(res('l1'));
+  await q;
+  await live.seekTo(video, 5000);
+  expect(onRestarting).toHaveBeenCalledTimes(2);
+});
+
 test('catch-up seek restarts at the minute and lands within a minute', async () => {
   const { deps, pending, video, open } = setup();
   const onStarted = vi.fn();

@@ -78,6 +78,14 @@ vi.mock('$lib/player/system', () => ({
 
 import { ApiClientError } from '$lib/api';
 import Watch from './+page.svelte';
+import pageSource from './+page.svelte?raw';
+
+/** The declarations of a rule in the page's own styles, which jsdom doesn't apply. */
+function pageRule(selector: string): string {
+  const css = pageSource.slice(pageSource.indexOf('<style>'));
+  const at = css.indexOf(`\n  ${selector} {`);
+  return at < 0 ? '' : css.slice(at, css.indexOf('}', at));
+}
 
 let app: ReturnType<typeof mount> | undefined;
 // 22:13:20 UTC on 1 January 1970: during liveItem's News at Ten (22:00–23:00).
@@ -454,6 +462,65 @@ test('a seek restart keeps showing the target while the new session starts', asy
   video().dispatchEvent(new Event('timeupdate')); // the old source is gone: currentTime is back at 0
   flushSync();
   expect(slider().getAttribute('aria-valuenow')).toBe('610');
+});
+
+const loading = () => document.querySelector('.player .loading');
+
+test('a seek restart shows the loading spinner over the video until the new session plays', async () => {
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(movieRes, movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  playing(video());
+  expect(loading()).toBeNull();
+
+  serve({ ...movieRes, sessionId: 'm2', startAtSec: 610 }, movieItem());
+  (document.querySelector('.controls [aria-label="Forward 10 seconds"]') as HTMLElement).click();
+  flushSync();
+  expect(loading()?.getAttribute('role')).toBe('status');
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  expect(loading()).not.toBeNull(); // attached, but nothing is playing yet
+  // Nothing covers the video: the transport stays usable.
+  expect(states()).toBeNull();
+  expect(document.querySelector('.controls')!.classList.contains('covered')).toBe(false);
+  playing(video());
+  expect(loading()).toBeNull();
+});
+
+test('a track restart shows the loading spinner', async () => {
+  await playingMovie(vodRes('m1'));
+  api.mockImplementation((path: string) => (path === '/api/play' ? new Promise(() => {}) : Promise.resolve(movieItem())));
+  pick('Audio', 'Dutch');
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(2));
+  expect(loading()).not.toBeNull();
+  expect(states()).toBeNull();
+});
+
+test('a stall shows the loading spinner until playing, and Back and pause still work under it', async () => {
+  const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  nav.after!({ from: { url: new URL('http://localhost/browse/live/3') }, to: { url: route.url } });
+  playing(video());
+  video().dispatchEvent(new Event('waiting'));
+  flushSync();
+  expect(loading()).not.toBeNull();
+  expect(document.querySelector('.controls')!.classList.contains('covered')).toBe(false);
+
+  (document.querySelector('.controls [aria-label="Pause"]') as HTMLElement).click();
+  expect(vi.mocked(HTMLMediaElement.prototype.pause)).toHaveBeenCalledTimes(1);
+  (document.querySelector('.topbar .back') as HTMLElement).click();
+  enterFullscreen();
+  expect(loading()).not.toBeNull();
+  (document.querySelector('.controls [aria-label="Back"]') as HTMLElement).click();
+  expect(back).toHaveBeenCalledTimes(2);
+  // The spinner never takes a tap.
+  expect(pageRule('.loading')).toContain('pointer-events: none;');
+
+  playing(video());
+  expect(loading()).toBeNull();
 });
 
 /** Two quick taps at `x` on a 900 px wide video. */

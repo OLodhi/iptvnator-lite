@@ -63,6 +63,8 @@
   let trackSheetKind = $state<'audio' | 'subtitles'>('subtitles');
   /** The episode the Up next card counts down to, from the end of this one until it plays or is cancelled. */
   let upNext = $state.raw<EpisodeDetail | null>(null);
+  /** A seek or track change is starting its new session: the old picture is gone until the new one plays. */
+  let restarting = $state(false);
   let begun = 0; // bumped on every begin(), so a late answer for an old URL is ignored
   let inAppHistory = false; // whether this page was reached from another page of the app, which Back can return to
 
@@ -117,6 +119,9 @@
       void reporter.flush();
       reporter.detach();
     },
+    onRestarting: () => {
+      restarting = true;
+    },
     onGone: () => {
       view = { kind: 'stopped' };
     },
@@ -140,6 +145,10 @@
   });
 
   const caps = $derived(video ? { pip: canPip(video), airplay: canAirPlay() } : { pip: false, airplay: false });
+
+  // A restart on its way, or a stall while playing: a spinner over the video. Unlike the states that cover it, it takes
+  // no taps, so Back, pause and the rest of the controls still work.
+  const loading = $derived(view === null && upNext === null && (restarting || (player?.waiting === true && !player.paused)));
 
   // Turning the phone takes over from ⤢: upright again is the upright page.
   $effect(() => {
@@ -258,6 +267,7 @@
   function start(startAtSec: number) {
     if (!video) return;
     view = { kind: 'starting' };
+    restarting = false; // Starting says so itself
     const p = params;
     const mine = begun;
     const play = (k: Kind) => {
@@ -474,6 +484,7 @@
 
   /** Playing: whatever covers the video goes, except the Resume choice, which waits for an answer. */
   function onPlaying() {
+    restarting = false;
     if (view && view.kind !== 'resume') view = null;
   }
 
@@ -574,6 +585,9 @@
         onTracks={openTracks}
         onBack={back}
       />
+    {/if}
+    {#if loading}
+      <div class="loading" role="status" aria-label="Loading"><span class="spinner" aria-hidden="true"></span></div>
     {/if}
     {#if view}
       <PlayerStates
@@ -679,6 +693,27 @@
     height: 100%;
     object-fit: contain;
     background: #000;
+  }
+  /* A ring around the controls' play button, which stays usable inside it. */
+  .loading {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+  }
+  .spinner {
+    width: 76px;
+    height: 76px;
+    border-radius: 50%;
+    border: 3px solid rgb(255 255 255 / 0.2);
+    border-top-color: #fff;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .switch {
     padding: 0 16px 16px;

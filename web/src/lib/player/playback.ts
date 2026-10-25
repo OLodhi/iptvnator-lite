@@ -33,6 +33,8 @@ export type PlaybackDeps = {
   }) => void;
   /** Called at the start of teardown of an attached session, before the video is detached. */
   onStopping?: () => void;
+  /** Called as a seek or a track change restarts the session: nothing plays until the new one does. */
+  onRestarting?: () => void;
   onError: (err: unknown) => void;
 };
 
@@ -188,6 +190,7 @@ export function createPlayback(deps: PlaybackDeps) {
       }
     }
     if (params.kind === 'live') return;
+    deps.onRestarting?.();
     return begin({ ...params, startAtSec: target }, video, durationSec);
   }
 
@@ -197,6 +200,7 @@ export function createPlayback(deps: PlaybackDeps) {
     patch: Partial<Pick<StartParams, 'audioIndex' | 'subtitleIndex' | 'subtitleLanguage'>>,
   ): Promise<void> {
     if (!latest) return Promise.resolve();
+    deps.onRestarting?.();
     return begin({ ...latest.params, ...patch, startAtSec: absoluteSec(video) }, video, latest.durationSec);
   }
 
