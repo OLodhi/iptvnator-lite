@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { smallCatalogue } from '../../../../tools/fake-xtream/src/catalogue.ts';
+import { richCatalogue, smallCatalogue } from '../../../../tools/fake-xtream/src/catalogue.ts';
 import { startFakeXtream } from '../../../../tools/fake-xtream/src/server.ts';
 import type { FakeXtream } from '../../../../tools/fake-xtream/src/server.ts';
 import { createXtreamClient } from './client.ts';
@@ -378,5 +378,94 @@ describe('xtream guide and timeshift calls', () => {
         expect(err.stack).not.toContain(secret);
       }
     });
+  });
+});
+
+describe('xtream series and movie details', () => {
+  let rich: FakeXtream;
+  let richClient: ReturnType<typeof createXtreamClient>;
+  beforeAll(async () => {
+    rich = await startFakeXtream({ mediaDir, catalogue: richCatalogue() });
+    richClient = createXtreamClient({ serverUrl: rich.url, username: 'u', password: 'p' }, { userAgent });
+  });
+  afterAll(async () => {
+    await rich?.close();
+  });
+
+  test('getSeriesInfo reads meta, season covers and episode stills', async () => {
+    const info = await richClient.getSeriesInfo('11');
+    expect(info.meta).toEqual({
+      name: 'EN - THE KITCHEN (2022)',
+      plot: 'A chef takes over a busy kitchen.',
+      genre: 'Drama / Comedy',
+      cast: 'Ann Lee, Bo Chan',
+      director: 'Cy Dee',
+      releaseDate: '2022-06-23',
+      rating: '8',
+      coverUrl: `${rich.url}/images/poster.png`,
+      backdropUrls: [`${rich.url}/images/backdrop.png`],
+    });
+    expect(info.seasonMeta).toEqual({ 1: { name: 'Season 1', coverUrl: `${rich.url}/images/s1.png` } });
+    expect(info.seasons.map((s) => s.season)).toEqual([0, 1, 2]);
+    expect(info.seasons[1]!.episodes[0]).toEqual({
+      remoteId: '111',
+      title: 'EN - THE KITCHEN (2022) - S01E01 - Pilot',
+      episodeNum: 1,
+      containerExt: 'mkv',
+      durationSec: 30,
+      imageUrl: `${rich.url}/images/ep111.png`,
+      airDate: '2022-06-23',
+      width: 1920,
+      height: 1080,
+    });
+  });
+
+  test('getVodInfo reads movie details', async () => {
+    expect(await richClient.getVodInfo('5')).toEqual({
+      plot: 'Two languages, two subtitles.',
+      genre: 'Test',
+      cast: 'A, B',
+      director: 'C',
+      releaseDate: '2021-01-01',
+      rating: '7',
+      coverUrl: `${rich.url}/images/poster.png`,
+      backdropUrls: [`${rich.url}/images/backdrop.png`],
+      durationSec: 30,
+    });
+    expect(await richClient.getVodInfo('1')).toMatchObject({ plot: null, coverUrl: null, backdropUrls: [], durationSec: null });
+  });
+
+  test('non-http image values become null', async () => {
+    const body = {
+      info: { name: 'X', cover: 'javascript:alert(1)', backdrop_path: ['file:///etc/passwd', 'https://img.example/b.jpg', 5] },
+      seasons: [{ season_number: 1, name: 'One', cover: 'data:image/png;base64,AAAA' }],
+      episodes: { '1': [{ id: 7, episode_num: 1, title: 'T', info: { movie_image: '/relative.png' } }] },
+    };
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      },
+      async (url) => {
+        const info = await clientFor(url).getSeriesInfo('1');
+        expect(info.meta.coverUrl).toBeNull();
+        expect(info.meta.backdropUrls).toEqual(['https://img.example/b.jpg']);
+        expect(info.seasonMeta[1]).toEqual({ name: 'One', coverUrl: null });
+        expect(info.seasons[0]!.episodes[0]!.imageUrl).toBeNull();
+      },
+    );
+  });
+
+  test('a bare-string backdrop and an empty-array info are tolerated', async () => {
+    await withServer(
+      (req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(req.url?.includes('get_vod_info') ? { info: [] } : { info: { backdrop_path: 'http://h/b.jpg' }, episodes: [] }));
+      },
+      async (url) => {
+        expect((await clientFor(url).getSeriesInfo('1')).meta.backdropUrls).toEqual(['http://h/b.jpg']);
+        expect(await clientFor(url).getVodInfo('1')).toMatchObject({ plot: null, backdropUrls: [] });
+      },
+    );
   });
 });

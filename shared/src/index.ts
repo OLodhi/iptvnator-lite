@@ -106,6 +106,8 @@ export type GuideMeta = {
 export type WhatsOnEntry = { item: CatalogItem; programme: Programme; live: boolean; catchup: boolean };
 export type GridRow = { item: CatalogItem; programmes: Programme[]; hasGuide: boolean };
 export type GuideSource = { key: string; name: string };
+/** The picture-quality badge on an episode row. */
+export type Quality = 'HD' | '4K';
 export type Episode = { remoteId: string; title: string; episodeNum: number; durationSec: number | null };
 export type Season = { season: number; episodes: Episode[] };
 export type PlayRequest = {

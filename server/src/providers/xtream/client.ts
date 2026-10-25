@@ -21,14 +21,43 @@ export type XtreamAccount = {
   timezone: string | null;
 };
 export type RawCategory = { remoteId: string; name: string };
-type Episode = { remoteId: string; title: string; episodeNum: number; containerExt: string; durationSec: number | null };
-export type SeriesInfo = { seasons: { season: number; episodes: Episode[] }[] };
+/** The descriptive fields shared by series and movie details; every one may be missing. Image values are http(s) URLs or null. */
+type Details = {
+  plot: string | null;
+  genre: string | null;
+  cast: string | null;
+  director: string | null;
+  releaseDate: string | null;
+  rating: string | null;
+  coverUrl: string | null;
+  backdropUrls: string[];
+};
+export type SeriesMeta = Details & { name: string | null };
+export type VodInfo = Details & { durationSec: number | null };
+/** An episode as the provider sent it: the title is raw, and the picture fields are null when unsent. */
+export type ProviderEpisode = {
+  remoteId: string;
+  title: string;
+  episodeNum: number;
+  containerExt: string;
+  durationSec: number | null;
+  imageUrl: string | null;
+  airDate: string | null;
+  width: number | null;
+  height: number | null;
+};
+export type SeriesInfo = {
+  meta: SeriesMeta;
+  seasonMeta: Record<number, { name: string | null; coverUrl: string | null }>;
+  seasons: { season: number; episodes: ProviderEpisode[] }[];
+};
 
 export interface XtreamClient {
   authenticate(): Promise<XtreamAccount>;
   getCategories(kind: Kind): Promise<RawCategory[]>;
   streamItems(kind: Kind): AsyncIterable<RawItem>;
   getSeriesInfo(seriesRemoteId: string): Promise<SeriesInfo>;
+  getVodInfo(remoteId: string): Promise<VodInfo>;
   liveUrl(remoteId: string, format: 'm3u8' | 'ts'): string;
   movieUrl(remoteId: string, ext: string): string;
   episodeUrl(episodeRemoteId: string, ext: string): string;
@@ -59,6 +88,36 @@ function toNumber(v: unknown): number | null {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function toText(v: unknown): string | null {
+  if (typeof v === 'string') return v.trim() || null;
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : null;
+}
+
+/** Only http(s) URLs are kept: the server fetches these later, and anything else is not an image we can serve. */
+function toHttpUrl(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return /^https?:\/\/\S+$/i.test(s) ? s : null;
+}
+
+function toHttpUrls(v: unknown): string[] {
+  const list = Array.isArray(v) ? v : [v];
+  return list.map(toHttpUrl).filter((u): u is string => u !== null);
+}
+
+function detailsOf(info: Record<string, unknown>): Details {
+  return {
+    plot: toText(info.plot ?? info.description),
+    genre: toText(info.genre),
+    cast: toText(info.cast ?? info.actors),
+    director: toText(info.director),
+    releaseDate: toText(info.releaseDate ?? info.releasedate ?? info.release_date),
+    rating: toText(info.rating),
+    coverUrl: toHttpUrl(info.cover ?? info.movie_image),
+    backdropUrls: toHttpUrls(info.backdrop_path),
+  };
 }
 
 export function createXtreamClient(
@@ -191,7 +250,7 @@ export function createXtreamClient(
       } else if (isRecord(eps)) {
         for (const [k, g] of Object.entries(eps)) if (Array.isArray(g)) groups.push([toNumber(k), g]);
       }
-      const bySeason = new Map<number, Episode[]>();
+      const bySeason = new Map<number, ProviderEpisode[]>();
       for (const [key, list] of groups) {
         for (const e of list) {
           if (!isRecord(e) || e.id == null) continue;
@@ -199,21 +258,45 @@ export function createXtreamClient(
           const arr = bySeason.get(season) ?? [];
           const episodeNum = toNumber(e.episode_num) ?? arr.length + 1;
           const info = isRecord(e.info) ? e.info : {};
+          const video = isRecord(info.video) ? info.video : {};
           arr.push({
             remoteId: String(e.id),
             title: typeof e.title === 'string' ? e.title : `Episode ${episodeNum}`,
             episodeNum,
             containerExt: typeof e.container_extension === 'string' && e.container_extension ? e.container_extension : 'mp4',
             durationSec: toNumber(info.duration_secs),
+            imageUrl: toHttpUrl(info.movie_image),
+            airDate: toText(info.air_date ?? info.releasedate),
+            width: toNumber(video.width),
+            height: toNumber(video.height),
           });
           bySeason.set(season, arr);
         }
       }
+      const seasonMeta: SeriesInfo['seasonMeta'] = {};
+      if (Array.isArray(body.seasons)) {
+        for (const s of body.seasons) {
+          const n = isRecord(s) ? toNumber(s.season_number ?? s.season) : null;
+          if (!isRecord(s) || n === null) continue;
+          seasonMeta[n] = { name: toText(s.name), coverUrl: toHttpUrl(s.cover ?? s.cover_big) };
+        }
+      }
+      const info = isRecord(body.info) ? body.info : {};
       return {
+        meta: { name: toText(info.name), ...detailsOf(info) },
+        seasonMeta,
         seasons: [...bySeason.entries()]
           .sort((a, b) => a[0] - b[0])
           .map(([season, episodes]) => ({ season, episodes: episodes.sort((a, b) => a.episodeNum - b.episodeNum) })),
       };
+    },
+
+    async getVodInfo(remoteId) {
+      const body = await json('get_vod_info', { vod_id: remoteId });
+      if (!isRecord(body)) throw new ProviderError('PROVIDER_BAD_RESPONSE', 'Unexpected movie info response');
+      // Providers send an empty array (or nothing) for a movie they know nothing about.
+      const info = isRecord(body.info) ? body.info : {};
+      return { ...detailsOf(info), durationSec: toNumber(info.duration_secs) };
     },
 
     async xmltv(o = {}) {
