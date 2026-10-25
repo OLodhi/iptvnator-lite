@@ -117,6 +117,14 @@ export type PlayRequest = {
   catchup?: { startSec: number; stopSec: number };
 };
 /**
+ * An audio or subtitle stream of a movie or episode. `index` is its stream index in the source; `language` is
+ * a 2-letter code where one is known (`en`, `nl`), else the source's tag. `available` is false for a picture
+ * subtitle (PGS, DVD), which can't be shown.
+ */
+export type MediaTrack = { index: number; label: string; language: string | null; isDefault: boolean; forced: boolean; available: boolean };
+/** A movie or episode's tracks, and the ones its session plays (null: none). */
+export type SessionTracks = { audio: MediaTrack[]; subtitles: MediaTrack[]; audioIndex: number | null; subtitleIndex: number | null };
+/**
  * `url` is server-relative and names the viewer: `/api/sessions/<sessionId>/<clientId>/index.m3u8` (HLS)
  * or `/api/sessions/<sessionId>/<clientId>/direct`.
  */
