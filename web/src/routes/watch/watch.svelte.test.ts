@@ -19,7 +19,7 @@ const side = vi.hoisted(() => vi.fn());
 const attachStream = vi.hoisted(() => vi.fn((_v: HTMLVideoElement, _url: string, _opts: object) => ({ destroy: () => {}, showSubtitles: () => {} })));
 const heartbeats = vi.hoisted(() => [] as { sessionId: string; onGone: () => void; stopped: boolean }[]);
 type BeforeNav = (nav: { to: { url: URL } | null }) => void;
-type AfterNav = (nav: { from: { url: URL } | null; to: { url: URL } | null }) => void;
+type AfterNav = (nav: { from: { url: URL | null } | null; to: { url: URL } | null }) => void;
 const nav = vi.hoisted(() => ({
   goto: vi.fn(async (_u: string, _opts?: object) => {}),
   before: undefined as BeforeNav | undefined,
@@ -564,6 +564,19 @@ test('Back without history goes to Movies for a movie and to the series for an e
   topBack().click();
   expect(nav.goto).toHaveBeenLastCalledWith('/series/11', { replaceState: true });
   expect(back).not.toHaveBeenCalled();
+});
+
+test('the first load of the app has no in-app history', async () => {
+  const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(movieRes, movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  // SvelteKit's start-up navigation in a single-page app comes from a page with no URL.
+  expect(() => nav.after!({ from: { url: null }, to: { url: route.url } })).not.toThrow();
+  (document.querySelector('.topbar .back') as HTMLElement).click();
+  expect(back).not.toHaveBeenCalled();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/movie', { replaceState: true });
 });
 
 test('catch-up params play catch-up without resume or progress', async () => {

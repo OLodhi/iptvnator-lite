@@ -407,8 +407,10 @@
   }
 
   // Navigations within the page don't count: they replace their entry, so behind it is still where it was opened from.
+  // Nor does the app's first load, which in a single-page app comes from a page with no URL.
   afterNavigate((nav) => {
-    if (nav.from && nav.from.url.pathname !== '/watch') inAppHistory = true;
+    const from = nav.from?.url;
+    if (from && from.pathname !== '/watch') inAppHistory = true;
   });
 
   /** Back where you came from. Opened from outside the app (a bookmark, a link, a relaunch), to the list it belongs to. */
