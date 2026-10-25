@@ -1,11 +1,20 @@
-import type { PlayRequest, PlayResponse } from '@tv/shared';
+import type { PlayRequest, PlayResponse, SessionTracks } from '@tv/shared';
+import type { StreamHandle } from './attach.ts';
+
+/** A seek never lands closer than this to the end, so it can't end playback the moment it arrives. */
+const END_MARGIN_SEC = 5;
+/** Catch-up windows start on a whole minute: the provider's timeshift URLs count in minutes. */
+const MINUTE_SEC = 60;
 
 export type PlaybackDeps = {
   play: (req: PlayRequest, signal: AbortSignal) => Promise<PlayResponse>;
   releaseSession: (sessionId: string, clientId: string) => Promise<void>;
   startHeartbeat: (sessionId: string, clientId: string, opts: { onGone: () => void }) => () => void;
-  /** `startAtSec`: for a direct stream, where to seek once the file is open (an HLS session starts there itself). */
-  attachStream: (video: HTMLVideoElement, url: string, opts: { startAtSec?: number }) => { destroy(): void };
+  /**
+   * `startAtSec`: for a direct stream, where to seek once the file is open (an HLS session starts there itself).
+   * `vod`: anything but live.
+   */
+  attachStream: (video: HTMLVideoElement, url: string, opts: { startAtSec?: number; vod: boolean }) => StreamHandle;
   clientId: () => string;
   onGone: () => void;
   /** Called once the stream is attached; durationSec comes from the server. */
@@ -13,30 +22,92 @@ export type PlaybackDeps = {
     /** Added to currentTime to get the absolute position; 0 when the stream itself is absolute. */
     offsetSec: number;
     durationSec: number | null;
+    mode: PlayResponse['mode'];
+    tracks: SessionTracks | null;
+    handle: StreamHandle;
   }) => void;
   /** Called at the start of teardown of an attached session, before the video is detached. */
   onStopping?: () => void;
   onError: (err: unknown) => void;
 };
 
-export type StartParams = { itemId: number; episodeRemoteId?: string; startAtSec: number; catchup?: { startSec: number; stopSec: number } };
+export type StartParams = {
+  kind: 'live' | 'catchup' | 'movie' | 'episode';
+  itemId: number;
+  episodeRemoteId?: string;
+  /** Where to start: seconds into the movie or episode, or into the catch-up programme. */
+  startAtSec: number;
+  /** The whole catch-up programme. A later start inside it is reached through a window that starts on its minute. */
+  catchup?: { startSec: number; stopSec: number };
+  audioIndex?: number;
+  subtitleIndex?: number | null;
+  subtitleLanguage?: string | null;
+};
+
+/** The attached session. Positions are absolute: currentTime + offsetSec. */
+export type CurrentPlayback = {
+  params: StartParams;
+  offsetSec: number;
+  /** The whole movie, episode or catch-up programme, when known. */
+  durationSec: number | null;
+  mode: PlayResponse['mode'];
+  tracks: SessionTracks | null;
+};
+
+/** Where the catch-up window for a start at `startAtSec` begins, in seconds after the programme's own start. */
+function windowShiftSec(startAtSec: number): number {
+  return Math.floor(startAtSec / MINUTE_SEC) * MINUTE_SEC;
+}
+
+function playRequest(params: StartParams, clientId: string): PlayRequest {
+  // A catch-up window carries its own position, so the stream starts at its beginning.
+  const req: PlayRequest = { itemId: params.itemId, startAtSec: params.catchup ? 0 : params.startAtSec, clientId };
+  if (params.episodeRemoteId) req.episodeRemoteId = params.episodeRemoteId;
+  if (params.catchup) {
+    req.catchup = { startSec: params.catchup.startSec + windowShiftSec(params.startAtSec), stopSec: params.catchup.stopSec };
+  }
+  if (params.audioIndex !== undefined) req.audioIndex = params.audioIndex;
+  if (params.subtitleIndex !== undefined) req.subtitleIndex = params.subtitleIndex;
+  if (params.subtitleLanguage !== undefined) req.subtitleLanguage = params.subtitleLanguage;
+  return req;
+}
+
+/** Seeks to `sec` once the stream's metadata is known; returns a canceller. */
+function seekWhenOpen(video: HTMLVideoElement, sec: number): () => void {
+  const seek = () => {
+    video.currentTime = sec;
+  };
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+    seek();
+    return () => {};
+  }
+  video.addEventListener('loadedmetadata', seek, { once: true });
+  return () => video.removeEventListener('loadedmetadata', seek);
+}
 
 /**
- * Owns the play -> attach -> heartbeat -> release lifecycle. Only the latest start() may attach;
- * any /api/play response that arrives after teardown() or a newer start() is released, never attached.
+ * Owns the play -> attach -> heartbeat -> release lifecycle. Only the latest start may attach; any /api/play
+ * response that arrives after teardown() or a newer start (including a seek or track restart) is released, never attached.
  */
 export function createPlayback(deps: PlaybackDeps) {
   let generation = 0;
   let controller: AbortController | undefined;
   let stopHeartbeat: (() => void) | undefined;
-  let handle: { destroy(): void } | undefined;
-  let active: { sessionId: string; clientId: string; vod: boolean; offsetSec: number } | undefined;
+  let handle: StreamHandle | undefined;
+  let cancelSeek: (() => void) | undefined;
+  /** The latest start until teardown, attached or not; durationSec is kept across its seek and track restarts. */
+  let latest: { params: StartParams; durationSec: number | null } | undefined;
+  /** The attached session; startSec is the absolute position it starts at. */
+  let active: (CurrentPlayback & { sessionId: string; clientId: string; startSec: number }) | undefined;
 
-  function teardown() {
+  /** Ends the attached or in-flight session. */
+  function stop() {
     if (active) deps.onStopping?.();
     generation++;
     controller?.abort();
     controller = undefined;
+    cancelSeek?.();
+    cancelSeek = undefined;
     stopHeartbeat?.();
     stopHeartbeat = undefined;
     handle?.destroy();
@@ -47,17 +118,20 @@ export function createPlayback(deps: PlaybackDeps) {
     }
   }
 
-  async function start(params: StartParams, video: HTMLVideoElement): Promise<void> {
-    teardown();
+  function teardown() {
+    stop();
+    latest = undefined;
+  }
+
+  async function begin(params: StartParams, video: HTMLVideoElement, durationSec: number | null): Promise<void> {
+    stop();
+    const want = (latest = { params, durationSec });
     const mine = generation;
     const clientId = deps.clientId();
     const ctl = (controller = new AbortController());
-    const req: PlayRequest = { itemId: params.itemId, startAtSec: params.startAtSec, clientId };
-    if (params.episodeRemoteId) req.episodeRemoteId = params.episodeRemoteId;
-    if (params.catchup) req.catchup = params.catchup;
     let res: PlayResponse;
     try {
-      res = await deps.play(req, ctl.signal);
+      res = await deps.play(playRequest(params, clientId), ctl.signal);
     } catch (err) {
       if (mine === generation) deps.onError(err);
       return;
@@ -66,20 +140,86 @@ export function createPlayback(deps: PlaybackDeps) {
       void deps.releaseSession(res.sessionId, clientId);
       return;
     }
-    // An HLS session is cut from startAtSec, so its currentTime counts from there. A direct stream is the whole
-    // file: it is seeked to startAtSec instead, and its currentTime is already absolute.
-    const offsetSec = res.mode === 'hls' ? res.startAtSec : 0;
-    const seekToSec = res.mode === 'direct' && res.startAtSec > 0 ? res.startAtSec : undefined;
-    active = { sessionId: res.sessionId, clientId, vod: res.durationSec !== null, offsetSec };
-    handle = deps.attachStream(video, res.url, seekToSec === undefined ? {} : { startAtSec: seekToSec });
+    // An HLS session is cut from res.startAtSec, so its currentTime counts from there. A direct stream is the whole
+    // file: it is seeked to res.startAtSec instead, and its currentTime is already absolute. A catch-up window starts
+    // on its minute, is seeked the rest of the way, and its duration is counted from that minute.
+    let offsetSec = res.mode === 'hls' ? res.startAtSec : 0;
+    let startSec = res.startAtSec;
+    let duration = res.durationSec;
+    if (params.catchup) {
+      offsetSec = windowShiftSec(params.startAtSec);
+      startSec = params.startAtSec;
+      if (duration !== null) duration += offsetSec;
+    }
+    const seekSec = startSec - offsetSec;
+    want.durationSec = duration;
+    active = { sessionId: res.sessionId, clientId, params, offsetSec, durationSec: duration, mode: res.mode, tracks: res.tracks, startSec };
+    const vod = params.kind !== 'live';
+    const direct = res.mode === 'direct';
+    const stream = (handle = deps.attachStream(video, res.url, direct && seekSec > 0 ? { vod, startAtSec: seekSec } : { vod }));
+    if (!direct && seekSec > 0) cancelSeek = seekWhenOpen(video, seekSec);
     stopHeartbeat = deps.startHeartbeat(res.sessionId, clientId, { onGone: deps.onGone });
-    deps.onStarted?.({ offsetSec, durationSec: res.durationSec });
+    deps.onStarted?.({ offsetSec, durationSec: duration, mode: res.mode, tracks: res.tracks, handle: stream });
   }
 
-  /** Absolute VOD position: currentTime plus the session's offset (0 for a direct stream). */
+  /** Starts playing, after ending whatever was playing. */
+  function start(params: StartParams, video: HTMLVideoElement): Promise<void> {
+    return begin(params, video, null);
+  }
+
+  /**
+   * The absolute position: currentTime plus the session's offset. Until the stream is open its currentTime says
+   * nothing (a direct file isn't seeked yet), so this is where it is starting.
+   */
   function absoluteSec(video: HTMLVideoElement): number {
-    return Math.floor((active?.offsetSec ?? 0) + video.currentTime);
+    if (active && video.readyState >= HTMLMediaElement.HAVE_METADATA) return Math.floor(active.offsetSec + video.currentTime);
+    return Math.floor(active?.startSec ?? latest?.params.startAtSec ?? 0);
   }
 
-  return { start, teardown, isVod: () => active?.vod ?? false, absoluteSec };
+  /**
+   * Seeks to an absolute position, kept 5 s short of the end. What has been remuxed so far is seeked within;
+   * anything else restarts a movie, episode or catch-up programme there.
+   */
+  async function seekTo(video: HTMLVideoElement, absSec: number): Promise<void> {
+    if (!latest) return;
+    const { params, durationSec } = latest;
+    let target = Math.max(0, absSec);
+    if (durationSec !== null) target = Math.min(target, Math.max(0, durationSec - END_MARGIN_SEC));
+    if (active) {
+      const ranges = video.seekable;
+      const loadedEndSec = active.offsetSec + (ranges.length > 0 ? ranges.end(ranges.length - 1) : 0);
+      if (target >= active.offsetSec && target <= loadedEndSec) {
+        video.currentTime = target - active.offsetSec;
+        return;
+      }
+    }
+    if (params.kind === 'live') return;
+    return begin({ ...params, startAtSec: target }, video, durationSec);
+  }
+
+  /** Restarts at the current position with other tracks. */
+  function restartWith(
+    video: HTMLVideoElement,
+    patch: Partial<Pick<StartParams, 'audioIndex' | 'subtitleIndex' | 'subtitleLanguage'>>,
+  ): Promise<void> {
+    if (!latest) return Promise.resolve();
+    return begin({ ...latest.params, ...patch, startAtSec: absoluteSec(video) }, video, latest.durationSec);
+  }
+
+  function current(): CurrentPlayback | null {
+    if (!active) return null;
+    const { params, offsetSec, durationSec, mode, tracks } = active;
+    return { params, offsetSec, durationSec, mode, tracks };
+  }
+
+  return {
+    start,
+    teardown,
+    /** True for everything but live, even when the duration isn't known. */
+    isVod: () => latest !== undefined && latest.params.kind !== 'live',
+    absoluteSec,
+    seekTo,
+    restartWith,
+    current,
+  };
 }

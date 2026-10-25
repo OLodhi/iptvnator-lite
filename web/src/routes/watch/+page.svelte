@@ -88,8 +88,10 @@
     const q = page.url.searchParams;
     const episodeRemoteId = q.get('episode') ?? undefined;
     const window = catchup ? { startSec: catchup.startSec, stopSec: catchup.stopSec } : undefined;
+    // The item may still be loading: a plain ?item= then counts as a movie (for live, hls.js just starts at the new session's first segment).
+    const kind = window ? 'catchup' : episodeRemoteId ? 'episode' : item?.kind === 'live' ? 'live' : 'movie';
     void playback.start(
-      { itemId: Number(q.get('item')), episodeRemoteId, startAtSec: window ? 0 : startAtSec, catchup: window },
+      { kind, itemId: Number(q.get('item')), episodeRemoteId, startAtSec: window ? 0 : startAtSec, catchup: window },
       video
     );
   }

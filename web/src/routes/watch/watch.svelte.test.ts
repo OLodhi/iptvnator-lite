@@ -76,6 +76,7 @@ async function resumeThenRestart(response: PlayResponse, currentTime: number) {
   app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
   const video = document.querySelector('video')!;
+  Object.defineProperty(video, 'readyState', { get: () => HTMLMediaElement.HAVE_METADATA }); // jsdom never opens media
   video.currentTime = currentTime;
   heartbeats[0]!.onGone();
   flushSync();
