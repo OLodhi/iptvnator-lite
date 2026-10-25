@@ -30,7 +30,7 @@
     const positive = /^[1-9]\d*$/;
     if (!positive.test(from) || !positive.test(to)) return null;
     if (!Number.isSafeInteger(Number(from)) || !Number.isSafeInteger(Number(to)) || Number(to) <= Number(from)) return null;
-    return { startSec: Number(from), stopSec: Number(to), title: q.get('title') ?? '' };
+    return { startSec: Number(from), stopSec: Number(to), title: (q.get('title') ?? '').trim() };
   });
 
   const reporter = createProgressReporter({ report: reportPosition, now: Date.now });

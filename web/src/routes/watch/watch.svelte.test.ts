@@ -6,7 +6,8 @@ const route = vi.hoisted(() => ({ url: new URL('http://localhost/watch?item=7&t=
 const api = vi.hoisted(() => vi.fn());
 const attachStream = vi.hoisted(() => vi.fn((_v: HTMLVideoElement, _url: string, _opts: object) => ({ destroy: () => {} })));
 const heartbeats = vi.hoisted(() => [] as { onGone: () => void }[]);
-const nav = vi.hoisted(() => ({ goto: vi.fn(async (_u: string) => {}) }));
+type BeforeNav = (nav: { to: { url: URL } | null }) => void;
+const nav = vi.hoisted(() => ({ goto: vi.fn(async (_u: string) => {}), before: undefined as BeforeNav | undefined }));
 const tick = $state({ n: 0 }); // bumped to make the mocked page.url reactive, as the real one is
 vi.mock('$app/state', () => ({
   page: {
@@ -16,7 +17,7 @@ vi.mock('$app/state', () => ({
     },
   },
 }));
-vi.mock('$app/navigation', () => ({ goto: nav.goto, beforeNavigate: () => {} }));
+vi.mock('$app/navigation', () => ({ goto: nav.goto, beforeNavigate: (cb: BeforeNav) => (nav.before = cb) }));
 vi.mock('hls.js', () => ({ default: {} }));
 vi.mock('$lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api')>()), api }));
 const me = vi.hoisted(() => ({ positions: vi.fn(async () => []), reportPosition: vi.fn(async () => {}) }));
@@ -234,23 +235,43 @@ test('catch-up back to live plays live without catchup and keeps the on-now line
   expect(itemCalls()).toHaveLength(1);
 });
 
-test('a double From start tap and the query change leave one active session; the old one is released once', async () => {
-  route.url = new URL('http://localhost/watch?item=7');
-  let n = 0;
-  api.mockImplementation(async (path: string) =>
-    path === '/api/play' ? { ...catchupRes, sessionId: `s${++n}`, durationSec: null } : liveItem(),
+test('two quick query changes leave one active session on the latest window; superseded ones are released once, never attached', async () => {
+  route.url = new URL('http://localhost/watch?item=7&t=5');
+  const resolvers: ((r: PlayResponse) => void)[] = [];
+  api.mockImplementation((path: string) =>
+    path === '/api/play' ? new Promise<PlayResponse>((resolve) => resolvers.push(resolve)) : Promise.resolve(liveItem()),
   );
   app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(playCalls()).toHaveLength(1));
+  go('http://localhost/watch?item=7&from=1000&to=2000&title=A');
+  go('http://localhost/watch?item=7&from=3000&to=4000&title=B');
+  expect(playCalls()).toHaveLength(3);
+  resolvers.forEach((resolve, i) => resolve({ ...catchupRes, sessionId: `s${i + 1}`, url: `/api/sessions/s${i + 1}/cid/index.m3u8` }));
+  await vi.waitFor(() => expect(released).toHaveBeenCalledTimes(2));
+  expect(released.mock.calls.map(([s]) => s).sort()).toEqual(['s1', 's2']);
+  expect(attachStream).toHaveBeenCalledTimes(1);
+  expect(attachStream.mock.calls[0]![1]).toBe('/api/sessions/s3/cid/index.m3u8');
+  expect(bodyOf(playCalls()[2]!)).toMatchObject({ catchup: { startSec: 3000, stopSec: 4000 } });
+  expect(document.body.textContent).toContain('↺ Catch-up · B');
+});
+
+test('beforeNavigate keeps the session for a same-route navigation and tears it down for any other', async () => {
+  route.url = new URL('http://localhost/watch?item=7');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
   await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
-  await vi.waitFor(() => expect(buttonWith('From start')).toBeDefined());
-  const btn = buttonWith('From start')!;
-  btn.click();
-  btn.click();
-  expect(nav.goto).toHaveBeenCalledTimes(2);
-  go('http://localhost/watch?item=7&from=79200&to=82800&title=News');
-  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
-  expect(playCalls()).toHaveLength(2);
-  expect(released.mock.calls).toEqual([['s1', 'cid']]);
+  nav.before!({ to: { url: new URL('http://x/watch?item=7&from=1000&to=2000&title=A') } });
+  expect(released).not.toHaveBeenCalled();
+  nav.before!({ to: { url: new URL('http://x/browse/live') } });
+  expect(released.mock.calls).toEqual([['l1', 'cid']]);
+});
+
+test('a whitespace-only catch-up title has no double separator', async () => {
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=%20');
+  serve(catchupRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(document.querySelector('.onnow')!.textContent!.replace(/\s+/g, ' ').trim()).toBe('↺ Catch-up · 01:00–02:00');
 });
 
 test.each([
