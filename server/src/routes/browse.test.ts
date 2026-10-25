@@ -95,7 +95,8 @@ test('with no provider the lists are empty', async () => {
     empty.db.exec('DELETE FROM providers');
     const res = await empty.app.inject('/api/me/browse/live');
     expect(res.json()).toEqual({
-      providerId: null, kind: 'live', categories: [], pinned: [], recent: [], favourites: [], continueWatching: [], newCategories: 0,
+      providerId: null, kind: 'live', categories: [], pinned: [], recent: [], favourites: [], favouriteCount: 0, continueWatching: [],
+      newCategories: 0,
     });
   } finally {
     await empty.close();

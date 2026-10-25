@@ -26,7 +26,8 @@ export const browseRoutes = (deps: { presenter: Presenter; providers: ProviderSe
         const provider = deps.providers.list()[0];
         if (!provider) {
           return {
-            providerId: null, kind, categories: [], pinned: [], recent: [], favourites: [], continueWatching: [], newCategories: 0,
+            providerId: null, kind, categories: [], pinned: [], recent: [], favourites: [], favouriteCount: 0, continueWatching: [],
+            newCategories: 0,
           };
         }
         return deps.presenter.browse(currentUserId(req), provider.id, kind);

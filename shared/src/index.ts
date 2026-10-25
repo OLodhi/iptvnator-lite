@@ -150,7 +150,9 @@ export type BrowseView = {
   categories: BrowseCategory[];
   pinned: BrowseCategory[];
   recent: CatalogItem[];
+  /** The most recent favourites only; `favouriteCount` counts them all. */
   favourites: CatalogItem[];
+  favouriteCount: number;
   continueWatching: ContinueItem[];
   newCategories: number;
 };

@@ -4,7 +4,7 @@ import { browseCatalogue } from '../testing/browseCatalogue.ts';
 import { createGuideQueries } from '../guide/query.ts';
 import type { GuideQueries } from '../guide/query.ts';
 import { createGuideStore } from '../guide/store.ts';
-import { createPresenter } from './presenter.ts';
+import { FAVOURITES_LIMIT, createPresenter } from './presenter.ts';
 
 let h: Awaited<ReturnType<typeof startBrowseApp>>;
 beforeAll(async () => {
@@ -82,4 +82,19 @@ test('a presented batch makes one nowFor call', () => {
   const stored = ['UK| BBC News', 'UK| Sky Sports 1', '|EN| Sporting Chance'].map((n) => h.catalogue.getItem(itemId(n))!);
   presenter.items(stored, 1);
   expect(calls).toEqual([[itemId('UK| BBC News'), itemId('UK| Sky Sports 1')]]);
+});
+
+test('favouriteCount counts every favourite, though the favourites list stops at its limit', async () => {
+  const presenter = createPresenter(h);
+  const insert = h.db.prepare("INSERT INTO items (provider_id, kind, remote_id, name, seen_at) VALUES (?, 'live', ?, ?, 0)");
+  const ids = Array.from({ length: FAVOURITES_LIMIT + 1 }, (_, i) => Number(insert.run(h.providerId, `fav-${i}`, `Fav ${i}`).lastInsertRowid));
+  try {
+    for (const id of ids) h.personal.addFavourite(1, id);
+    const view = await presenter.browse(1, h.providerId, 'live');
+    expect(view.favourites).toHaveLength(FAVOURITES_LIMIT);
+    expect(view.favouriteCount).toBe(FAVOURITES_LIMIT + 1);
+    expect((await presenter.browse(1, h.providerId, 'movie')).favouriteCount).toBe(0);
+  } finally {
+    h.db.exec("DELETE FROM items WHERE remote_id LIKE 'fav-%'");
+  }
 });

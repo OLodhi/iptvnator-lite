@@ -113,6 +113,7 @@ export function createPresenter(deps: {
         pinned: pinnedIds.map((id) => byId.get(id)).filter((c): c is BrowseCategory => c !== undefined),
         recent: showAll(resolveItems(personal.recentItemIds(userId, providerId, kind, RECENT_LIMIT))),
         favourites: showAll(resolveItems(favouriteIds.slice(0, FAVOURITES_LIMIT))),
+        favouriteCount: favouriteIds.length,
         continueWatching,
         newCategories: newCount,
       };
