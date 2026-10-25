@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { WhatsOnEntry } from '@tv/shared';
+  import type { Page, WhatsOnEntry } from '@tv/shared';
   import { ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { whatsOn } from '$lib/guide';
@@ -18,6 +18,9 @@
     { key: 'tomorrow', label: 'Tomorrow' },
   ];
   const clock = sharedClock();
+  // The route's default page size, and its largest.
+  const PAGE = 50;
+  const MAX_PAGE = 200;
 
   let segment = $state<Segment>('now');
   let entries = $state<WhatsOnEntry[]>([]);
@@ -27,30 +30,59 @@
   let noWindow = $state(false);
   let query: SegmentQuery | null = null;
   let seq = 0;
+  let refreshing = false; // a quiet refresh is in flight; paging waits for its swap
   let controller: AbortController | undefined;
 
-  async function load(mine: number, cursor: string | null, quiet = false) {
+  async function load(mine: number, cursor: string | null) {
     if (!query) return;
-    if (!quiet) {
-      loading = true;
-      error = '';
-    }
+    loading = true;
+    error = '';
     try {
       const page = await whatsOn({ filter, ...query, cursor }, controller?.signal);
       if (mine !== seq) return;
       entries = cursor ? [...entries, ...page.items] : page.items;
       nextCursor = page.nextCursor;
-      error = '';
     } catch (err) {
-      if (mine === seq && !quiet) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      if (mine === seq) error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
     } finally {
       if (mine === seq) loading = false;
     }
   }
 
-  // Starts the list again from page 1. A quiet reload keeps the current rows until the new ones arrive.
+  // Re-fetches as many rows as are loaded, from the start, then swaps them in at once: the list never
+  // shrinks, so a scrolled reader stays put. A failure keeps the current rows.
+  async function refresh(mine: number) {
+    if (!query) return;
+    const params = { filter, ...query };
+    const want = entries.length;
+    const items: WhatsOnEntry[] = [];
+    let cursor: string | null = null;
+    refreshing = true;
+    try {
+      do {
+        const limit = Math.min(MAX_PAGE, Math.max(PAGE, want - items.length));
+        const page: Page<WhatsOnEntry> = await whatsOn({ ...params, cursor, limit }, controller?.signal);
+        if (mine !== seq) return;
+        items.push(...page.items);
+        cursor = page.nextCursor;
+      } while (cursor && items.length < want);
+      entries = items;
+      nextCursor = cursor;
+      error = '';
+    } catch {
+      // Quiet: the rows on screen stay.
+    } finally {
+      if (mine === seq) {
+        refreshing = false;
+        loading = false;
+      }
+    }
+  }
+
+  // A full reload starts the list again from page 1; a quiet one refreshes the loaded rows in place.
   function reload(quiet: boolean) {
     const mine = ++seq;
+    refreshing = false;
     controller?.abort();
     controller = new AbortController();
     if (!quiet) {
@@ -66,7 +98,7 @@
       error = '';
       return;
     }
-    void load(mine, null, quiet);
+    void (quiet ? refresh(mine) : load(mine, null));
   }
 
   // A new segment, chip or zone starts a fresh list; responses for the old one are discarded by the token.
@@ -81,10 +113,12 @@
     };
   });
 
-  // The Now list goes stale: refresh it every minute and when the app comes back to the foreground.
+  // The Now list goes stale: refresh it every minute while the app is on screen, and when it comes back to the foreground.
   $effect(() => {
     if (segment !== 'now') return;
-    const timer = setInterval(() => reload(true), 60_000);
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') reload(true);
+    }, 60_000);
     const onVisible = () => {
       if (document.visibilityState === 'visible') reload(true);
     };
@@ -96,7 +130,7 @@
   });
 
   function more() {
-    if (!nextCursor || loading) return;
+    if (!nextCursor || loading || refreshing) return;
     void load(seq, nextCursor);
   }
 

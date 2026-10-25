@@ -13,7 +13,7 @@ function query(params: Record<string, string | number | null | undefined>): stri
 export const guideMeta = () => api<GuideMeta>('/api/guide');
 
 export function whatsOn(
-  p: { filter: string; mode: 'now' | 'range' | 'past'; from?: number; to?: number; cursor?: string | null },
+  p: { filter: string; mode: 'now' | 'range' | 'past'; from?: number; to?: number; cursor?: string | null; limit?: number },
   signal?: AbortSignal,
 ): Promise<Page<WhatsOnEntry>> {
   return api<Page<WhatsOnEntry>>(`/api/guide/whats-on${query(p)}`, signal ? { signal } : undefined);

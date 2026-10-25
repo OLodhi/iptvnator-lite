@@ -18,6 +18,8 @@ const entry = (id: number, over: Partial<WhatsOnEntry> = {}): WhatsOnEntry => ({
 });
 const page = (...items: WhatsOnEntry[]): Page<WhatsOnEntry> => ({ items, nextCursor: null });
 
+const innerHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight')!;
+
 let app: ReturnType<typeof mount> | undefined;
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
@@ -29,6 +31,8 @@ afterEach(() => {
   app = undefined;
   vi.useRealTimers();
   document.body.innerHTML = '';
+  Object.defineProperty(window, 'innerHeight', innerHeight);
+  Reflect.deleteProperty(document, 'visibilityState');
 });
 
 const mountIt = (props: { filter: string; chipLabel: string }) => {
@@ -168,4 +172,123 @@ test('the Now list refetches every minute and when the app becomes visible, and 
   await vi.advanceTimersByTimeAsync(120_000);
   document.dispatchEvent(new Event('visibilitychange'));
   expect(guide.whatsOn).toHaveBeenCalledTimes(4);
+});
+
+/** The Now list with the minute tick on a fake clock, in a viewport tall enough to page until the data runs out. */
+function tallNow() {
+  vi.useRealTimers();
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  vi.setSystemTime(NOW);
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 100_000 });
+}
+
+/** `n` Now entries titled with the current version, paged like the route: 50 by default, at most 200. */
+function serveNow(n: number) {
+  const state = { version: 1, rowsAtCall: [] as number[] };
+  guide.whatsOn.mockImplementation(async (p: { cursor?: string | null; limit?: number }) => {
+    state.rowsAtCall.push(document.querySelectorAll('.entry').length);
+    const from = p.cursor ? Number(p.cursor) : 0;
+    const to = Math.min(n, from + Math.min(p.limit ?? 50, 200));
+    const items = Array.from({ length: to - from }, (_, i) => {
+      const e = entry(from + i + 1);
+      return { ...e, programme: { ...e.programme, title: `Show ${from + i + 1} v${state.version}` } };
+    });
+    return { items, nextCursor: to < n ? String(to) : null };
+  });
+  return state;
+}
+const askedFor = () => guide.whatsOn.mock.calls.map(([p]) => [p.cursor, p.limit]);
+
+test('a quiet reload after paging keeps the loaded depth, refreshed, in one swap', async () => {
+  tallNow();
+  const server = serveNow(100);
+  mountIt({ filter: 'all', chipLabel: 'All' });
+  await vi.waitFor(() => expect(document.querySelectorAll('.entry')).toHaveLength(100));
+  expect(askedFor()).toEqual([[null, undefined], ['50', undefined]]); // two pages
+  guide.whatsOn.mockClear();
+  server.version = 2;
+  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 100 v2'));
+  expect(askedFor()).toEqual([[null, 100]]);
+  expect(document.querySelectorAll('.entry')).toHaveLength(100);
+  expect(document.body.textContent).not.toContain(' v1');
+});
+
+test('a quiet reload deeper than the route maximum follows the cursor, keeping the old rows until the end', async () => {
+  tallNow();
+  const server = serveNow(300);
+  mountIt({ filter: 'all', chipLabel: 'All' });
+  await vi.waitFor(() => expect(document.querySelectorAll('.entry')).toHaveLength(300));
+  guide.whatsOn.mockClear();
+  server.version = 2;
+  server.rowsAtCall.length = 0;
+  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 300 v2'));
+  expect(askedFor()).toEqual([[null, 200], ['200', 100]]);
+  expect(server.rowsAtCall).toEqual([300, 300]);
+  expect(document.querySelectorAll('.entry')).toHaveLength(300);
+  expect(document.body.textContent).not.toContain(' v1');
+});
+
+test('paging waits while a quiet reload is in flight, then carries on from the refreshed rows', async () => {
+  tallNow();
+  Object.defineProperty(window, 'innerHeight', innerHeight); // a phone-sized window: 50 rows do not reach the end
+  const server = serveNow(100);
+  mountIt({ filter: 'all', chipLabel: 'All' });
+  await vi.waitFor(() => expect(document.querySelectorAll('.entry').length).toBeGreaterThan(0));
+  expect(askedFor()).toEqual([[null, undefined]]);
+  let resolveQuiet!: (p: Page<WhatsOnEntry>) => void;
+  guide.whatsOn.mockImplementationOnce(() => new Promise((r) => (resolveQuiet = r)));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(askedFor()).toEqual([[null, undefined], [null, 50]]);
+  // The reader reaches the end of the list while the quiet reload is out.
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 100_000 });
+  window.dispatchEvent(new Event('resize'));
+  await vi.advanceTimersByTimeAsync(50); // jsdom's animation frames run on the faked interval
+  expect(document.querySelectorAll('.entry').length).toBeGreaterThan(12); // the taller window was measured
+  expect(askedFor()).toHaveLength(2);
+  server.version = 2;
+  const fresh = Array.from({ length: 50 }, (_, i) => {
+    const e = entry(i + 1);
+    return { ...e, programme: { ...e.programme, title: `Show ${i + 1} v2` } };
+  });
+  resolveQuiet({ items: fresh, nextCursor: '50' });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 100 v2'));
+  expect(askedFor()).toEqual([[null, undefined], [null, 50], ['50', undefined]]);
+  expect(document.querySelectorAll('.entry')).toHaveLength(100);
+});
+
+test('the minute tick does not fetch while the app is hidden; coming back refreshes', async () => {
+  tallNow();
+  let visibility = 'hidden';
+  mountIt({ filter: 'all', chipLabel: 'All' });
+  await vi.waitFor(() => expect(guide.whatsOn).toHaveBeenCalledTimes(1));
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+  await vi.advanceTimersByTimeAsync(180_000);
+  expect(guide.whatsOn).toHaveBeenCalledTimes(1);
+  visibility = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(guide.whatsOn).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(guide.whatsOn).toHaveBeenCalledTimes(3);
+});
+
+test('a quiet response that lands after a segment change is ignored and asks for nothing more', async () => {
+  tallNow();
+  guide.whatsOn.mockResolvedValueOnce(page(entry(1), entry(2)));
+  mountIt({ filter: 'all', chipLabel: 'All' });
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 2'));
+  let resolveQuiet!: (p: Page<WhatsOnEntry>) => void;
+  guide.whatsOn.mockImplementationOnce(() => new Promise((r) => (resolveQuiet = r)));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(guide.whatsOn).toHaveBeenCalledTimes(2);
+  guide.whatsOn.mockResolvedValueOnce(page(entry(5)));
+  segment('Earlier').click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Show 5'));
+  // Short of the old depth with more to come, so a quiet reload that missed the change would ask again.
+  resolveQuiet({ items: [entry(9)], nextCursor: 'c2' });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(document.body.textContent).not.toContain('Show 9');
+  expect(document.body.textContent).toContain('Show 5');
+  expect(guide.whatsOn).toHaveBeenCalledTimes(3);
 });
