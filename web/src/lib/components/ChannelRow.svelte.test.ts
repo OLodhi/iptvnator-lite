@@ -28,6 +28,20 @@ test('shows the on-now title and progress', () => {
   expect((document.querySelector('.now-bar > span') as HTMLElement).style.width).toBe('50%');
 });
 
+test('the line hides on the shared clock once the programme has stopped', () => {
+  const item = { ...base, now: { title: 'News at Six', startSec: 100, stopSec: 200 } };
+  app = mount(ChannelRow, { target: document.body, props: { item, onToggleFavourite: vi.fn() } });
+  flushSync();
+  vi.advanceTimersByTime(30_000); // 180 s
+  flushSync();
+  expect(document.querySelector('.now-title')?.textContent).toBe('News at Six');
+  vi.advanceTimersByTime(30_000); // 210 s
+  flushSync();
+  expect(document.querySelector('.now-title')).toBeNull();
+  expect(document.querySelector('.now-bar')).toBeNull();
+  expect(document.querySelector('.name')?.textContent).toBe('BBC One');
+});
+
 test('no line without a programme', () => {
   for (const now of [undefined, null]) {
     document.body.innerHTML = '';
