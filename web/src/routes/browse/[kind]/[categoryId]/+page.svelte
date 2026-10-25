@@ -1,32 +1,43 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { page } from '$app/state';
-  import type { CatalogItem, Kind, Page } from '@tv/shared';
+  import type { CatalogItem, GuideMeta, Kind, Page } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
   import { messageFor } from '$lib/messages';
   import { browse, favourite, unfavourite } from '$lib/me';
+  import { guideMeta } from '$lib/guide';
   import { categoryName, rememberCategories } from '$lib/categoryNames';
   import { posterRowHeight } from '$lib/browseModel';
   import ActionSheet from '$lib/components/ActionSheet.svelte';
-  import ChannelRow from '$lib/components/ChannelRow.svelte';
   import GuideSourceSheet from '$lib/components/GuideSourceSheet.svelte';
   import PosterCell from '$lib/components/PosterCell.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
+  import GuideGrid from '$lib/components/guide/GuideGrid.svelte';
+
+  /** In place of a live category id: Live's Favourites row opens the favourites guide here. */
+  const FAVOURITES = 'favourites';
 
   let kind = $derived((page.params.kind ?? 'live') as Kind);
   let categoryId = $derived(page.params.categoryId ?? '');
+  // A live category opens as its guide.
+  const filter = $derived(categoryId === FAVOURITES ? 'favourites' : `category:${categoryId}`);
   let items = $state<CatalogItem[]>([]);
+  let meta = $state<GuideMeta | null>(null);
   let nextCursor = $state<string | null>(null);
   let loading = $state(true);
   let error = $state('');
   let gridWidth = $state(0);
   let loadFailed = $state(false);
-  let sheetFor = $state<CatalogItem | null>(null);
+  // Raw: a guide row's channel is a plain object, which the favourite toggle updates in place.
+  let sheetFor = $state.raw<CatalogItem | null>(null);
   let mapFor = $state<CatalogItem | null>(null);
+  /** Bumped by a guide channel mapping, so the guide loads again with the new link. */
+  let mapped = $state(0);
   let title = $state('');
   let seq = 0;
 
   const posterHeight = $derived(posterRowHeight(gridWidth || 360));
+  const errorText = (err: unknown) => (err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.');
 
   // Each load takes a token; a response that is no longer the latest request is dropped, so
   // A (page 2 in flight) -> B -> back to A cannot append the old response.
@@ -45,7 +56,25 @@
     } catch (err) {
       if (mine !== seq) return;
       loadFailed = true;
-      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      error = errorText(err);
+    } finally {
+      if (mine === seq) loading = false;
+    }
+  }
+
+  // The guide grid loads its own rows; it needs the guide's meta for how far it reaches.
+  async function loadMeta() {
+    const mine = ++seq;
+    loading = true;
+    loadFailed = false;
+    error = '';
+    try {
+      const m = await guideMeta();
+      if (mine === seq) meta = m;
+    } catch (err) {
+      if (mine !== seq) return;
+      loadFailed = true;
+      error = errorText(err);
     } finally {
       if (mine === seq) loading = false;
     }
@@ -53,6 +82,10 @@
 
   // The tab screen remembers category names; a deep link falls back to one browse request.
   $effect(() => {
+    if (kind === 'live' && categoryId === FAVOURITES) {
+      title = 'Favourites';
+      return;
+    }
     const id = Number(categoryId);
     const k = kind;
     title = categoryName(id) ?? '';
@@ -70,15 +103,16 @@
   });
 
   function retry() {
-    void load(categoryId, items.length > 0 ? nextCursor : null);
+    void (kind === 'live' ? loadMeta() : load(categoryId, items.length > 0 ? nextCursor : null));
   }
 
   $effect(() => {
     const id = categoryId;
+    const live = kind === 'live';
     items = [];
     nextCursor = null;
     loading = false;
-    untrack(() => void load(id, null));
+    untrack(() => void (live ? loadMeta() : load(id, null)));
   });
 
   function loadMore() {
@@ -93,7 +127,7 @@
       await (was ? unfavourite(item.id) : favourite(item.id));
     } catch (err) {
       item.favourite = was;
-      error = err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.';
+      error = errorText(err);
     }
   }
 
@@ -119,20 +153,16 @@
 {/if}
 
 <div class="body" bind:clientWidth={gridWidth}>
-  {#if items.length > 0}
-    {#if kind === 'live'}
-      <VirtualList {items} rowHeight={64} onEnd={loadMore}>
-        {#snippet row(item)}
-          <ChannelRow {item} onToggleFavourite={toggleFavourite} onLongPress={(i) => (sheetFor = i)} />
-        {/snippet}
-      </VirtualList>
-    {:else}
-      <VirtualList {items} rowHeight={posterHeight} columns={3} onEnd={loadMore}>
-        {#snippet row(item)}
-          <PosterCell {item} href={hrefFor(item)} onLongPress={(i) => (sheetFor = i)} />
-        {/snippet}
-      </VirtualList>
-    {/if}
+  {#if kind === 'live' && meta}
+    {#key mapped}
+      <GuideGrid {meta} {filter} onLongPress={(i) => (sheetFor = i)} />
+    {/key}
+  {:else if items.length > 0}
+    <VirtualList {items} rowHeight={posterHeight} columns={3} onEnd={loadMore}>
+      {#snippet row(item)}
+        <PosterCell {item} href={hrefFor(item)} onLongPress={(i) => (sheetFor = i)} />
+      {/snippet}
+    </VirtualList>
   {:else if loading}
     <div class="skeleton" aria-busy="true" aria-label="Loading">
       {#each [1, 2, 3, 4, 5, 6, 7] as n (n)}<div class="sk-row"></div>{/each}
@@ -157,7 +187,7 @@
   open={mapFor !== null}
   item={mapFor}
   onClose={() => (mapFor = null)}
-  onMapped={() => void load(categoryId, null)}
+  onMapped={() => mapped++}
 />
 
 <style>

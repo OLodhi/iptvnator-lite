@@ -62,7 +62,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-function mountIt(props: { meta: GuideMeta; filter: string } = { meta: meta(), filter: 'all' }) {
+function mountIt(props: { meta: GuideMeta; filter: string; onLongPress?: (item: CatalogItem) => void } = { meta: meta(), filter: 'all' }) {
   app = mount(GuideGrid, { target: document.body, props: { ...props, tz: 'UTC' } });
   flushSync();
 }
@@ -238,6 +238,22 @@ test('channel cell plays live', async () => {
   expect(cell.textContent).toContain('Ch 7');
 });
 
+test('long-pressing a channel cell hands over its channel and swallows the tap', async () => {
+  const onLongPress = vi.fn();
+  guide.grid.mockResolvedValue(page([row(6), row(7, [prog(70, at(-10), at(20))])]));
+  mountIt({ meta: meta(), filter: 'category:4', onLongPress });
+  await vi.waitFor(() => expect(document.querySelectorAll('a.channel').length).toBe(2));
+  const cell = document.querySelectorAll<HTMLAnchorElement>('a.channel')[1]!;
+  cell.dispatchEvent(new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 560));
+  expect(onLongPress).toHaveBeenCalledTimes(1);
+  expect(onLongPress.mock.calls[0]![0]).toMatchObject({ id: 7, displayName: 'Ch 7' });
+  cell.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+  cell.dispatchEvent(click);
+  expect(click.defaultPrevented).toBe(true); // no navigation to the watch page
+});
+
 test('extending left keeps the view in place, down to the start of the guide', async () => {
   const start = EARLIER - 2 * 3600;
   guide.grid.mockResolvedValue(page([row(1, [prog(10, at(-30), at(30))])]));
@@ -288,7 +304,7 @@ test('a later row page gets programmes for the whole loaded window', async () =>
   ]);
 });
 
-test('a chip change starts again from page 1 and ignores stale responses', async () => {
+test('a filter change starts again from page 1 and ignores stale responses', async () => {
   guide.grid.mockResolvedValueOnce(page([row(1, [prog(10, at(-30), at(30))])]));
   guide.programmes.mockResolvedValue({ '1': [] });
   const props = $state({ meta: meta(), filter: 'all', tz: 'UTC' });
@@ -317,7 +333,7 @@ test('a chip change starts again from page 1 and ignores stale responses', async
   expect(scroller().scrollLeft).toBe(1170);
 });
 
-test('an extension in flight when the chip changes is ignored', async () => {
+test('an extension in flight when the filter changes is ignored', async () => {
   const start = EARLIER - PAGE;
   guide.grid.mockResolvedValueOnce(page([row(1)])).mockResolvedValueOnce(page([row(2)]));
   let resolveStale!: (found: Record<string, Programme[]>) => void;
@@ -401,6 +417,6 @@ test('an error shows Retry, which reloads from page 1', async () => {
 });
 
 test('an empty filter says so', async () => {
-  mountIt({ meta: meta(), filter: 'favourites' });
-  await vi.waitFor(() => expect(document.body.textContent).toContain('No channels in Favourites'));
+  mountIt({ meta: meta(), filter: 'category:4' });
+  await vi.waitFor(() => expect(document.querySelector('.empty')?.textContent).toBe('No channels here.'));
 });

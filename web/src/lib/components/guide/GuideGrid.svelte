@@ -6,11 +6,19 @@
   import { grid, programmes } from '$lib/guide';
   import { formatClock, sharedClock } from '$lib/guide/time';
   import { CHANNEL_COL, PAGE_SEC, ROW_HEIGHT, SLOT_MIN, initialWindow, layoutProgrammes, offsetPx, type Block } from '$lib/guide/layout';
+  import { longpress } from '$lib/actions/longpress';
   import Artwork from '$lib/components/Artwork.svelte';
   import VirtualList from '$lib/components/VirtualList.svelte';
 
-  type Props = { meta: GuideMeta; filter: string; /** IANA zone; the app leaves it unset to use the device zone. */ tz?: string };
-  let { meta, filter, tz }: Props = $props();
+  type Props = {
+    meta: GuideMeta;
+    filter: string;
+    /** A press held on a channel cell. */
+    onLongPress?: (item: CatalogItem) => void;
+    /** IANA zone; the app leaves it unset to use the device zone. */
+    tz?: string;
+  };
+  let { meta, filter, onLongPress, tz }: Props = $props();
 
   type Side = 'left' | 'right';
   const DAY = 86_400;
@@ -47,7 +55,6 @@
     for (let t = Math.ceil(windowFrom / SLOT_SEC) * SLOT_SEC; t < windowTo; t += SLOT_SEC) out.push(t);
     return out;
   });
-  const chipLabel = $derived(meta.chips.find((c) => c.filter === filter)?.label ?? 'All');
 
   const errorText = (err: unknown) => (err instanceof ApiClientError ? messageFor(err) : 'Something went wrong. Please try again.');
   const guidedIds = (list: GridRow[]) => list.filter((r) => r.hasGuide).map((r) => r.item.id);
@@ -223,7 +230,7 @@
     <p class="error" role="alert">{error} <button type="button" class="retry" onclick={reload}>Retry</button></p>
   {/if}
   {#if !loading && !error && rows.length === 0}
-    <p class="empty">No channels in {chipLabel}</p>
+    <p class="empty">No channels here.</p>
   {/if}
 
   <!-- Outside the scroller, which would otherwise be its sticky container: it follows the scroll by transform. -->
@@ -241,7 +248,13 @@
       <VirtualList items={rows} rowHeight={ROW_HEIGHT} onEnd={more}>
         {#snippet row(r: GridRow)}
           <div class="lane-row">
-            <a class="channel" href={`/watch?item=${r.item.id}`} draggable="false" aria-label={`Watch ${r.item.displayName} live`}>
+            <a
+              class="channel"
+              href={`/watch?item=${r.item.id}`}
+              draggable="false"
+              aria-label={`Watch ${r.item.displayName} live`}
+              use:longpress={{ onLongPress: () => onLongPress?.(r.item) }}
+            >
               <span class="logo"><Artwork name={r.item.displayName} src={r.item.logoUrl} fit="contain" /></span>
               <span class="name">{r.item.displayName}</span>
             </a>
