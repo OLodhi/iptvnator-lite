@@ -14,6 +14,7 @@ import { createProber, parseFfprobe, withProbeLog } from './probe.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mediaDir = resolve(here, '../../../tools/fake-xtream/media');
+const cacheKey = (u: string) => `v2|${redactUrl(u)}`;
 const fixture = (name: string): any => JSON.parse(readFileSync(resolve(here, 'fixtures', `${name}.json`), 'utf8'));
 
 describe('parseFfprobe', () => {
@@ -22,7 +23,8 @@ describe('parseFfprobe', () => {
       formatName: 'matroska,webm',
       durationSec: 60.021,
       video: { codec: 'h264', codecTag: null, width: 640, height: 360, interlaced: false, fieldOrder: 'progressive' },
-      audio: [{ index: 1, codec: 'aac', channels: 1 }],
+      audio: [{ index: 1, codec: 'aac', channels: 1, language: null, title: null, isDefault: false }],
+      subtitles: [],
     });
   });
 
@@ -61,9 +63,42 @@ describe('parseFfprobe', () => {
 
   test('audio index is the absolute stream index', () => {
     expect(parseFfprobe(fixture('dts-audio')).audio).toEqual([
-      { index: 2, codec: 'dts', channels: 6 },
-      { index: 3, codec: 'ac3', channels: 2 },
+      { index: 2, codec: 'dts', channels: 6, language: null, title: null, isDefault: false },
+      { index: 3, codec: 'ac3', channels: 2, language: null, title: null, isDefault: false },
     ]);
+  });
+
+  test('parseFfprobe reads audio language, title and default', () => {
+    const f = fixture('h264-mkv');
+    f.streams = [
+      f.streams[0],
+      { index: 1, codec_type: 'audio', codec_name: 'aac', channels: 2, tags: { language: 'nld' }, disposition: { default: 1 } },
+      { index: 2, codec_type: 'audio', codec_name: 'aac', channels: 2, tags: { language: 'eng', title: 'English 5.1' }, disposition: { default: 0 } },
+    ];
+    const { audio } = parseFfprobe(f);
+    expect(audio[0]).toMatchObject({ language: 'nld', title: null, isDefault: true });
+    expect(audio[1]).toEqual({ index: 2, codec: 'aac', channels: 2, language: 'eng', title: 'English 5.1', isDefault: false });
+  });
+
+  test('parseFfprobe lists subtitles and marks text vs picture', () => {
+    const f = fixture('h264-mkv');
+    f.streams.push(
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', tags: { language: 'ENG' }, disposition: { default: 0, forced: 1 } },
+      { index: 3, codec_type: 'subtitle', codec_name: 'hdmv_pgs_subtitle', tags: { language: 'fra' }, disposition: { default: 1, forced: 0 } },
+    );
+    expect(parseFfprobe(f).subtitles).toEqual([
+      { index: 2, codec: 'subrip', language: 'eng', title: null, isDefault: false, forced: true, text: true },
+      { index: 3, codec: 'hdmv_pgs_subtitle', language: 'fra', title: null, isDefault: true, forced: false, text: false },
+    ]);
+  });
+
+  test('missing tags and und become null', () => {
+    const f = fixture('h264-mkv');
+    f.streams.push({ index: 2, codec_type: 'audio', codec_name: 'ac3', channels: 6, tags: { language: 'und' } });
+    f.streams.push({ index: 3, codec_type: 'subtitle', codec_name: 'ass', tags: { language: '' } });
+    const r = parseFfprobe(f);
+    expect(r.audio[1]).toMatchObject({ language: null, title: null, isDefault: false });
+    expect(r.subtitles[0]).toMatchObject({ language: null, title: null, forced: false, text: true });
   });
 
   test('audio-only input has null video', () => {
@@ -136,14 +171,25 @@ describe('createProber', () => {
     expect(await prober.probe(url, 'ua')).toEqual({ result, cached: true });
     await prober.probe(other, 'ua');
     expect(ffprobe.runs()).toBe(2);
-    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(url), redactUrl(other)]); // no credentials stored
+    expect(rows(db).map((r) => r.url_key)).toEqual([cacheKey(url), cacheKey(other)]); // no credentials stored
 
     prober.invalidate(url); // given the real URL; the row is keyed by its redacted form
-    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(other)]);
+    expect(rows(db).map((r) => r.url_key)).toEqual([cacheKey(other)]);
     expect(await prober.probe(url, 'ua')).toEqual({ result, cached: false });
     expect(ffprobe.runs()).toBe(3);
     expect(await prober.probe(other, 'ua')).toEqual({ result, cached: true });
     prober.invalidate('http://provider.test/movie/someuser/secret/999.mkv'); // nothing cached: a no-op
+  });
+
+  test('cache rows from the old key shape are ignored', async () => {
+    const db = openDb(':memory:');
+    const oldShape = JSON.stringify({ formatName: 'matroska,webm', durationSec: 60, video: null, audio: [{ index: 1, codec: 'aac', channels: 1 }] });
+    db.prepare('INSERT INTO probe_cache (url_key, result, probed_at) VALUES (?, ?, ?)').run(redactUrl(url), oldShape, Date.now());
+    const ffprobe = fakeFfprobe(fixture('h264-mkv'));
+    const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
+
+    expect((await prober.probe(url, 'ua')).cached).toBe(false);
+    expect(ffprobe.runs()).toBe(1);
   });
 
   test('reads from readFrom when given, but caches and forgets by the url', async () => {
@@ -155,7 +201,7 @@ describe('createProber', () => {
     expect((await prober.probe(url, 'ua', relayUrl(1))).cached).toBe(false);
     expect(ffprobe.args[0]!.at(-1)).toBe(relayUrl(1));
     expect(ffprobe.args[0]).not.toContain(url);
-    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(url)]);
+    expect(rows(db).map((r) => r.url_key)).toEqual([cacheKey(url)]);
     // The next session's relay URL is a new one, and the cached result is still found.
     expect((await prober.probe(url, 'ua', relayUrl(2))).cached).toBe(true);
     prober.invalidate(url);
@@ -180,7 +226,7 @@ describe('createProber', () => {
       ['-http_multiple', '0', ts],
       ['-http_multiple', '0', relayed],
     ]);
-    expect(rows(db).map((r) => r.url_key)).toEqual([redactUrl(hls), redactUrl(ts), redactUrl(url)]); // keyed by URL alone
+    expect(rows(db).map((r) => r.url_key)).toEqual([cacheKey(hls), cacheKey(ts), cacheKey(url)]); // keyed by URL alone
     expect(await prober.probe(hls, 'ua')).toMatchObject({ cached: true });
   });
 
@@ -202,7 +248,7 @@ describe('createProber', () => {
     'a cached row that does not parse as a probe result (%s) is a miss: probed again and overwritten',
     async (corrupt) => {
       const db = openDb(':memory:');
-      db.prepare('INSERT INTO probe_cache (url_key, result, probed_at) VALUES (?, ?, ?)').run(redactUrl(url), corrupt, Date.now());
+      db.prepare('INSERT INTO probe_cache (url_key, result, probed_at) VALUES (?, ?, ?)').run(cacheKey(url), corrupt, Date.now());
       const ffprobe = fakeFfprobe(fixture('h264-mkv'));
       const prober = createProber({ ffprobePath: 'ffprobe', db, spawnFn: ffprobe.spawnFn });
       const result = parseFfprobe(fixture('h264-mkv'));

@@ -13,7 +13,8 @@ function probe(
     formatName,
     durationSec: 60,
     video: video && { codec: 'h264', codecTag: null, width: 640, height: 360, interlaced: false, fieldOrder: null, ...video },
-    audio: audio.map((a, i) => ({ index: a.index ?? i + 1, codec: a.codec, channels: 2 })),
+    audio: audio.map((a, i) => ({ index: a.index ?? i + 1, codec: a.codec, channels: 2, language: null, title: null, isDefault: false })),
+    subtitles: [],
   };
 }
 

@@ -3,6 +3,18 @@ import type { Db } from '../db/db.ts';
 import type { Log } from '../util/log.ts';
 import { redactUrl } from '../util/redact.ts';
 
+export type ProbeAudio = { index: number; codec: string; channels: number | null; language: string | null; title: string | null; isDefault: boolean };
+export type ProbeSubtitle = {
+  index: number;
+  codec: string;
+  language: string | null;
+  title: string | null;
+  isDefault: boolean;
+  forced: boolean;
+  /** Text subtitles can be converted to WebVTT; picture ones (PGS, DVD) cannot. */
+  text: boolean;
+};
+
 export type ProbeResult = {
   formatName: string;
   durationSec: number | null;
@@ -15,7 +27,8 @@ export type ProbeResult = {
     /** ffprobe's raw `field_order` ('progressive', 'tt', ...), for the logs. */
     fieldOrder: string | null;
   } | null;
-  audio: { index: number; codec: string; channels: number }[];
+  audio: ProbeAudio[];
+  subtitles: ProbeSubtitle[];
 };
 
 /** A probe's result, and whether it came from the probe cache rather than a fresh ffprobe run. */
@@ -39,6 +52,9 @@ export interface Prober {
 
 const CACHE_TTL_MS = 24 * 3600_000;
 const INTERLACED = new Set(['tt', 'bb', 'tb', 'bt']);
+const TEXT_SUBTITLES = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
+/** Cache rows are keyed 'v2|' + redacted URL: rows cached before tracks were probed are never read. */
+const CACHE_KEY_VERSION = 'v2|';
 
 type RawStream = {
   index?: number;
@@ -49,7 +65,16 @@ type RawStream = {
   height?: number;
   field_order?: string;
   channels?: number;
+  tags?: { language?: string; title?: string };
+  disposition?: { default?: number; forced?: number };
 };
+
+/** `und` and empty become null; otherwise lowercased. */
+function languageOf(s: RawStream): string | null {
+  const l = s.tags?.language?.trim().toLowerCase();
+  return l && l !== 'und' ? l : null;
+}
+const titleOf = (s: RawStream): string | null => s.tags?.title?.trim() || null;
 
 export function parseFfprobe(json: unknown): ProbeResult {
   const root = (json ?? {}) as { streams?: RawStream[]; format?: { format_name?: string; duration?: string | number } };
@@ -76,7 +101,25 @@ export function parseFfprobe(json: unknown): ProbeResult {
       : null,
     audio: streams
       .filter((s) => s.codec_type === 'audio')
-      .map((s) => ({ index: s.index ?? 0, codec: s.codec_name ?? 'unknown', channels: s.channels ?? 0 })),
+      .map((s) => ({
+        index: s.index ?? 0,
+        codec: s.codec_name ?? 'unknown',
+        channels: s.channels ?? null,
+        language: languageOf(s),
+        title: titleOf(s),
+        isDefault: s.disposition?.default === 1,
+      })),
+    subtitles: streams
+      .filter((s) => s.codec_type === 'subtitle')
+      .map((s) => ({
+        index: s.index ?? 0,
+        codec: s.codec_name ?? 'unknown',
+        language: languageOf(s),
+        title: titleOf(s),
+        isDefault: s.disposition?.default === 1,
+        forced: s.disposition?.forced === 1,
+        text: TEXT_SUBTITLES.has(s.codec_name ?? ''),
+      })),
   };
 }
 
@@ -106,7 +149,7 @@ export function withProbeLog(probe: Prober['probe'], log: Log): Prober['probe'] 
 function isProbeResult(v: unknown): v is ProbeResult {
   if (typeof v !== 'object' || v === null) return false;
   const r = v as Partial<ProbeResult>;
-  return typeof r.formatName === 'string' && Array.isArray(r.audio) && (r.video === null || typeof r.video === 'object');
+  return typeof r.formatName === 'string' && Array.isArray(r.audio) && Array.isArray(r.subtitles) && (r.video === null || typeof r.video === 'object');
 }
 
 export function createProber(deps: {
@@ -187,7 +230,7 @@ export function createProber(deps: {
   // Rows are keyed by the redacted URL, so no credentials are stored.
   return {
     async probe(url, userAgent, readFrom, opts) {
-      const key = redactUrl(url);
+      const key = CACHE_KEY_VERSION + redactUrl(url);
       const cached = opts?.skipCache ? null : fromCache(key);
       if (cached) return { result: cached, cached: true };
 
@@ -196,7 +239,7 @@ export function createProber(deps: {
       return { result, cached: false };
     },
     invalidate(url) {
-      deleteStmt.run(redactUrl(url));
+      deleteStmt.run(CACHE_KEY_VERSION + redactUrl(url));
     },
   };
 }

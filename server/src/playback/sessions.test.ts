@@ -12,16 +12,17 @@ import { createSessionManager, defaultIsReady, PlaybackError, pruneSegments } fr
 import type { ChildLike, SessionManager, SessionManagerDeps, StartRequest } from './sessions.ts';
 
 const H264 = { codec: 'h264', codecTag: null, width: 1280, height: 720, interlaced: false, fieldOrder: 'progressive' };
-const AAC = [{ index: 1, codec: 'aac', channels: 2 }];
-const LIVE_HLS: ProbeResult = { formatName: 'hls', durationSec: null, video: H264, audio: AAC };
+const AAC = [{ index: 1, codec: 'aac', channels: 2, language: null, title: null, isDefault: false }];
+const LIVE_HLS: ProbeResult = { formatName: 'hls', durationSec: null, video: H264, audio: AAC, subtitles: [] };
 const FINITE_HLS: ProbeResult = { ...LIVE_HLS, durationSec: 15 }; // an ENDLIST playlist
-const LIVE_TS: ProbeResult = { formatName: 'mpegts', durationSec: null, video: H264, audio: AAC };
-const MKV_MOVIE: ProbeResult = { formatName: 'matroska,webm', durationSec: 60, video: H264, audio: AAC };
+const LIVE_TS: ProbeResult = { formatName: 'mpegts', durationSec: null, video: H264, audio: AAC, subtitles: [] };
+const MKV_MOVIE: ProbeResult = { formatName: 'matroska,webm', durationSec: 60, video: H264, audio: AAC, subtitles: [] };
 const MP4_MOVIE: ProbeResult = {
   formatName: 'mov,mp4,m4a,3gp,3g2,mj2',
   durationSec: 60,
   video: { ...H264, codecTag: 'avc1' },
   audio: AAC,
+  subtitles: [],
 };
 /** What the prober returns: a result from a fresh ffprobe run, or one from its cache. */
 const fresh = (result: ProbeResult): ProbeOutcome => ({ result, cached: false });
