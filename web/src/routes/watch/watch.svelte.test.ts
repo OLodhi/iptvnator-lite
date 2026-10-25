@@ -1538,7 +1538,7 @@ test('episode list highlights the playing episode', async () => {
   const rows = [...document.querySelectorAll('.switch .ep-row')];
   expect(rows.map((r) => r.getAttribute('href'))).toEqual(['/watch?item=11&episode=111', '/watch?item=11&episode=112']);
   expect(rows.map((r) => r.classList.contains('current'))).toEqual([false, true]);
-  expect(text(rows[1]!.querySelector('.playing'))).toBe('Playing');
+  expect(text(rows[1]!.querySelector('.flag'))).toBe('Playing');
   expect(text(rows[0]!.querySelector('.s'))).toBe('watched HD');
   expect(text(document.querySelector('.switch .lhead'))).toBe('Season 1 2 episodes');
   // A row plays its episode in place of this history entry, as Next episode does.

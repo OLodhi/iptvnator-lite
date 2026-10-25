@@ -46,6 +46,16 @@ test('itemDetails', async () => {
   expect(last()).toMatchObject({ url: '/api/items/5/details', method: 'GET' });
 });
 
+test('markWatched sends only the documented fields', async () => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+  await me.markWatched(11, ['111', '112'], true);
+  expect(last()).toMatchObject({
+    url: '/api/me/watched',
+    method: 'PUT',
+    body: JSON.stringify({ itemId: 11, episodeRemoteIds: ['111', '112'], watched: true }),
+  });
+});
+
 test('search encodes the query and passes the limit', async () => {
   await me.search('a b&c');
   expect(last().url).toBe('/api/search?q=a%20b%26c');

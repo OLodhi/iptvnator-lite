@@ -26,6 +26,9 @@ export const itemDetails = (itemId: number) => api<ItemDetails>(`/api/items/${it
 
 export const positions = (itemId: number) => api<SavedPosition[]>(`/api/me/positions/${itemId}`);
 export const reportPosition = (report: PositionReport) => api<void>('/api/me/positions', ({ ...json('PUT', report), keepalive: true }));
+/** Marks a series' episodes watched (finished, by hand) or unwatched (no saved position); 1 to 500 distinct ids. */
+export const markWatched = (itemId: number, episodeRemoteIds: string[], watched: boolean) =>
+  api<void>('/api/me/watched', json('PUT', { itemId, episodeRemoteIds, watched }));
 
 export const search = (q: string, limit?: number, signal?: AbortSignal) =>
   api<SearchResults>(`/api/search?q=${encodeURIComponent(q)}${limit === undefined ? '' : `&limit=${limit}`}`, signal ? { signal } : undefined);

@@ -11,11 +11,13 @@
     saved: SavedPosition | null;
     /** The episode playing (the watch page) or up next (the series page). */
     current?: boolean;
+    /** What the current row says it is. */
+    currentLabel?: string;
     href: string;
     onLongPress?: (ep: EpisodeDetail) => void;
   };
 
-  let { episode, saved, current = false, href, onLongPress }: Props = $props();
+  let { episode, saved, current = false, currentLabel = 'Playing', href, onLongPress }: Props = $props();
 
   // Watched means finished: a mark made by hand may have no position at all.
   const watched = $derived(saved?.finished === true);
@@ -49,7 +51,7 @@
     <span class="n">{episode.episodeNum} · {episode.title}</span>
     <span class="s">{status} {#if episode.quality}<span class="badge">{episode.quality}</span>{/if}</span>
   </span>
-  {#if current}<span class="playing">Playing</span>{/if}
+  {#if current}<span class="flag">{currentLabel}</span>{/if}
 </a>
 
 <style>
@@ -129,7 +131,7 @@
     border-radius: 4px;
     font-size: 10px;
   }
-  .playing {
+  .flag {
     flex: none;
     color: var(--accent);
     font-size: 11px;

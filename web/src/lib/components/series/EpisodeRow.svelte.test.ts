@@ -41,13 +41,13 @@ test('watched shows ✓; started shows progress and min left; quality badge', ()
   expect(text(started.querySelector('.badge'))).toBe('HD');
   expect((started.querySelector('.thumb .prog i') as HTMLElement).style.width).toBe('55%');
   expect(started.querySelector('.thumb .done')).toBeNull();
-  expect(text(started.querySelector('.playing'))).toBe('Playing');
+  expect(text(started.querySelector('.flag'))).toBe('Playing');
   expect(started.querySelector('a')!.getAttribute('aria-current')).toBe('true');
 
   // Not started: its length, and a 4K badge.
   const fresh = row({ episode: ep({ remoteId: '113', episodeNum: 3, title: 'Doors', durationSec: 1860, quality: '4K' }), saved: null });
   expect(text(fresh.querySelector('.s'))).toBe('31 min 4K');
-  expect(fresh.querySelector('.thumb .prog, .thumb .done, .playing')).toBeNull();
+  expect(fresh.querySelector('.thumb .prog, .thumb .done, .flag')).toBeNull();
   expect(fresh.querySelector('a')!.hasAttribute('aria-current')).toBe(false);
 
   // No length and no quality: nothing to say.
