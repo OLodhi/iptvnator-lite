@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import Hls from 'hls.js';
-  import { beforeNavigate, goto } from '$app/navigation';
+  import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import type { PlayResponse } from '@tv/shared';
   import { api, ApiClientError } from '$lib/api';
@@ -34,6 +34,7 @@
   let manualFullscreen = $state(false);
   let moreOpen = $state(false);
   let begun = 0; // bumped on every begin(), so a late answer for an old URL is ignored
+  let inAppHistory = false; // whether this page was reached from another page of the app, which Back can return to
 
   const params = $derived(parseWatchParams(page.url));
   const onNow = createOnNow();
@@ -165,26 +166,37 @@
     void goto(`/watch?item=${id}&from=${now.startSec}&to=${now.stopSec}&title=${encodeURIComponent(now.title)}`);
   }
 
+  afterNavigate((nav) => {
+    if (nav.from) inAppHistory = true;
+  });
+
+  /** Back where you came from. Opened from outside the app (a bookmark, a link, a relaunch), to the list it belongs to. */
   function back() {
-    history.back();
+    if (inAppHistory) return history.back();
+    const p = params;
+    let home = p.category ? `/browse/live/${p.category}` : '/browse/live';
+    if (kind === 'movie') home = '/browse/movie';
+    else if (kind === 'episode') home = `/series/${p.itemId}`;
+    void goto(home, { replaceState: true });
   }
 
+  // While something covers the video, the transport does nothing: a seek would start a session under the cover.
   function togglePlay() {
-    if (!video) return;
+    if (!video || view) return;
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   }
 
   function skip(delta: number) {
-    if (video) void playback.seekTo(video, playback.absoluteSec(video) + delta);
+    if (video && !view) void playback.seekTo(video, playback.absoluteSec(video) + delta);
   }
 
   function seek(sec: number) {
-    if (video) void playback.seekTo(video, sec);
+    if (video && !view) void playback.seekTo(video, sec);
   }
 
   function goLive() {
-    if (video && player?.window) void playback.seekTo(video, player.window.endSec);
+    if (video && !view && player?.window) void playback.seekTo(video, player.window.endSec);
   }
 
   function toggleMute() {
@@ -211,9 +223,9 @@
     if (view?.kind === 'resume') start(view.atSec);
   }
 
-  /** Playing: whatever covered the start, a recovered error or Tap to play goes. */
+  /** Playing: whatever covers the video goes, except the Resume choice, which waits for an answer. */
   function onPlaying() {
-    if (view && (view.kind === 'starting' || view.kind === 'error' || view.kind === 'tapToPlay')) view = null;
+    if (view && view.kind !== 'resume') view = null;
   }
 
   function onPlay() {
@@ -255,7 +267,7 @@
     <button type="button" class="back" onclick={back}>‹ Back</button>
   </header>
 
-  <div class="player" class:blocked={view !== null}>
+  <div class="player">
     <video bind:this={video} playsinline autoplay onplay={onPlay} onplaying={onPlaying} onerror={onVideoError}></video>
     {#if player}
       <!-- Catch-up positions count from the programme's start, so its bar is the VOD one. -->
@@ -268,7 +280,8 @@
         {caps}
         tracks={{ audio: false, subtitles: false }}
         {durationSec}
-        holding={moreOpen || view !== null}
+        holding={moreOpen}
+        covered={view !== null}
         onTogglePlay={togglePlay}
         onSkip={skip}
         onSeek={seek}
@@ -327,11 +340,6 @@
     height: 100%;
     object-fit: contain;
     background: #000;
-  }
-  /* Whatever covers the video replaces the play and scrub controls; the top row (Back, mute) stays. */
-  .player.blocked :global(.controls .center),
-  .player.blocked :global(.controls .bottom) {
-    visibility: hidden;
   }
   /* Sideways: video only. Sheets sit above it, so one left open stays usable. */
   .watch.fullscreen {

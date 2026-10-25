@@ -7,7 +7,12 @@ const api = vi.hoisted(() => vi.fn());
 const attachStream = vi.hoisted(() => vi.fn((_v: HTMLVideoElement, _url: string, _opts: object) => ({ destroy: () => {}, showSubtitles: () => {} })));
 const heartbeats = vi.hoisted(() => [] as { onGone: () => void }[]);
 type BeforeNav = (nav: { to: { url: URL } | null }) => void;
-const nav = vi.hoisted(() => ({ goto: vi.fn(async (_u: string) => {}), before: undefined as BeforeNav | undefined }));
+type AfterNav = (nav: { from: { url: URL } | null; to: { url: URL } | null }) => void;
+const nav = vi.hoisted(() => ({
+  goto: vi.fn(async (_u: string, _opts?: object) => {}),
+  before: undefined as BeforeNav | undefined,
+  after: undefined as AfterNav | undefined,
+}));
 const tick = $state({ n: 0 }); // bumped to make the mocked page.url reactive, as the real one is
 vi.mock('$app/state', () => ({
   page: {
@@ -17,7 +22,11 @@ vi.mock('$app/state', () => ({
     },
   },
 }));
-vi.mock('$app/navigation', () => ({ goto: nav.goto, beforeNavigate: (cb: BeforeNav) => (nav.before = cb) }));
+vi.mock('$app/navigation', () => ({
+  goto: nav.goto,
+  beforeNavigate: (cb: BeforeNav) => (nav.before = cb),
+  afterNavigate: (cb: AfterNav) => (nav.after = cb),
+}));
 vi.mock('hls.js', () => ({ default: {} }));
 vi.mock('$lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api')>()), api }));
 const me = vi.hoisted(() => ({ positions: vi.fn(async (_id: number): Promise<SavedPosition[]> => []), reportPosition: vi.fn(async () => {}) }));
@@ -55,6 +64,7 @@ beforeEach(() => {
   attachStream.mockClear();
   heartbeats.length = 0;
   nav.goto.mockClear();
+  nav.after = undefined;
   released.mockClear();
   me.positions.mockClear();
   me.reportPosition.mockClear();
@@ -387,6 +397,112 @@ test('a seek restart keeps showing the target while the new session starts', asy
   video().dispatchEvent(new Event('timeupdate')); // the old source is gone: currentTime is back at 0
   flushSync();
   expect(slider().getAttribute('aria-valuenow')).toBe('610');
+});
+
+/** Two quick taps at `x` on a 900 px wide video. */
+function doubleTap(x: number) {
+  const surface = document.querySelector('.surface') as HTMLElement;
+  surface.getBoundingClientRect = () => ({ left: 0, right: 900, width: 900, top: 0, bottom: 500, height: 500, x: 0, y: 0, toJSON() {} }) as DOMRect;
+  surface.dispatchEvent(new MouseEvent('click', { clientX: x, bubbles: true }));
+  surface.dispatchEvent(new MouseEvent('click', { clientX: x, bubbles: true }));
+  flushSync();
+}
+
+/** A movie whose start the server gave up on. */
+async function failedMovie() {
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  api.mockImplementation(async (path: string) => {
+    if (path === '/api/play') throw new ApiClientError(504, 'STREAM_START_TIMEOUT', 'timeout');
+    return movieItem();
+  });
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel isn't responding right now."));
+}
+
+test('a double-tap on a side third during failed sends no /api/play', async () => {
+  await failedMovie();
+  doubleTap(800);
+  doubleTap(50);
+  // The transport is hidden while covered; pressed anyway, it does nothing.
+  (document.querySelector('.controls [aria-label="Forward 10 seconds"]') as HTMLElement).click();
+  (document.querySelector('.controls [aria-label="Play"]') as HTMLElement).click();
+  await vi.waitFor(() => expect(document.querySelector('.flash')).toBeNull());
+  await Promise.resolve();
+  expect(playCalls()).toHaveLength(1);
+  expect(mediaPlay()).not.toHaveBeenCalled();
+  expect(document.querySelector('[role=alert]')?.textContent).toBe("This channel isn't responding right now.");
+  expect(document.querySelector('.controls')!.classList.contains('covered')).toBe(true);
+});
+
+test('playing after a failed start clears the failed card', async () => {
+  await failedMovie();
+  playing(video());
+  expect(states()).toBeNull();
+  expect(document.querySelector('.controls')!.classList.contains('covered')).toBe(false);
+});
+
+test('Back with history calls history.back()', async () => {
+  const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  nav.after!({ from: { url: new URL('http://localhost/browse/live/3') }, to: { url: route.url } });
+  buttonWith('‹ Back')!.click();
+  (document.querySelector('.controls [aria-label="Back"]') as HTMLElement).click();
+  expect(back).toHaveBeenCalledTimes(2);
+  expect(nav.goto).not.toHaveBeenCalled();
+});
+
+test('Back without history goes to the category guide for live', async () => {
+  const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  route.url = new URL('http://localhost/watch?item=7&cat=3');
+  serve(liveRes, liveItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
+  nav.after?.({ from: null, to: { url: route.url } }); // opened from outside the app
+  buttonWith('‹ Back')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/3', { replaceState: true });
+  (document.querySelector('.controls [aria-label="Back"]') as HTMLElement).click();
+  expect(nav.goto).toHaveBeenCalledTimes(2);
+  expect(back).not.toHaveBeenCalled();
+  unmount(app);
+  document.body.innerHTML = '';
+
+  // Catch-up from favourites, and live without a category.
+  route.url = new URL('http://localhost/watch?item=7&from=3600&to=7200&title=News&cat=favourites');
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  buttonWith('‹ Back')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live/favourites', { replaceState: true });
+  unmount(app);
+  document.body.innerHTML = '';
+
+  route.url = new URL('http://localhost/watch?item=7');
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(onNowLine()).toContain('News at Ten'));
+  buttonWith('‹ Back')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/live', { replaceState: true });
+});
+
+test('Back without history goes to Movies for a movie and to the series for an episode', async () => {
+  const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(movieRes, movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  buttonWith('‹ Back')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/browse/movie', { replaceState: true });
+  unmount(app);
+  document.body.innerHTML = '';
+
+  route.url = new URL('http://localhost/watch?item=11&episode=111&t=60');
+  serve(movieRes, movieItem({ id: 11, kind: 'series', displayName: 'The Kitchen' }));
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(2));
+  buttonWith('‹ Back')!.click();
+  expect(nav.goto).toHaveBeenLastCalledWith('/series/11', { replaceState: true });
+  expect(back).not.toHaveBeenCalled();
 });
 
 test('catch-up params play catch-up without resume or progress', async () => {

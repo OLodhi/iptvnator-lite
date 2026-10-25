@@ -21,6 +21,8 @@
     durationSec?: number | null;
     /** True while a sheet is open: the controls stay up. */
     holding?: boolean;
+    /** True while something covers the video (starting, an error): no gestures or transport, and the controls stay up. */
+    covered?: boolean;
     caps: { pip: boolean; airplay: boolean };
     tracks: { audio: boolean; subtitles: boolean };
     onTogglePlay: () => void;
@@ -37,7 +39,7 @@
   };
 
   let {
-    state: player, mode, title, subtitle, nextLabel, fullscreen, programme = null, durationSec = null, holding = false,
+    state: player, mode, title, subtitle, nextLabel, fullscreen, programme = null, durationSec = null, holding = false, covered = false,
     caps, tracks, onTogglePlay, onSkip, onSeek, onGoLive, onChannel, onPip, onAirPlay, onToggleMute, onFullscreen, onTracks, onBack,
   }: Props = $props();
 
@@ -46,7 +48,7 @@
   let activity = $state(0);
   let flash = $state<string | null>(null);
 
-  const hold = $derived(player.paused || scrubbing || holding);
+  const hold = $derived(player.paused || scrubbing || holding || covered);
   const shown = $derived(visible || hold);
 
   // Holding makes the controls visible, and releasing the hold starts the 3 s countdown.
@@ -65,6 +67,10 @@
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
   function surfaceClick(e: MouseEvent) {
+    if (covered) {
+      lastTap = null;
+      return;
+    }
     const now = Date.now();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const f = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
@@ -91,7 +97,7 @@
   const vodTotal = $derived(durationSec ?? player.durationSec);
 </script>
 
-<div class="controls" class:hidden={!shown} onpointerdowncapture={() => activity++} role="presentation">
+<div class="controls" class:hidden={!shown} class:covered onpointerdowncapture={() => activity++} role="presentation">
   <div class="surface" role="presentation" onclick={surfaceClick}></div>
 
   {#if flash}<div class="flash">{flash}</div>{/if}
@@ -163,7 +169,9 @@
   .controls.hidden {
     opacity: 0;
   }
-  .controls.hidden > :not(.surface) {
+  .controls.hidden > :not(.surface),
+  .controls.covered > .center,
+  .controls.covered > .bottom {
     visibility: hidden;
   }
   .surface {

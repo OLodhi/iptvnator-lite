@@ -155,3 +155,27 @@ test('live mode shows the pill with the state behindSec and a scrub bar', () => 
   expect(onGoLive).toHaveBeenCalled();
   expect(document.querySelector('[role="slider"]')).not.toBeNull();
 });
+
+test('covered disables the surface gestures, hides the transport and keeps the controls up', () => {
+  const onSkip = vi.fn();
+  const surface = setup({ onSkip, covered: true });
+  expect(root().classList.contains('covered')).toBe(true);
+  advance(10_000);
+  expect(hidden()).toBe(false);
+  tap(surface, 450);
+  expect(hidden()).toBe(false);
+  tap(surface, 800);
+  advance(100);
+  tap(surface, 800);
+  expect(onSkip).not.toHaveBeenCalled();
+  expect(document.querySelector('.flash')).toBeNull();
+
+  props.covered = false;
+  flushSync();
+  expect(root().classList.contains('covered')).toBe(false);
+  advance(400);
+  tap(surface, 800);
+  advance(100);
+  tap(surface, 800);
+  expect(onSkip).toHaveBeenCalledWith(10);
+});
