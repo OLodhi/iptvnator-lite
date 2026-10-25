@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { PNG, startImageServer } from '../testing/imageServer.ts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -209,6 +210,24 @@ test('caps concurrent logo fetches at 8', async () => {
   }
 });
 
+const EXTENSIONS_TRIED = 8;
+
+/** Counts finished disk lookups: each get that has to fetch does one stat per extension, then goes to the slot queue. */
+function watchLookups() {
+  let done = 0;
+  const real = fsp.stat.bind(fsp);
+  vi.spyOn(fsp, 'stat').mockImplementation(async (...args: Parameters<typeof fsp.stat>) => {
+    try {
+      return await real(...args);
+    } finally {
+      done++;
+    }
+  });
+  return (gets: number) => vi.waitFor(() => expect(done).toBeGreaterThanOrEqual(gets * EXTENSIONS_TRIED), { timeout: 10_000 });
+}
+
+afterEach(() => vi.restoreAllMocks());
+
 test('answers busy beyond the queue, and never queues cached or failed logos', async () => {
   const gates: (() => void)[] = [];
   const fetchFn = (() =>
@@ -216,14 +235,55 @@ test('answers busy beyond the queue, and never queues cached or failed logos', a
       gates.push(() => resolve(new Response(PNG, { headers: { 'content-type': 'image/png' } }))),
     )) as unknown as typeof fetch;
   const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, maxQueued: 1 });
+  const lookedUp = watchLookups();
   const running = cache.get('http://a/1.png');
   const queued = cache.get('http://a/2.png');
+  await lookedUp(2); // one holds the slot, the other waits for it
   await expect(cache.get('http://a/3.png')).rejects.toBeInstanceOf(LogoBusyError);
   expect(await cache.get('ftp://a/4.png')).toBeNull(); // rejected before the queue
   gates.shift()!();
   expect(await running).not.toBeNull();
-  await vi.waitFor(() => expect(gates).toHaveLength(1)); // the queued one took the slot
+  await vi.waitFor(() => expect(gates).toHaveLength(1), { timeout: 10_000 }); // the queued one took the slot
   expect((await cache.get('http://a/1.png'))?.contentType).toBe('image/png'); // on disk: no wait
   gates.shift()!();
   expect(await queued).not.toBeNull();
+}, 20_000);
+
+test.each([
+  ['times out', () => new Promise<Response>(() => undefined)],
+  ['answers with a non-image', () => Promise.resolve(new Response('<html>', { headers: { 'content-type': 'text/html' } }))],
+])('a fetch that %s frees its slot, and the queue goes first come first served', async (_name, first) => {
+  const started: string[] = [];
+  const fetchFn = ((url: string, init: RequestInit) => {
+    started.push(url);
+    if (url.endsWith('/1.png')) {
+      return new Promise<Response>((resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+        void first().then(resolve);
+      });
+    }
+    return Promise.resolve(new Response(PNG, { headers: { 'content-type': 'image/png' } }));
+  }) as unknown as typeof fetch;
+  const cache = createLogoCache({ dir, now, fetchFn, maxConcurrent: 1, timeoutMs: 50 });
+  const lookedUp = watchLookups();
+  const results = [cache.get('http://a/1.png')];
+  await vi.waitFor(() => expect(started).toEqual(['http://a/1.png']), { timeout: 10_000 });
+  results.push(cache.get('http://a/2.png'));
+  await lookedUp(2); // 2 is queued before 3 arrives
+  results.push(cache.get('http://a/3.png'));
+  await lookedUp(3);
+  const [one, two, three] = await Promise.all(results);
+  expect(one).toBeNull();
+  expect(two).not.toBeNull();
+  expect(three).not.toBeNull();
+  expect(started).toEqual(['http://a/1.png', 'http://a/2.png', 'http://a/3.png']);
+}, 20_000);
+
+test('the size cap leaves young temp files alone', async () => {
+  const cache = createLogoCache({ dir, now, ttlMs: 10_000, maxCacheBytes: 50 });
+  put('writing.png.1.2.tmp', 100, 1000); // older than the logos, but under ten minutes
+  put('a.png', 100, 300);
+  put('b.png', 100, 200);
+  expect(await cache.sweep()).toEqual({ deleted: 2, bytes: 200 });
+  expect(files()).toEqual(['writing.png.1.2.tmp']);
 });

@@ -15,7 +15,9 @@ const PATTERNS: Record<TagPattern, RegExp> = {
   colon: /^([A-Z]{2,4}):\s+/i,
 };
 
-const FRIENDLY: Record<string, string> = {
+export const TAG_PATTERNS: readonly TagPattern[] = Object.keys(PATTERNS) as TagPattern[];
+
+const FRIENDLY:Record<string, string> = {
   UK: 'United Kingdom', US: 'United States', CA: 'Canada', FR: 'France', DE: 'Germany', ES: 'Spain',
   IT: 'Italy', NL: 'Netherlands', BE: 'Belgium', PT: 'Portugal', PL: 'Poland', TR: 'Turkey',
   GR: 'Greece', AU: 'Australia', NZ: 'New Zealand', EN: 'English',
@@ -30,7 +32,7 @@ export function tagOf(name: string, pattern: TagPattern | null): string | null {
 export function detectTagStyle(names: string[]): { style: TagStyle; pattern: TagPattern | null } {
   let best: TagPattern | null = null;
   let bestCount = 0;
-  for (const pattern of Object.keys(PATTERNS) as TagPattern[]) {
+  for (const pattern of TAG_PATTERNS) {
     const count = names.filter((n) => tagOf(n, pattern) !== null).length;
     if (count > bestCount) {
       best = pattern;

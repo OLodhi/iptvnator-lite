@@ -1,6 +1,6 @@
 import type { CurationCategory, CurationGroup, CurationUpdate, CurationView, Kind, TagStyle } from '@tv/shared';
 import type { Db } from '../db/db.ts';
-import { friendlyName, stripTag, tagOf } from './tags.ts';
+import { friendlyName, stripTag, TAG_PATTERNS, tagOf } from './tags.ts';
 import type { TagPattern } from './tags.ts';
 
 /** Sync's catch-all for items whose category the provider does not list; recreated as orphans come and go. */
@@ -56,29 +56,27 @@ function strip(name: string, tag: string, pattern: TagPattern): string {
 const tagRule = (rules: Rules, tag: string | null): boolean | undefined =>
   tag === null ? undefined : rules.tags.get(tag);
 
-function nameFn(pattern: TagPattern | null, resolved: Resolved<CategoryRow>[]): (name: string) => string {
+/**
+ * Category names lose the single visible tag under the kind's pattern. Item names may spell it differently
+ * (`|EN| Action` holds `EN - Title`), so they also try the other patterns; still only that one tag is stripped.
+ */
+function nameFns(
+  pattern: TagPattern | null,
+  resolved: Resolved<CategoryRow>[],
+): { displayName: (name: string) => string; itemName: (name: string) => string } {
   const tags = [...new Set(resolved.filter((c) => c.visible && c.tag !== null).map((c) => c.tag!))];
-  if (tags.length !== 1 || pattern === null) return (name) => name;
+  if (tags.length !== 1 || pattern === null) return { displayName: (name) => name, itemName: (name) => name };
   const tag = tags[0]!;
-  return (name) => strip(name, tag, pattern);
-}
-
-const ALL_PATTERNS: TagPattern[] = ['pipe', 'pipe-wrapped', 'bracket', 'dash', 'colon'];
-
-/** Item names may spell the tag differently from their categories (`|EN| Action` holds `EN - Title`); only that one tag is stripped. */
-function itemNameFn(pattern: TagPattern | null, resolved: Resolved<CategoryRow>[]): (name: string) => string {
-  const own = nameFn(pattern, resolved);
-  const tags = [...new Set(resolved.filter((c) => c.visible && c.tag !== null).map((c) => c.tag!))];
-  if (tags.length !== 1 || pattern === null) return own;
-  const tag = tags[0]!;
-  return (name) => {
-    const stripped = own(name);
+  const displayName = (name: string) => strip(name, tag, pattern);
+  const itemName = (name: string) => {
+    const stripped = displayName(name);
     if (stripped !== name) return stripped;
-    for (const other of ALL_PATTERNS) {
+    for (const other of TAG_PATTERNS) {
       if (other !== pattern && tagOf(name.trim(), other) === tag.toUpperCase()) return strip(name, tag, other);
     }
     return name;
   };
+  return { displayName, itemName };
 }
 
 const COLUMNS = `c.id AS id, c.remote_id AS remoteId, c.name AS name, c.tag AS tag, c.first_seen_at AS firstSeenAt,
@@ -160,8 +158,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
     return {
       visibleIds: new Set(resolved.filter((c) => c.visible).map((c) => c.id)),
       allVisible: resolved.length > 0 && resolved.every((c) => c.visible),
-      displayName: nameFn(rows[0]?.pattern ?? null, resolved),
-      itemName: itemNameFn(rows[0]?.pattern ?? null, resolved),
+      ...nameFns(rows[0]?.pattern ?? null, resolved),
       newCount: resolved.filter((c) => c.isNew).length,
     };
   }
@@ -191,7 +188,7 @@ export function createCurationService(deps: { db: Db; now: () => number }): Cura
       const style = rows[0]?.style ?? 'untagged';
       const pattern = rows[0]?.pattern ?? null;
       const resolved = resolve(providerId, kind, userId, rows);
-      const displayName = nameFn(pattern, resolved);
+      const { displayName } = nameFns(pattern, resolved);
       const tagRules = tagRulesFor(providerId, kind, userId);
       const groups = new Map<string, CurationGroup>();
       const untagged: CurationCategory[] = [];

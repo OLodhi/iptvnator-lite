@@ -77,5 +77,6 @@ test('503 with retry-after when the logo cache is busy', async () => {
   const res = await busy.inject('/logos/1');
   expect(res.statusCode).toBe(503);
   expect(res.headers['retry-after']).toBe('5');
+  expect(res.body).not.toContain('http://x');
   await busy.close();
 });

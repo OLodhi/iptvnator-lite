@@ -249,6 +249,7 @@ export function createLogoCache(deps: {
     kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
     for (const f of kept) {
       if (total <= maxCacheBytes) break;
+      if (f.file.endsWith('.tmp')) continue; // young ones may be mid-write
       if (await remove(f.file, f.size)) total -= f.size;
     }
     return { deleted, bytes };
