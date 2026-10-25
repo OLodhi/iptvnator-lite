@@ -1,4 +1,4 @@
-import type { GridRow, GuideMeta, GuideSource, GuideStatus, Page, Programme } from '@tv/shared';
+import type { GridRow, GuideMeta, GuideSource, GuideStatus, Page, Programme, WhatsOnEntry } from '@tv/shared';
 import { api } from './api.ts';
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -11,6 +11,13 @@ function query(params: Record<string, string | number | null | undefined>): stri
 }
 
 export const guideMeta = () => api<GuideMeta>('/api/guide');
+
+export function whatsOn(
+  p: { filter: string; mode: 'now' | 'range' | 'past'; from?: number; to?: number; cursor?: string | null; limit?: number },
+  signal?: AbortSignal,
+): Promise<Page<WhatsOnEntry>> {
+  return api<Page<WhatsOnEntry>>(`/api/guide/whats-on${query(p)}`, signal ? { signal } : undefined);
+}
 
 export function grid(
   p: { filter: string; from: number; to: number; cursor?: string | null },
