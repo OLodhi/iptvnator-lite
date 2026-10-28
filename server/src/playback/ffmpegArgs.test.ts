@@ -13,6 +13,7 @@ const copyTs: HlsPlan = {
   audio: { index: 1, action: 'copy' },
   deinterlace: false,
   tagHvc1: false,
+  adtsToAsc: false,
   subtitle: null,
 };
 
@@ -87,6 +88,12 @@ test('hevc copy uses fmp4 segments and the hvc1 tag', () => {
   has(a, '-hls_segment_type', 'fmp4');
   has(a, '-hls_fmp4_init_filename', 'init.mp4');
   has(a, '-hls_segment_filename', 'O/seg_%05d.m4s');
+});
+
+test('aac copied into fmp4 is unwrapped from its ADTS frames', () => {
+  const plan: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, adtsToAsc: true };
+  has(buildFfmpegArgs({ ...base, plan }), '-bsf:a', 'aac_adtstoasc');
+  expect(buildFfmpegArgs({ ...base, plan: copyTs })).not.toContain('aac_adtstoasc');
 });
 
 test('aac audio transcode is stereo 160k and maps the chosen stream', () => {
@@ -202,6 +209,24 @@ test.skipIf(!ffmpeg)('real ffmpeg writes the fmp4 init segment inside outDir and
     const segs = playlist.split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('#'));
     expect(segs.length).toBeGreaterThan(0);
     for (const s of segs) expect(s).toMatch(/^seg_\d{5}\.m4s$/);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(!ffmpeg)('real ffmpeg copies the ADTS AAC of a TS source into fmp4 segments', () => {
+  const mkv = path.resolve(import.meta.dirname, '../../../tools/fake-xtream/media/hevc.mkv');
+  const outDir = mkdtempSync(path.join(tmpdir(), 'tv-ffargs-'));
+  try {
+    // A live channel's TS frames its AAC as ADTS, which the MP4 muxer refuses unwrapped ("Malformed AAC bitstream").
+    const input = path.join(outDir, 'in.ts');
+    const remux = spawnSync(ffmpeg!, ['-hide_banner', '-loglevel', 'error', '-i', mkv, '-c', 'copy', '-f', 'mpegts', input], { encoding: 'utf8', windowsHide: true });
+    expect(remux.status, remux.stderr).toBe(0);
+    const plan: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, adtsToAsc: true };
+    const r = spawnSync(ffmpeg!, buildFfmpegArgs({ ...base, url: input, plan, live: false, outDir }), { encoding: 'utf8', windowsHide: true });
+    expect(r.status, r.stderr).toBe(0);
+    const segs = readFileSync(path.join(outDir, 'index.m3u8'), 'utf8').split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('#'));
+    expect(segs.length).toBeGreaterThan(0);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

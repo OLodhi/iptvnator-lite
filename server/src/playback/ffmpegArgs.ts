@@ -82,8 +82,10 @@ export function buildFfmpegArgs(input: FfmpegInput): string[] {
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-g', '48', '-sc_threshold', '0');
     if (plan.deinterlace) args.push('-vf', 'yadif=mode=0');
   }
-  if (plan.audio?.action === 'copy') args.push('-c:a', 'copy');
-  else if (plan.audio?.action === 'aac') args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2');
+  if (plan.audio?.action === 'copy') {
+    args.push('-c:a', 'copy');
+    if (plan.adtsToAsc) args.push('-bsf:a', 'aac_adtstoasc');
+  } else if (plan.audio?.action === 'aac') args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2');
   if (subtitle) {
     args.push('-c:s', 'webvtt');
     if (plan.video === 'copy') args.push('-b:v', NOMINAL_VIDEO_BITRATE);

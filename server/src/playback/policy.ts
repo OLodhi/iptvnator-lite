@@ -8,6 +8,11 @@ export type HlsPlan = {
   audio: { index: number; action: 'copy' | 'aac' } | null;
   deinterlace: boolean;
   tagHvc1: boolean;
+  /**
+   * AAC copied into fMP4 goes through FFmpeg's aac_adtstoasc: a live TS frames it as ADTS, which the MP4 muxer refuses.
+   * Raw AAC (from an MKV, say) passes through unchanged. The filter takes AAC only.
+   */
+  adtsToAsc: boolean;
   /** A text subtitle stream, written as a WebVTT rendition beside the variant. */
   subtitle: { index: number } | null;
 };
@@ -62,6 +67,8 @@ export function choosePlan(
     audio: audio ? { index: audio.index, action: COPY_AUDIO.has(audio.codec) ? 'copy' : 'aac' } : null,
     deinterlace,
     tagHvc1: hevcCopy,
+    // AAC is always copied, so an AAC track in fMP4 is a copied one.
+    adtsToAsc: hevcCopy && audio?.codec === 'aac',
     subtitle: subtitle ? { index: subtitle.index } : null,
   };
 }

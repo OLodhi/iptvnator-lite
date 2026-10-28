@@ -1622,7 +1622,7 @@ const realFfmpeg = process.env.TV_FFMPEG_PATH;
 // Drives pruneSegments directly (as the session manager does after a relaunch), with two real FFmpeg runs.
 describe.skipIf(!realFfmpeg)('pruneSegments with real FFmpeg', () => {
   const media = (name: string) => join(import.meta.dirname, '../../../tools/fake-xtream/media', name);
-  const copyTs: HlsPlan = { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false, subtitle: null };
+  const copyTs: HlsPlan = { mode: 'hls', segment: 'ts', video: 'copy', audio: { index: 1, action: 'copy' }, deinterlace: false, tagHvc1: false, adtsToAsc: false, subtitle: null };
   const copyHevc: HlsPlan = { ...copyTs, segment: 'fmp4', tagHvc1: true, audio: null };
   const listed = (dir: string) =>
     readFileSync(join(dir, 'index.m3u8'), 'utf8')
