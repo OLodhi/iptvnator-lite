@@ -39,7 +39,7 @@ export function keepAwakeWhileMuted(video: HTMLVideoElement): () => void {
       if (wanted()) lock = got;
       else got.release().catch(() => {});
     } catch {
-      // Refused (Low Power Mode, say): the screen sleeps as it did. Asked again only on the next change.
+      // Refused: the screen sleeps as it did. Asked again only on the next change.
     } finally {
       requesting = false;
     }
