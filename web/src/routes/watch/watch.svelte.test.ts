@@ -1447,6 +1447,21 @@ test('movie info shows plot and genre', async () => {
   expect(document.querySelector('.switch')).toBeNull();
 });
 
+test('picture in picture is offered once the stream is open, when Safari only says so then', async () => {
+  me.itemDetails.mockResolvedValue(heatDetails);
+  route.url = new URL('http://localhost/watch?item=5&t=600');
+  serve(vodRes('m1'), movieItem());
+  app = mount(Watch, { target: document.body });
+  await vi.waitFor(() => expect(attachStream).toHaveBeenCalledTimes(1));
+  expect(buttonWith('Picture in picture')).toBeUndefined();
+
+  sys.pip = true; // Safari: a video with a stream loaded can go picture-in-picture
+  video().dispatchEvent(new Event('loadedmetadata'));
+  flushSync();
+  expect(actionTexts()).toContain('⧉Picture in picture');
+  expect(document.querySelector('.controls [aria-label="Picture in picture"]')).not.toBeNull();
+});
+
 test('HLS track pick restarts at the current position with audioIndex', async () => {
   const v = await playingMovie(vodRes('m1'));
   api.mockImplementation((path: string) =>

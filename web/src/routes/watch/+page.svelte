@@ -149,7 +149,12 @@
     return () => state.destroy();
   });
 
-  const caps = $derived(video ? { pip: canPip(video), airplay: canAirPlay() } : { pip: false, airplay: false });
+  /** Bumped as each stream opens: Safari says whether a video can go picture-in-picture only once one is loaded. */
+  let opened = $state(0);
+  const caps = $derived.by(() => {
+    void opened;
+    return video ? { pip: canPip(video), airplay: canAirPlay() } : { pip: false, airplay: false };
+  });
 
   // A restart on its way, or a stall while playing: a spinner over the video. Unlike the states that cover it, it takes
   // no taps, so Back, pause and the rest of the controls still work.
@@ -402,8 +407,9 @@
     else if (index !== null) void playback.restartWith(v, { audioIndex: index });
   }
 
-  /** A direct file is open: English audio, the remembered language's subtitles, and its tracks for the sheets. */
+  /** A stream is open. A direct file: English audio, the remembered language's subtitles, and its tracks for the sheets. */
   function onMetadata() {
+    opened++;
     if (!video || !vod || streamMode !== 'direct') return;
     applyNativeDefaults(video, rememberedLanguage());
     tracks = nativeTracks(video);
