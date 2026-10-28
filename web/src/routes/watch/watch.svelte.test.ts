@@ -1462,6 +1462,27 @@ test('picture in picture is offered once the stream is open, when Safari only sa
   expect(document.querySelector('.controls [aria-label="Picture in picture"]')).not.toBeNull();
 });
 
+test('a muted movie keeps the screen awake, and leaving the page lets go', async () => {
+  const lock = { released: false, release: async () => { lock.released = true; } };
+  const request = vi.fn(async () => lock);
+  Object.defineProperty(navigator, 'wakeLock', { value: { request }, configurable: true });
+  Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+  try {
+    await playingMovie(vodRes('m1'));
+    expect(request).not.toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('.controls [aria-label="Mute"]')!.click();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledWith('screen'));
+
+    unmount(app!);
+    app = undefined;
+    await vi.waitFor(() => expect(lock.released).toBe(true));
+  } finally {
+    delete (navigator as { wakeLock?: unknown }).wakeLock;
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+});
+
 test('HLS track pick restarts at the current position with audioIndex', async () => {
   const v = await playingMovie(vodRes('m1'));
   api.mockImplementation((path: string) =>

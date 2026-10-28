@@ -25,6 +25,7 @@
   import { createPlayerState, type PlayerState } from '$lib/player/state.svelte.ts';
   import { canAirPlay, canPip, setNowPlaying, showAirPlay, togglePip } from '$lib/player/system';
   import { rememberSubtitleLanguage, subtitleLanguage } from '$lib/player/trackPrefs';
+  import { keepAwakeWhileMuted } from '$lib/player/wakeLock';
   import { pickResume } from '$lib/resume';
   import { releaseSession, startHeartbeat } from '$lib/session';
   import { createChannelList } from '$lib/watch/channelList.svelte.ts';
@@ -264,6 +265,12 @@
       { title, artist: it.displayName, artworkUrl: poster ?? undefined },
       { play: resumePlayback, pause: pausePlayback, seekbackward: () => skip(-SKIP_SEC), seekforward: () => skip(SKIP_SEC) },
     );
+  });
+
+  // Safari keeps the screen on only while there is sound: muted, a wake lock does it instead.
+  $effect(() => {
+    if (!video) return;
+    return keepAwakeWhileMuted(video);
   });
 
   /** Plays the new stream. A browser that won't start it without a tap gets Tap to play. */
